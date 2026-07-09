@@ -42,3 +42,14 @@ Final response format:
 - Verification
 - Not verified
 - Risks or follow-ups
+
+延伸制度文件（按需查閱，不必每次全讀）：
+- 上面的 project-specific rules 是不可違反的底線；更完整的 hard constraints 與收納原則見 `docs/governance/B_AGENT_RULES_REWRITE.md`。
+- governance / review 判斷：`docs/governance/D_JUDGMENT_RUBRICS.md`、`docs/governance/I_GOVERNANCE_RISK_REVIEW.md`。
+- 派工 / 選模型 / 升降級：`docs/governance/C_MODEL_ROUTING_PLAYBOOK.md`、`docs/governance/E_DELEGATION_PROMPTS.md`。
+- 補強 validator（下一個 sprint 規格）：`docs/specs/J_REVIEW_DECISIONS_VALIDATION_SPEC.md`。
+- 實作 apply-review-decisions：`docs/specs/K_APPLY_REVIEW_DECISIONS_PREVIEW_SPEC.md`。
+- retrieval / citation 精準度：`docs/governance/L_RETRIEVAL_CITATION_ACCURACY_REVIEW.md`。
+- 修改制度文件本身、踩坑教訓寫回：`docs/governance/F_MAINTENANCE_PROTOCOL.md`、`docs/governance/LESSONS.md`。
+- 接手新 session、不知從何開始：`docs/governance/G_LETTER_TO_FUTURE_SESSIONS.md`、`docs/governance/Z_ONE_PAGE_SUMMARY.md`。
+- enum / governance 規則的 canonical source 是 code；文件與 code 不一致時以 code 為準並回報。
