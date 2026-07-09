@@ -387,6 +387,8 @@ def _fill_review_decisions(path: Path, uppercase_booleans: bool = False) -> None
     rows = _read_csv(path)
     for row in rows:
         row["review_decision"] = row["suggested_action"]
+        row["reviewer"] = "QA Reviewer"
+        row["reviewed_at"] = "2026-07-10"
         if uppercase_booleans:
             for column in [
                 "can_enter_vault",
