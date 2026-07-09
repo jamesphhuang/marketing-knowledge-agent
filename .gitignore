@@ -1,0 +1,38 @@
+# === Sensitive: NEVER commit real company / customer data ===
+# 真實不可公開客戶名單、preview JSON、人工決策 CSV 都在 reports/ 底下
+/reports/
+# 真實 Obsidian vault 設定
+.obsidian/
+# 開發用 vault(可能含真實或衍生內容);若要版控乾淨的 sample_vault，用 git add -f 明確加入
+/data/
+# 正式 / 原始 Excel workbook（生產資料）
+*.xlsx
+*.xlsm
+
+# === Secrets ===
+.env
+*.env
+client_secret*.json
+token*.json
+oauth*.json
+*.pem
+*.key
+
+# === Local index / build / cache ===
+.mka/
+*.sqlite
+*.sqlite3
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.pycache/
+
+# === OS / editor ===
+.DS_Store
+._*
+*.swp
+.idea/
+.vscode/

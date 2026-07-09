@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marketing-knowledge-agent"
+version = "0.1.0"
+description = "Offline RAG prototype for an Obsidian Markdown marketing knowledge vault."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pydantic>=1.10,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+]
+
+[project.scripts]
+mka = "marketing_knowledge_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
