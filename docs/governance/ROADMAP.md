@@ -20,7 +20,7 @@ Excel 匯入(對正式檔驗證)→ 人工審核簽核流程 → J validation �
 ## Stage 2:查詢閘門(GR-9 關閉)
 
 - **目標**:系統能區分 internal / external 用途並據此過濾;拒答規則上線。
-- **依據**:L 文件 §1.1(SearchFilters.intent)、§1.9(abstention)、§1.12(eval cases)。
+- **Spec**:`docs/specs/P_QUERY_GATING_SPEC.md`(2026-07-10 已寫)。依據:L 文件 §1.1/§1.5/§1.9/§1.12。
 - **前置**:Stage 1。
 - **完成判準**:EV-G1~G6 全綠;external intent 下 pending_metric / can_quote=false / 缺 channel 的資料檢索不到;denylist 品牌查詢走統一拒答模板。
 
@@ -34,7 +34,7 @@ Excel 匯入(對正式檔驗證)→ 人工審核簽核流程 → J validation �
 ## Stage 4:Slack 介面(終點)
 
 - **目標**:Slack bot 對話取用。
-- **Spec 檔名**:`docs/specs/P_SLACK_INTERFACE_SPEC.md`(未寫;寫 spec 前先取得下列裁決)。
+- **Spec 檔名**:`docs/specs/S_SLACK_INTERFACE_SPEC.md`(未寫;寫 spec 前先取得下列裁決;原編號 P 讓給 Stage 2)。
 - **前置**:Stage 3。
 - **需使用者裁決(政策,非技術)**:
   | # | 問題 | 說明 |
