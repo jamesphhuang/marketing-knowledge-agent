@@ -53,4 +53,5 @@ Final response format:
 - retrieval / citation 精準度：`docs/governance/L_RETRIEVAL_CITATION_ACCURACY_REVIEW.md`。
 - 修改制度文件本身、踩坑教訓寫回：`docs/governance/F_MAINTENANCE_PROTOCOL.md`、`docs/governance/LESSONS.md`。
 - 接手新 session、不知從何開始：`docs/governance/G_LETTER_TO_FUTURE_SESSIONS.md`、`docs/governance/Z_ONE_PAGE_SUMMARY.md`。
+- 專案階段路線圖(終點=Slack 對話取用;各階段依賴與跳關禁令)：`docs/governance/ROADMAP.md`。
 - enum / governance 規則的 canonical source 是 code；文件與 code 不一致時以 code 為準並回報。
