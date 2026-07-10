@@ -52,11 +52,7 @@ class ReviewTemplateError(ValueError):
 
 def generate_review_template(preview_dir: Path, output_path: Path, summary_output_path: Path) -> dict:
     preview = load_preview_records(preview_dir)
-    rows: List[dict] = []
-    rows.extend(_merchant_review_rows(preview["merchant_cases"]))
-    rows.extend(_restricted_customer_review_rows(preview["restricted_customers"]))
-    rows.extend(_public_metric_review_rows(preview["public_metrics"]))
-    rows.extend(_pending_metric_review_rows(preview["pending_metrics"]))
+    rows = build_expected_review_rows(preview)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     summary_output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,6 +67,15 @@ def generate_review_template(preview_dir: Path, output_path: Path, summary_outpu
     )
     summary_output_path.write_text(render_review_summary(summary), encoding="utf-8")
     return summary
+
+
+def build_expected_review_rows(preview: Dict[str, List[dict]]) -> List[dict]:
+    rows: List[dict] = []
+    rows.extend(_merchant_review_rows(preview["merchant_cases"]))
+    rows.extend(_restricted_customer_review_rows(preview["restricted_customers"]))
+    rows.extend(_public_metric_review_rows(preview["public_metrics"]))
+    rows.extend(_pending_metric_review_rows(preview["pending_metrics"]))
+    return rows
 
 
 def load_preview_records(preview_dir: Path) -> Dict[str, List[dict]]:

@@ -35,6 +35,7 @@
 | `enrich_metadata` | Add missing handle, category, or other metadata. | Re-review after enrichment if needed. |
 | `keep_all_records` | Preserve multi-interview records. | Do not dedupe solely by brand or handle. |
 | `manual_review` | Requires human investigation. | No automatic action. |
+| `review_identity_mapping` | 語意待使用者確認 (GR-11); 暫按需人工調查的 handle 身分確認處理。 | No automatic action before identity review. |
 | `deprecated` | Record is retained for history but should not be used as current source. | Warning required; no external quote unless explicitly approved. |
 
 ## Prohibited Behavior

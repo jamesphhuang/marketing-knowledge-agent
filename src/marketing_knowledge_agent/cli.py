@@ -213,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate_decisions_parser.add_argument(
         "--output",
         type=Path,
-        default=Path("reports/excel_preview/review_decisions_validation.md"),
+        default=Path("reports/excel_preview/review_decisions_validation_summary.md"),
     )
     validate_decisions_parser.add_argument("--preview-dir", type=Path, default=Path("reports/excel_preview"))
 
