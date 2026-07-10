@@ -207,6 +207,7 @@ def execute_sync_plan(
                 if action == "will_update" and entry.get("current_vault_path"):
                     target_path = _safe_namespace_path(namespace_path, entry["current_vault_path"])
                 _atomic_write_text(target_path, synced_content)
+                _assert_written_checksum(target_path, checksum)
                 manifest["actions"].append(
                     {
                         "action": action,
@@ -448,10 +449,18 @@ def _yaml_lines(key: str, value) -> List[str]:
     if isinstance(value, list):
         if not value:
             return [f"{key}: []"]
-        return [f"{key}:"] + [f"  - {json.dumps(item, ensure_ascii=False)}" for item in value]
+        return [f"{key}:"] + [f"  - {_yaml_scalar(item)}" for item in value]
     if isinstance(value, dict):
         return [f"{key}: {json.dumps(value, ensure_ascii=False, sort_keys=True)}"]
-    return [f"{key}: {json.dumps(value, ensure_ascii=False)}"]
+    return [f"{key}: {_yaml_scalar(value)}"]
+
+
+def _yaml_scalar(value) -> str:
+    if isinstance(value, str):
+        if "\n" in value or "\r" in value:
+            raise ObsidianSyncError("metadata values with literal newlines cannot be rendered safely")
+        return f"'{value}'"
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _assert_apply_summary_safe(apply_dir: Path) -> None:
@@ -502,6 +511,17 @@ def _assert_denylist_final_gate(plan: dict, apply_dir: Path, governance_index: G
 def _assert_text_not_restricted(text: str, governance_index: GovernanceIndex, context: str) -> None:
     if governance_index.check_text(text).blocked:
         raise ObsidianSyncError(f"{context} rejected a restricted source")
+
+
+def _assert_written_checksum(path: Path, expected_checksum: str) -> None:
+    content = path.read_text(encoding="utf-8")
+    metadata, _ = parse_markdown_with_frontmatter(content)
+    stored_checksum = metadata.get("content_checksum")
+    actual_checksum = _content_checksum(content)
+    if stored_checksum != expected_checksum:
+        raise ObsidianSyncError(f"checksum self-check failed for {path.name}: stored checksum mismatch")
+    if actual_checksum != expected_checksum:
+        raise ObsidianSyncError(f"checksum self-check failed for {path.name}: content checksum mismatch")
 
 
 def _backup_namespace(namespace_path: Path, backup_dir: Path) -> None:

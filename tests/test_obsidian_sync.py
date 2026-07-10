@@ -190,6 +190,55 @@ def test_cli_execute_without_confirm_returns_one(tmp_path):
     assert not (vault / "MKA" / "merchant_cases" / "merchant-a.md").exists()
 
 
+def test_roundtrip_preserves_backslash_and_quotes(tmp_path):
+    literal_note = 'GMV range\\n* only for written context with "quotes"'
+    nested_json = '{"文章": "暫時下架", "note": "literal\\ntext"}'
+    apply_dir = _write_apply_dir(
+        tmp_path / "apply",
+        [
+            _record(
+                "Merchant A",
+                1,
+                extra_frontmatter={
+                    "metric_note": literal_note,
+                    "restricted_note": 'Example "restricted" note\\nwith marker',
+                    "invalid_asset_values": nested_json,
+                },
+            )
+        ],
+    )
+    vault = _write_vault(tmp_path / "vault")
+    plan = create_sync_plan(apply_dir, vault, output_dir=tmp_path / "sync-1")
+
+    execute_sync_plan(plan["json_path"], vault, confirm=True)
+
+    second_plan = create_sync_plan(apply_dir, vault, output_dir=tmp_path / "sync-2")
+    assert second_plan["counts"]["conflict_user_edited"] == 0
+    assert second_plan["counts"]["unchanged"] == 1
+
+
+def test_execute_self_check_fails_on_checksum_mismatch(tmp_path, monkeypatch):
+    apply_dir = _write_apply_dir(tmp_path / "apply", [_record("Merchant A", 1)])
+    vault = _write_vault(tmp_path / "vault")
+    plan = create_sync_plan(apply_dir, vault, output_dir=tmp_path / "sync")
+
+    import marketing_knowledge_agent.obsidian_sync as sync_module
+
+    original = sync_module._atomic_write_text
+
+    def corrupt_vault_markdown(path, content):
+        resolved = Path(path).resolve()
+        if vault.resolve() in resolved.parents and resolved.suffix == ".md":
+            return original(path, content + "\ncorrupted after checksum\n")
+        return original(path, content)
+
+    monkeypatch.setattr(sync_module, "_atomic_write_text", corrupt_vault_markdown)
+    with pytest.raises(ObsidianSyncError, match="checksum"):
+        execute_sync_plan(plan["json_path"], vault, confirm=True)
+
+    assert not (vault / "MKA" / "merchant_cases" / "merchant-a.md").exists()
+
+
 def _write_vault(vault: Path) -> Path:
     (vault / ".obsidian").mkdir(parents=True, exist_ok=True)
     (vault / ".obsidian" / ".keep").write_text("", encoding="utf-8")
@@ -220,8 +269,8 @@ def _write_apply_dir(apply_dir: Path, records) -> Path:
     return apply_dir
 
 
-def _record(brand_name, source_row, body="clean content"):
-    return {
+def _record(brand_name, source_row, body="clean content", extra_frontmatter=None):
+    record = {
         "title": brand_name,
         "source_type": "database",
         "record_type": "merchant_case",
@@ -233,6 +282,9 @@ def _record(brand_name, source_row, body="clean content"):
         "merchant_handle": f"handle-{source_row}",
         "body": body,
     }
+    if extra_frontmatter:
+        record["extra_frontmatter"] = extra_frontmatter
+    return record
 
 
 def _markdown(record):
@@ -247,9 +299,8 @@ def _markdown(record):
         f"source_row: {record['source_row']}",
         f"brand_name: \"{record['brand_name']}\"",
         f"merchant_handle: \"{record['merchant_handle']}\"",
-        "---",
-        "",
-        record["body"],
-        "",
     ]
+    for key, value in (record.get("extra_frontmatter") or {}).items():
+        lines.append(f"{key}: '{value}'")
+    lines.extend(["---", "", record["body"], ""])
     return "\n".join(lines)
