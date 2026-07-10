@@ -157,7 +157,21 @@ def agentic_ask(
     results, observations = execute_plan(plan, db_path, search_fn, mode)
     ranked_results = _dedupe_results(results)[:limit]
     ranked_results, removed_count = filter_restricted_results(ranked_results, governance_index)
-    generated = generate_answer(question, ranked_results, citation_limit=min(3, limit))
+    internal_result_count = _internal_result_count(
+        question,
+        db_path,
+        search_fn,
+        filters,
+        limit,
+        mode,
+    ) if not ranked_results else 0
+    generated = generate_answer(
+        question,
+        ranked_results,
+        citation_limit=min(3, limit),
+        filters=filters,
+        internal_result_count=internal_result_count,
+    )
     _append_removal_warning(generated, removed_count)
     generated = apply_governance_to_answer(generated, governance_index)
     reflection = reflect_results(analysis, ranked_results, generated, filters)
@@ -397,6 +411,24 @@ def _dedupe_results(results: List[SearchResult]) -> List[SearchResult]:
 
 def _effective_score(result: SearchResult) -> float:
     return result.rerank_score or result.score
+
+
+def _internal_result_count(
+    question: str,
+    db_path: Path,
+    search_fn: SearchFn,
+    filters: SearchFilters,
+    limit: int,
+    mode: str,
+) -> int:
+    if filters.intent != "external":
+        return 0
+    internal_data = filters.as_dict()
+    internal_data["intent"] = "internal"
+    internal_filters = SearchFilters(**internal_data)
+    chunk_limit = max(limit, SQLiteIndex(Path(db_path)).counts()["chunks"])
+    results = search_fn(question, Path(db_path), internal_filters, chunk_limit, mode)
+    return len({result.chunk.document_id for result in results})
 
 
 def _unique_source_paths(results: List[SearchResult]) -> List[str]:

@@ -309,6 +309,7 @@ class Chunk(BaseModel):
 
 
 class SearchFilters(BaseModel):
+    intent: Literal["internal", "external"] = "internal"
     record_type: List[str] = Field(default_factory=list)
     source_type: List[str] = Field(default_factory=list)
     content_category: List[str] = Field(default_factory=list)
@@ -357,6 +358,12 @@ class SearchFilters(BaseModel):
     def normalize_filter_lists(cls, value: Any) -> List[str]:
         return _normalize_list(value)
 
+    @validator("intent", pre=True)
+    def normalize_intent(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
     def is_empty(self) -> bool:
         return not any(
             [
@@ -386,6 +393,7 @@ class SearchFilters(BaseModel):
 
     def as_dict(self) -> Dict[str, Any]:
         return {
+            "intent": self.intent,
             "record_type": self.record_type,
             "source_type": self.source_type,
             "content_category": self.content_category,

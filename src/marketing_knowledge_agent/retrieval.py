@@ -62,6 +62,8 @@ class SQLiteRetriever:
 def matches_filters(metadata: DocumentMetadata, filters: SearchFilters) -> bool:
     if metadata.record_type in NON_RETRIEVABLE_RECORD_TYPES:
         return False
+    if filters.intent == "external" and metadata.record_type == "pending_metric":
+        return False
     if filters.record_type and metadata.record_type not in filters.record_type:
         return False
     if filters.source_type and metadata.source_type not in filters.source_type:
