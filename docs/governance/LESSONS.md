@@ -20,3 +20,10 @@
 - 根因：mock vault 混有尚未完成 metadata backfill 的 showcase 檔；sample smoke 應使用 metadata 完整的 `data/sample_vault` 或測試臨時 vault。
 - 修正：本次 CLI smoke 改用 `data/sample_vault` 與 synthetic denylist。
 - 制度回饋：後續 smoke 指令若需要穩定 ingestion，優先使用 `data/sample_vault`；若要使用 `data/mock_vault`，需先完成 metadata backfill。
+
+## 2026-07-10 已填寫的 review CSV 曾整份遺失,且 re-run review-template 會覆蓋主檔
+- 情境:準備 apply 前置簽核時,發現 07-08 曾填好並通過驗證的 46 筆 decision CSV 在全機都找不到,磁碟上只剩空白 template。
+- 錯誤:人工填寫成果只存在單一工作檔;`mka review-template` 重跑會直接覆蓋同路徑檔案。
+- 根因:人工產物與機器產物共用同一個檔案路徑,且無備份紀律。
+- 修正:重新以群組批次審核完成 46 筆(reviewer=Admin, 2026-07-10);填寫後立即產生 `review_decisions_FILLED-YYYYMMDD.backup.csv` 副本。
+- 制度回饋:填寫完成的 decision CSV 必須立刻建立日期後綴備份;任何人重跑 review-template 前先確認主檔是否含人工內容(reviewer 欄非空 = 人工檔,禁止覆蓋)。建議未來 K sprint 或 template 工具加「偵測到 reviewer 非空即拒絕覆蓋」保險。
