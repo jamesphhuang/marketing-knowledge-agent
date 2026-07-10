@@ -27,3 +27,21 @@
 - 根因:人工產物與機器產物共用同一個檔案路徑,且無備份紀律。
 - 修正:重新以群組批次審核完成 46 筆(reviewer=Admin, 2026-07-10);填寫後立即產生 `review_decisions_FILLED-YYYYMMDD.backup.csv` 副本。
 - 制度回饋:填寫完成的 decision CSV 必須立刻建立日期後綴備份;任何人重跑 review-template 前先確認主檔是否含人工內容(reviewer 欄非空 = 人工檔,禁止覆蓋)。建議未來 K sprint 或 template 工具加「偵測到 reviewer 非空即拒絕覆蓋」保險。
+
+## 2026-07-10 K sprint 驗收:兩個流程教訓(非 code 錯誤)
+- 情境:K sprint(apply-review-decisions)驗收時發現兩個流程問題。
+- 問題 1:Codex force-add 了 `reports/reports/fable5_review_pack/ARCHITECTURE.md` 進版控,
+  繞過 gitignore 的 /reports/ 規則。該檔非敏感(架構 doc、無客戶資料),
+  已 git rm --cached 停止追蹤,不需 history purge。但顯示 agent 可能用 git add -f 繞過忽略規則。
+- 問題 2:K 分支在 skills commit(e178223)之前開,所以分支上沒有 .claude/skills/,
+  導致無法在分支上跑 accept-sprint;改為手動執行同等檢查。
+- 根因:(1) DoD「更新 ARCHITECTURE.md」被誤解——repo 無正規 ARCHITECTURE.md,
+  只有 review pack 巢狀副本,agent 就改+force-add 了那份;(2) 功能分支落後於 main 的工具。
+- 制度回饋:
+  1. 驗收時務必 `git ls-files reports/`(或掃 merge 的 create mode)確認沒有 reports/ 檔被 force-add
+     進版控——這次非敏感,但同樣手法可能塞進真實客戶資料。
+  2. 派工時若 DoD 涉及某文件,先確認該文件在 repo 正規位置存在;不存在就別讓 agent 亂找副本改。
+  3. 開功能分支前,先確認 main 的工具(.claude/skills/、docs)已在分支基底;
+     或驗收時從 main 的 worktree 跑 accept-sprint。
+  4. ARCHITECTURE.md 後續:repo 缺正規架構文件;要嘛建 docs/ARCHITECTURE.md,要嘛以
+     docs/governance/H_ARCHITECTURE_REVIEW.md 為準並移除 DoD 對 ARCHITECTURE.md 的要求。
