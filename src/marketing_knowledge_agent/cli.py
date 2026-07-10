@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .apply_review_decisions import ApplyReviewDecisionsError, apply_review_decisions
 from .backfill import generate_backfill_report
 from .evaluation import evaluate
 from .excel_preview import ExcelPreviewError, generate_excel_preview
@@ -121,6 +122,16 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0 if summary["error_count"] == 0 else 1
 
+        if args.command == "apply-review-decisions":
+            summary = apply_review_decisions(
+                decisions_path=args.decisions,
+                preview_dir=args.preview_dir,
+                output_dir=args.output,
+                include_clean_records=args.include_clean_records,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
     except IngestionError as exc:
         print(f"ingestion error: {exc}", file=sys.stderr)
         return 2
@@ -132,6 +143,9 @@ def main(argv=None) -> int:
         return 2
     except ReviewDecisionValidationError as exc:
         print(f"review decision validation error: {exc}", file=sys.stderr)
+        return 2
+    except ApplyReviewDecisionsError as exc:
+        print(f"apply review decisions error: {exc}", file=sys.stderr)
         return 2
     except FileNotFoundError as exc:
         print(f"file error: {exc}", file=sys.stderr)
@@ -216,6 +230,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("reports/excel_preview/review_decisions_validation_summary.md"),
     )
     validate_decisions_parser.add_argument("--preview-dir", type=Path, default=Path("reports/excel_preview"))
+
+    apply_decisions_parser = subparsers.add_parser(
+        "apply-review-decisions",
+        help="Apply reviewed decisions into preview-only Vault/governance outputs",
+    )
+    apply_decisions_parser.add_argument("--decisions", type=Path, required=True)
+    apply_decisions_parser.add_argument("--preview-dir", type=Path, default=Path("reports/excel_preview"))
+    apply_decisions_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/excel_preview/apply_preview"),
+    )
+    apply_decisions_parser.add_argument("--include-clean-records", action="store_true")
 
     return parser
 
