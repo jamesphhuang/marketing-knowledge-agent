@@ -36,3 +36,6 @@ __pycache__/
 *.swp
 .idea/
 .vscode/
+
+# 專案內 Obsidian vault(synced 內容含真實商家資料 + 使用者筆記,不進版控)
+/obsidian_vault/

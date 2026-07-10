@@ -128,13 +128,15 @@ exit codes:0=成功;1=需要確認/plan 有 conflict 待裁決;2=前置檢查失
 - 不自動清理備份
 - 不 sync 到 namespace 以外的任何 vault 位置
 
-## 8. 待使用者裁決(實作前必答,答案回填本節)
+## 8. 使用者裁決(已於 2026-07-10 全數確定)
 
-| # | 問題 | 觀察/建議 | 裁決 |
-| --- | --- | --- | --- |
-| a | **真實 vault 路徑是哪裡?** | 觀察:repo 根目錄本身有 `.obsidian/`——若 repo 就是 vault,namespace 會落在 repo 內(且必須加進 .gitignore);若正式公司 vault 在別處,請給路徑。這兩種情況的風險面不同,不能猜 | ＿＿＿ |
-| b | **namespace 目錄名?** | 建議 `MKA/`(短、明確、不易與現有筆記撞名) | ＿＿＿ |
-| c | **synced 檔被人工編輯後,下次 sync 的預設行為?** | 建議「保留人工版 + conflict 報告」(本 spec 預設);另一選項是「覆蓋,人工編輯應發生在 Excel 源頭」——更一致但會吃掉筆記 | ＿＿＿ |
+| # | 問題 | 裁決 |
+| --- | --- | --- |
+| a | **真實 vault 路徑** | `<repo>/obsidian_vault/`——使用者確認原本沒有 vault,已在專案內新建(獨立子資料夾,含 `.obsidian/` 與 `MKA/`)。**整個 `/obsidian_vault/` 已加入 .gitignore**(synced 內容含真實商家資料,不得進版控)。CLI 的 `--vault` 預設值即此路徑 |
+| b | **namespace 目錄名** | `MKA/` |
+| c | **synced 檔被人工編輯後的預設行為** | 保留人工版 + conflict 報告(本 spec 預設,維持) |
+
+註:repo 根目錄另有一個 6/24 留下的空殼 `.obsidian/`(當時用 Obsidian 開過專案資料夾的痕跡),與本 spec 無關;真正的 vault 是 `obsidian_vault/`。實作時前置檢查 §4.1.5 檢查的是 `--vault` 指向路徑下的 `.obsidian/`。
 
 ---
 
