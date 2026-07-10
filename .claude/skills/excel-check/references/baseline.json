@@ -1,0 +1,14 @@
+{
+  "baseline_source": "MKT 內容產出資料庫_店家_夥伴案例_對外數據-20260708.xlsx",
+  "verified_by": "Fable 5 session 2026-07-10",
+  "note": "計數是參考快照,不是硬性通過標準——新檔案本來就會有不同筆數。結構性檢查(0 validation errors、preflight 通過、無幻影列)才是硬門檻。計數用來提醒人類注意大幅變動。",
+  "sheet_counts": {
+    "商家夥伴案例資料庫": 120,
+    "「可公開」對外數據": 33,
+    "待確認數據": 7,
+    "「不可公開」客戶名單": 11,
+    "handle 比對": 91
+  },
+  "merchant_case_governance_risk_count": 17,
+  "how_to_update": "確認新基準正確後,把此檔的 sheet_counts 與 governance_risk 改成新值,並更新 baseline_source 與 verified_by。這是人工決定,skill 不會自動改。"
+}
