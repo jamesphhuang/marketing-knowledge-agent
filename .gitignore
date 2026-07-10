@@ -39,3 +39,6 @@ __pycache__/
 
 # 專案內 Obsidian vault(synced 內容含真實商家資料 + 使用者筆記,不進版控)
 /obsidian_vault/
+
+# LLM 設定(政策鑰匙由人工管理,不進版控)
+.mka/llm_config.json

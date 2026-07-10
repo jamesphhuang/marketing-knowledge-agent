@@ -28,9 +28,9 @@ Excel 匯入(對正式檔驗證)→ 人工審核簽核流程 → J validation �
 ## Stage 3:外部 LLM 接入
 
 - **目標**:自然語言理解與回答生成交給外部 LLM,governance 全部留在本地。
-- **依據**:H 文件 §8 五原則——record_type 資格在檢索層擋、LLM 輸出再過 denylist、can_quote/channel 在檢索前過濾、citation 由本地程式組裝(LLM 不產 citation 欄位)、warning 規則式不交 LLM。
-- **前置**:Stage 2(gating 是 blocker,GR-9 在此階段 likelihood 升為 high)。
-- **需使用者裁決**:LLM 供應商與資料處理政策(內部資料送外部 API 的公司政策確認)。
+- **Spec**:`docs/specs/Q_LLM_INTEGRATION_SPEC.md`(2026-07-10 已寫)。依據:H 文件 §8 五原則。
+- **前置**:Stage 2 ✅。
+- **政策狀態**:公司 AI 規範尚在確認中(2026-07-10)→ spec 以「雙鑰設定閘門」處理:預設 mock provider 完全離線;`data_policy_confirmed` + `allow_internal_data_to_llm` 兩鑰皆需人工開啟,未開啟前程式強制不外送任何資料。開發與政策確認可平行進行,政策落地後改設定即啟用(手續見 spec §7)。
 
 ## Stage 4:Slack 介面(終點)
 

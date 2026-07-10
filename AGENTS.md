@@ -51,7 +51,8 @@ Final response format:
 - 實作 apply-review-decisions（已完成 2026-07-10）：`docs/specs/K_APPLY_REVIEW_DECISIONS_PREVIEW_SPEC.md`。
 - Obsidian sync（已完成 2026-07-10,首批 13 篇已同步）：`docs/specs/N_OBSIDIAN_SYNC_SPEC.md`。
 - Content index 建置（已完成 2026-07-10,ROADMAP Stage 1）：`docs/specs/O_CONTENT_INDEX_SPEC.md`。
-- Query gating（下一個 sprint,ROADMAP Stage 2）：`docs/specs/P_QUERY_GATING_SPEC.md`。
+- Query gating（已完成 2026-07-10,ROADMAP Stage 2）：`docs/specs/P_QUERY_GATING_SPEC.md`。
+- 外部 LLM 接入（下一個 sprint,ROADMAP Stage 3,雙鑰閘門設計）：`docs/specs/Q_LLM_INTEGRATION_SPEC.md`。
 - retrieval / citation 精準度：`docs/governance/L_RETRIEVAL_CITATION_ACCURACY_REVIEW.md`。
 - 修改制度文件本身、踩坑教訓寫回：`docs/governance/F_MAINTENANCE_PROTOCOL.md`、`docs/governance/LESSONS.md`。
 - 接手新 session、不知從何開始：`docs/governance/G_LETTER_TO_FUTURE_SESSIONS.md`、`docs/governance/Z_ONE_PAGE_SUMMARY.md`。
