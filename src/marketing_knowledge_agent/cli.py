@@ -15,6 +15,15 @@ from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, agent_ask, ask_index, i
 from .retrieval import result_to_dict
 from .review_template import ReviewTemplateError, generate_review_template
 from .review_decision_validation import ReviewDecisionValidationError, validate_review_decisions
+from .obsidian_sync import (
+    DEFAULT_NAMESPACE,
+    DEFAULT_OBSIDIAN_VAULT,
+    DEFAULT_SYNC_OUTPUT,
+    ObsidianSyncError,
+    create_sync_plan,
+    execute_sync_plan,
+    rollback_sync,
+)
 from .validation import validate_vault
 
 
@@ -132,6 +141,30 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "sync-obsidian":
+            if args.sync_action == "plan":
+                plan = create_sync_plan(
+                    apply_dir=args.apply_dir,
+                    vault_path=args.vault,
+                    namespace=args.namespace,
+                    output_dir=DEFAULT_SYNC_OUTPUT,
+                )
+                _print_sync_summary(plan)
+                return 1 if _plan_has_conflicts(plan) else 0
+            if args.sync_action == "execute":
+                result = execute_sync_plan(
+                    plan_path=args.plan,
+                    vault_path=args.vault,
+                    confirm=args.confirm,
+                    allow_conflicts_skip=args.allow_conflicts_skip,
+                )
+                _print_sync_summary(result)
+                return 1 if result.get("requires_confirmation") else 0
+            if args.sync_action == "rollback":
+                result = rollback_sync(batch_id=args.batch, vault_path=args.vault, output_dir=DEFAULT_SYNC_OUTPUT)
+                _print_sync_summary(result)
+                return 0
+
     except IngestionError as exc:
         print(f"ingestion error: {exc}", file=sys.stderr)
         return 2
@@ -146,6 +179,9 @@ def main(argv=None) -> int:
         return 2
     except ApplyReviewDecisionsError as exc:
         print(f"apply review decisions error: {exc}", file=sys.stderr)
+        return 2
+    except ObsidianSyncError as exc:
+        print(f"obsidian sync error: {exc}", file=sys.stderr)
         return 2
     except FileNotFoundError as exc:
         print(f"file error: {exc}", file=sys.stderr)
@@ -244,6 +280,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apply_decisions_parser.add_argument("--include-clean-records", action="store_true")
 
+    sync_parser = subparsers.add_parser(
+        "sync-obsidian",
+        help="Plan, execute, or rollback preview-only content sync into an Obsidian namespace",
+    )
+    sync_subparsers = sync_parser.add_subparsers(dest="sync_action", required=True)
+
+    sync_plan_parser = sync_subparsers.add_parser("plan", help="Create a read-only Obsidian sync plan")
+    sync_plan_parser.add_argument("--apply-dir", type=Path, required=True)
+    sync_plan_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    sync_plan_parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
+
+    sync_execute_parser = sync_subparsers.add_parser("execute", help="Execute a confirmed Obsidian sync plan")
+    sync_execute_parser.add_argument("--plan", type=Path, required=True)
+    sync_execute_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    sync_execute_parser.add_argument("--confirm", action="store_true")
+    sync_execute_parser.add_argument("--allow-conflicts-skip", action="store_true")
+
+    sync_rollback_parser = sync_subparsers.add_parser("rollback", help="Rollback a previous Obsidian sync batch")
+    sync_rollback_parser.add_argument("--batch", required=True)
+    sync_rollback_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+
     return parser
 
 
@@ -327,6 +384,22 @@ def _print_answer(answer) -> None:
         print("\nWarnings:")
         for warning in answer.warnings:
             print(f"- {warning}")
+
+
+def _plan_has_conflicts(payload: dict) -> bool:
+    counts = payload.get("counts", {})
+    return bool(counts.get("conflict_user_edited", 0) or counts.get("conflict_unmanaged", 0))
+
+
+def _print_sync_summary(payload: dict) -> None:
+    summary = {
+        key: payload[key]
+        for key in ("status", "requires_confirmation", "json_path", "markdown_path", "manifest_path", "batch_id", "counts")
+        if key in payload
+    }
+    if "message" in payload:
+        summary["message"] = payload["message"]
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 def _date_arg(value: str):

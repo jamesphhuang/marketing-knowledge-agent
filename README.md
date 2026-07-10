@@ -365,7 +365,7 @@ excel-preview
 → sync to Obsidian / build formal content index
 ```
 
-目前已實作 `excel-preview`、`review-template` 與 `validate-review-decisions`。`apply-review-decisions` 是下一階段，本階段尚未實作。
+目前已實作 `excel-preview`、`review-template`、`validate-review-decisions`、`apply-review-decisions` 與 `sync-obsidian`。`sync-obsidian` 的 execute 只接受已人工確認的 plan，且仍不建立正式 content index。
 
 產生人工審核 CSV：
 
@@ -383,6 +383,27 @@ excel-preview
 - 不建立正式 content index。
 - 不套用任何人工審核決策。
 - `review_decision`、`reviewer`、`reviewed_at` 預設留空，必須由人工填寫。
+
+### Obsidian Sync Workflow
+
+`sync-obsidian` 是 apply preview 經人工確認後的最後一步，預設只產生 plan；它只會讀寫 `obsidian_vault/MKA/` namespace，不會修改 `.obsidian/` 或 namespace 外檔案。
+
+```bash
+.venv/bin/mka sync-obsidian plan \
+  --apply-dir reports/excel_preview/apply_preview \
+  --vault obsidian_vault
+
+.venv/bin/mka sync-obsidian execute \
+  --plan reports/obsidian_sync/sync_plan_<timestamp>.json \
+  --vault obsidian_vault \
+  --confirm
+
+.venv/bin/mka sync-obsidian rollback \
+  --batch <batch_id> \
+  --vault obsidian_vault
+```
+
+執行前會重新驗證 `plan_state_hash`、apply preview 安全斷言與 restricted denylist；managed 檔案更新前會備份，移除只會 archive，不會 delete。人工編輯過的 managed 檔案與未管理檔案會列為 conflict，預設不覆蓋。
 
 審核原則：
 
