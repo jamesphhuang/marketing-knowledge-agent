@@ -17,12 +17,13 @@ Excel 匯入(對正式檔驗證)→ 人工審核簽核流程 → J validation �
 - **結果**:真實 vault 13 掃描 / 12 索引 / 1 vault_only 排除;四項安全斷言 + 毒針測試通過;`mka ask` 對 `.mka/content_index.sqlite` 可回答且 citation 含完整溯源。
 - **殘留**:L 文件 EV-G1~G6 governance eval 尚未自動化,歸入 Stage 2 一併做(gating 上線時本來就要跑)。
 
-## Stage 2:查詢閘門(GR-9 關閉)
+## Stage 2:查詢閘門(GR-9 關閉) ✅(2026-07-10 完成)
 
 - **目標**:系統能區分 internal / external 用途並據此過濾;拒答規則上線。
-- **Spec**:`docs/specs/P_QUERY_GATING_SPEC.md`(2026-07-10 已寫)。依據:L 文件 §1.1/§1.5/§1.9/§1.12。
+- **Spec**:`docs/specs/P_QUERY_GATING_SPEC.md`(2026-07-10 已實作)。依據:L 文件 §1.1/§1.5/§1.9/§1.12。
 - **前置**:Stage 1。
-- **完成判準**:EV-G1~G6 全綠;external intent 下 pending_metric / can_quote=false / 缺 channel 的資料檢索不到;denylist 品牌查詢走統一拒答模板。
+- **結果**:EV-G1~G6 全綠；internal / external 查詢共用 `pipeline.search_index` gating 收口；真實 index smoke 為 internal 12 / external 7；denylist 查詢在檢索前統一拒答且 audit 不記查詢原文；無結果會顯示實際 filters。
+- **殘留**:Stage 3 接 LLM 後，LLM 輸出仍須再過 denylist（H §8），並重新驗證 GR-9。
 
 ## Stage 3:外部 LLM 接入
 

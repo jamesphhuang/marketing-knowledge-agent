@@ -17,7 +17,15 @@ from .evaluation import evaluate
 from .excel_preview import ExcelPreviewError, generate_excel_preview
 from .ingestion import IngestionError
 from .models import SearchFilters
-from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, agent_ask, ask_index, ingest_vault, search_index
+from .pipeline import (
+    DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    agent_ask,
+    ask_index,
+    ingest_vault,
+    resolve_governance_index,
+    search_index,
+)
+from .query_gating import precheck_restricted_query
 from .retrieval import result_to_dict
 from .review_template import ReviewTemplateError, generate_review_template
 from .review_decision_validation import ReviewDecisionValidationError, validate_review_decisions
@@ -49,6 +57,11 @@ def main(argv=None) -> int:
 
         if args.command == "search":
             filters = _filters_from_args(args)
+            governance_index, _ = resolve_governance_index(None, args.restricted_customers)
+            refused = precheck_restricted_query(args.query, governance_index, command="search")
+            if refused is not None:
+                print(refused.answer)
+                return 0
             results = search_index(
                 args.query,
                 db_path=args.db,
@@ -232,6 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser = subparsers.add_parser("search", help="Search indexed marketing knowledge")
     search_parser.add_argument("query")
     _add_retrieval_args(search_parser)
+    _add_governance_args(search_parser)
 
     ask_parser = subparsers.add_parser("ask", help="Generate a mock RAG answer with citations")
     ask_parser.add_argument("question")
@@ -338,6 +352,12 @@ def _add_retrieval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--mode", choices=["keyword", "vector", "hybrid"], default="hybrid")
+    parser.add_argument(
+        "--intent",
+        choices=["internal", "external"],
+        default="internal",
+        help="Query use: external = 只回可對外引用內容",
+    )
     parser.add_argument("--record-type", action="append", default=[])
     parser.add_argument("--source-type", action="append", default=[])
     parser.add_argument("--content-category", action="append", default=[])
@@ -372,6 +392,7 @@ def _add_governance_args(parser: argparse.ArgumentParser) -> None:
 
 def _filters_from_args(args: argparse.Namespace) -> SearchFilters:
     return SearchFilters(
+        intent=args.intent,
         record_type=args.record_type,
         source_type=args.source_type,
         content_category=args.content_category,

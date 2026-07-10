@@ -48,7 +48,7 @@ def test_restricted_customer_is_governance_table_not_search_citation(tmp_path):
     assert answer.citations == []
 
 
-def test_agent_ask_warns_and_redacts_restricted_customer_match(tmp_path):
+def test_agent_ask_redacts_body_mention_when_query_is_clean(tmp_path):
     db_path = _build_index(
         tmp_path,
         [
@@ -62,7 +62,7 @@ def test_agent_ask_warns_and_redacts_restricted_customer_match(tmp_path):
     governance_index = GovernanceIndex([RestrictedCustomerRecord(brand_name="Secret Brand")])
 
     answer = agent_ask(
-        "請整理 Secret Brand campaign result",
+        "請整理 campaign result",
         db_path=db_path,
         governance_index=governance_index,
     )
@@ -73,7 +73,7 @@ def test_agent_ask_warns_and_redacts_restricted_customer_match(tmp_path):
     assert "[restricted customer]" in answer.answer
 
 
-def test_cli_ask_blocks_restricted_brand_in_content(tmp_path, capsys):
+def test_cli_ask_drops_identity_hit_source_when_query_is_clean(tmp_path, capsys):
     vault = tmp_path / "vault"
     (vault / "blog").mkdir(parents=True)
     restricted_brand = "Restricted Brand Alpha"
@@ -99,7 +99,7 @@ source_path: "blog/restricted-brand-alpha.md"
     exit_code = main(
         [
             "ask",
-            restricted_brand,
+            "launch note",
             "--db",
             str(db_path),
             "--restricted-customers",

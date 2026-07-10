@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from .governance import metadata_governance_warnings
-from .models import Citation, GeneratedAnswer, NON_PUBLIC_STATUSES, SearchResult
+from .models import Citation, GeneratedAnswer, NON_PUBLIC_STATUSES, SearchFilters, SearchResult
+from .query_gating import MIN_RELEVANCE_SCORE, format_effective_filters
 
 
 def generate_answer(
@@ -12,13 +13,38 @@ def generate_answer(
     results: Iterable[SearchResult],
     citation_limit: int = 3,
     today: date = None,
+    filters: Optional[SearchFilters] = None,
+    internal_result_count: int = 0,
 ) -> GeneratedAnswer:
     today = today or date.today()
+    filters = filters or SearchFilters()
     selected = list(results)[:citation_limit]
     if not selected:
+        answer_lines = [
+            "找不到符合條件的 mock vault 內容。請放寬 metadata filter 或先重新建立 index。",
+            f"本次生效 filters：{format_effective_filters(filters)}。",
+        ]
+        if filters.intent == "external" and internal_result_count:
+            answer_lines.append(
+                f"有 {internal_result_count} 筆內部資料但無可對外引用版本,對外使用需人工核准。"
+            )
         return GeneratedAnswer(
             question=question,
-            answer="找不到符合條件的 mock vault 內容。請放寬 metadata filter 或先重新建立 index。",
+            answer="\n".join(answer_lines),
+            citations=[],
+            warnings=[],
+        )
+
+    if _effective_score(selected[0]) < MIN_RELEVANCE_SCORE:
+        closest_titles = []
+        for result in selected[:3]:
+            title = result.chunk.metadata.title
+            if title not in closest_titles:
+                closest_titles.append(title)
+        return GeneratedAnswer(
+            question=question,
+            answer="相關度不足，未產生事實性回答。最接近的內容：\n"
+            + "\n".join(f"- {title}" for title in closest_titles),
             citations=[],
             warnings=[],
         )
@@ -96,3 +122,7 @@ def _snippet(text: str, max_length: int = 260) -> str:
     if len(compact) <= max_length:
         return compact
     return f"{compact[: max_length - 1].rstrip()}..."
+
+
+def _effective_score(result: SearchResult) -> float:
+    return result.rerank_score or result.score
