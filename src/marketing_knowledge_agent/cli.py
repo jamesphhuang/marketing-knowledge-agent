@@ -7,6 +7,12 @@ from pathlib import Path
 
 from .apply_review_decisions import ApplyReviewDecisionsError, apply_review_decisions
 from .backfill import generate_backfill_report
+from .content_index import (
+    DEFAULT_CONTENT_INDEX_DB,
+    DEFAULT_CONTENT_INDEX_REPORT_DIR,
+    ContentIndexError,
+    build_content_index,
+)
 from .evaluation import evaluate
 from .excel_preview import ExcelPreviewError, generate_excel_preview
 from .ingestion import IngestionError
@@ -165,6 +171,17 @@ def main(argv=None) -> int:
                 _print_sync_summary(result)
                 return 0
 
+        if args.command == "build-content-index":
+            summary = build_content_index(
+                vault_path=args.vault,
+                namespace=args.namespace,
+                db_path=args.db,
+                report_dir=args.report_dir,
+                confirm=args.confirm,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return summary["exit_code"]
+
     except IngestionError as exc:
         print(f"ingestion error: {exc}", file=sys.stderr)
         return 2
@@ -182,6 +199,9 @@ def main(argv=None) -> int:
         return 2
     except ObsidianSyncError as exc:
         print(f"obsidian sync error: {exc}", file=sys.stderr)
+        return 2
+    except ContentIndexError as exc:
+        print(f"content index error: {exc}", file=sys.stderr)
         return 2
     except FileNotFoundError as exc:
         print(f"file error: {exc}", file=sys.stderr)
@@ -300,6 +320,16 @@ def build_parser() -> argparse.ArgumentParser:
     sync_rollback_parser = sync_subparsers.add_parser("rollback", help="Rollback a previous Obsidian sync batch")
     sync_rollback_parser.add_argument("--batch", required=True)
     sync_rollback_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+
+    content_index_parser = subparsers.add_parser(
+        "build-content-index",
+        help="Plan or build the formal SQLite content index from managed Obsidian content",
+    )
+    content_index_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    content_index_parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
+    content_index_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    content_index_parser.add_argument("--report-dir", type=Path, default=DEFAULT_CONTENT_INDEX_REPORT_DIR)
+    content_index_parser.add_argument("--confirm", action="store_true")
 
     return parser
 
