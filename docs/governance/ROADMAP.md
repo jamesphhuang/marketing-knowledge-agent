@@ -10,13 +10,12 @@
 
 Excel 匯入(對正式檔驗證)→ 人工審核簽核流程 → J validation → K apply preview → N Obsidian sync(首批 13 篇已同步)。制度包、git、驗收儀式(accept-sprint)、excel-check skill 皆就緒。
 
-## Stage 1:Formal Content Index(下一個 sprint)
+## Stage 1:Formal Content Index ✅(2026-07-10 完成)
 
 - **目標**:approved 內容(vault 中 `can_enter_content_index=true` 的 managed 檔)建進正式 SQLite content index,可用 `mka search / ask` 檢索。
-- **前置**:無(可立即寫 spec)。
-- **Spec 檔名**:`docs/specs/O_CONTENT_INDEX_SPEC.md`(未寫)。
-- **設計要點(寫 spec 時展開)**:只索引 vault 的 MKA managed 檔;`_vault_only` 與 `can_enter_content_index=false` 必須排除;restricted/pending/handle_mapping 永不進入(檢索層既有 `NON_RETRIEVABLE_RECORD_TYPES` 防線保留);index 建立也走 plan→confirm 模式;重建冪等。
-- **完成判準**:`mka ask` 能對真實 13 篇回答並附完整 citation;governance eval(L 文件 EV-G1~G6)通過。
+- **Spec**:`docs/specs/O_CONTENT_INDEX_SPEC.md`(已實作,2026-07-10 merge f6b8e9c)。
+- **結果**:真實 vault 13 掃描 / 12 索引 / 1 vault_only 排除;四項安全斷言 + 毒針測試通過;`mka ask` 對 `.mka/content_index.sqlite` 可回答且 citation 含完整溯源。
+- **殘留**:L 文件 EV-G1~G6 governance eval 尚未自動化,歸入 Stage 2 一併做(gating 上線時本來就要跑)。
 
 ## Stage 2:查詢閘門(GR-9 關閉)
 
