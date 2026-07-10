@@ -45,3 +45,17 @@
      或驗收時從 main 的 worktree 跑 accept-sprint。
   4. ARCHITECTURE.md 後續:repo 缺正規架構文件;要嘛建 docs/ARCHITECTURE.md,要嘛以
      docs/governance/H_ARCHITECTURE_REVIEW.md 為準並移除 DoD 對 ARCHITECTURE.md 的要求。
+
+## 2026-07-10 N sprint:frontmatter round-trip bug——合成測試全綠、真實資料 2/13 出錯
+- 情境:Obsidian sync 驗收彩排(真實資料、vault 副本)發現 execute 剛寫完的檔,
+  零編輯 re-plan 即有 2 檔被誤判 conflict_user_edited。
+- 錯誤:frontmatter 寫入端對反斜線/引號轉義,parser 讀回不做反轉義——非互逆,
+  每輪 sync 轉義翻倍、checksum 永不匹配,該檔永久卡死不再更新。
+- 根因:97 個測試的 fixture 全是乾淨字元;真實資料的 metric_note 含字面 \n、
+  invalid_asset_values 含 JSON 引號,合成測試永遠碰不到。
+- 修正:序列化改為與 parser 嚴格互逆 + execute 新增逐檔「寫入後重讀重算 checksum」自檢
+  (mismatch → 整批失敗還原)。修復後同一彩排 13 unchanged / 0 conflict。
+- 制度回饋:(1) 任何「寫入後會再被讀回比對」的功能,測試 fixture 必須含
+  反斜線、引號、換行、巢狀 JSON 等髒字元;(2) 驗收彩排必須用真實資料跑完整
+  write→read 循環,不能只跑一次寫入;(3) 字串比對驗證 frontmatter 會因引號風格
+  誤報,驗 marker/欄位一律用 parser 解析後比對。
