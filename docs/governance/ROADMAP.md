@@ -25,12 +25,14 @@ Excel 匯入(對正式檔驗證)→ 人工審核簽核流程 → J validation �
 - **結果**:EV-G1~G6 全綠；internal / external 查詢共用 `pipeline.search_index` gating 收口；真實 index smoke 為 internal 12 / external 7；denylist 查詢在檢索前統一拒答且 audit 不記查詢原文；無結果會顯示實際 filters。
 - **殘留**:Stage 3 接 LLM 後，LLM 輸出仍須再過 denylist（H §8），並重新驗證 GR-9。
 
-## Stage 3:外部 LLM 接入
+## Stage 3:外部 LLM 接入 ✅(2026-07-11 程式完成，政策鑰匙維持關閉)
 
 - **目標**:自然語言理解與回答生成交給外部 LLM,governance 全部留在本地。
-- **Spec**:`docs/specs/Q_LLM_INTEGRATION_SPEC.md`(2026-07-10 已寫)。依據:H 文件 §8 五原則。
+- **Spec**:`docs/specs/Q_LLM_INTEGRATION_SPEC.md`(2026-07-11 已實作)。依據:H 文件 §8 五原則。
 - **前置**:Stage 2 ✅。
 - **政策狀態**:公司 AI 規範尚在確認中(2026-07-10)→ spec 以「雙鑰設定閘門」處理:預設 mock provider 完全離線;`data_policy_confirmed` + `allow_internal_data_to_llm` 兩鑰皆需人工開啟,未開啟前程式強制不外送任何資料。開發與政策確認可平行進行,政策落地後改設定即啟用(手續見 spec §7)。
+- **結果**:provider abstraction、Anthropic injectable transport、payload 最小化、dry-run、生成後 denylist、幻覺 citation label 檢查皆完成；全部測試與 smoke 均未呼叫真實外部 API。
+- **殘留**:公司政策確認、model 選定、API key 設定與首次真實呼叫驗收仍未執行；完成前外部 LLM 保持停用。
 
 ## Stage 4:Slack 介面(終點)
 

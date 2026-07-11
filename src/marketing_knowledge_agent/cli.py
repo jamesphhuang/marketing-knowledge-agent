@@ -16,6 +16,7 @@ from .content_index import (
 from .evaluation import evaluate
 from .excel_preview import ExcelPreviewError, generate_excel_preview
 from .ingestion import IngestionError
+from .llm import LLMError
 from .models import SearchFilters
 from .pipeline import (
     DEFAULT_RESTRICTED_CUSTOMERS_PATH,
@@ -82,6 +83,8 @@ def main(argv=None) -> int:
                 limit=args.limit,
                 mode=args.mode,
                 restricted_customers_path=args.restricted_customers,
+                provider_name=args.provider,
+                dry_run_llm=args.dry_run_llm,
             )
             _print_answer(answer)
             return 0
@@ -95,6 +98,8 @@ def main(argv=None) -> int:
                 limit=args.limit,
                 mode=args.mode,
                 restricted_customers_path=args.restricted_customers,
+                provider_name=args.provider,
+                dry_run_llm=args.dry_run_llm,
             )
             _print_answer(answer)
             if args.show_trace:
@@ -216,6 +221,9 @@ def main(argv=None) -> int:
     except ContentIndexError as exc:
         print(f"content index error: {exc}", file=sys.stderr)
         return 2
+    except LLMError as exc:
+        print(f"llm error: {exc}", file=sys.stderr)
+        return 2
     except FileNotFoundError as exc:
         print(f"file error: {exc}", file=sys.stderr)
         return 2
@@ -251,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser.add_argument("question")
     _add_retrieval_args(ask_parser)
     _add_governance_args(ask_parser)
+    _add_llm_args(ask_parser)
 
     agent_ask_parser = subparsers.add_parser(
         "agent-ask",
@@ -259,6 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_ask_parser.add_argument("question")
     _add_retrieval_args(agent_ask_parser)
     _add_governance_args(agent_ask_parser)
+    _add_llm_args(agent_ask_parser)
     agent_ask_parser.add_argument("--show-trace", action="store_true")
 
     evaluate_parser = subparsers.add_parser("evaluate", help="Run built-in prototype evaluation cases")
@@ -387,6 +397,22 @@ def _add_governance_args(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=DEFAULT_RESTRICTED_CUSTOMERS_PATH,
         help="Path to restricted customer denylist preview JSON",
+    )
+
+
+def _add_llm_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--provider",
+        choices=["mock", "anthropic"],
+        default="mock",
+        help="Text generation provider; mock keeps all processing offline",
+    )
+    parser.add_argument(
+        "--dry-run-llm",
+        "--show-llm-payload",
+        dest="dry_run_llm",
+        action="store_true",
+        help="Print the minimized LLM payload without calling any provider",
     )
 
 
