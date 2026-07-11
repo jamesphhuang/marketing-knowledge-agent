@@ -1,8 +1,8 @@
 # Marketing Knowledge Agent
 
-Marketing Knowledge Agent 是一個離線 Python RAG prototype，用來讀取 Obsidian Markdown Vault，讓使用者以自然語言搜尋公司 marketing 資源，並取得 citations、metadata 與資料新鮮度提醒。
+Marketing Knowledge Agent 是一個預設離線的 Python RAG prototype，用來讀取 Obsidian Markdown Vault，讓使用者以自然語言搜尋公司 marketing 資源，並取得 citations、metadata 與資料新鮮度提醒。
 
-第一階段只使用 mock data，不接正式公司資料、不呼叫外部 LLM，也不建立 Web UI。
+預設 `mock` provider 不呼叫外部 LLM。外部 provider 已具備雙鑰政策閘門；公司 AI 資料政策未確認前，程式會拒絕任何真實外送，也不建立 Web UI。
 
 ## 功能
 
@@ -15,6 +15,8 @@ Marketing Knowledge Agent 是一個離線 Python RAG prototype，用來讀取 Ob
 - mock RAG answer 必須附 citations。
 - 若來源 status 是 `archived`、`deprecated`、`draft`，回答會提醒不可直接對外引用。
 - `agent-ask` 提供離線 Agentic-lite 流程：query analysis、plan、internal tool calls、reflection 與 trace。
+- `internal` / `external` query intent 共用本地 gating；denylist 查詢在檢索前拒答。
+- LLM provider 預設為 `mock`；Anthropic 只有在人工設定雙鑰後才能啟用，citations 與 warnings 永遠由本地程式產生。
 - Metadata schema v0.2 支援 Excel 來源的 merchant case、public metric、pending metric、restricted customer denylist 與 handle mapping。
 - Restricted customer 與 handle mapping 是治理/正規化資料，不進一般向量檢索 citation。
 - 內建 mock vault 與 evaluation cases。
@@ -50,6 +52,40 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/mka agent-ask "比較 Product A 製造業 pricing case study 與 ROI blog" --product product-a --show-trace
+```
+
+### LLM 雙鑰政策閘門
+
+`.mka/llm_config.json` 已被 gitignore。API key 不得寫入設定檔，只能由環境變數提供。預設設定如下：
+
+```json
+{
+  "provider": "mock",
+  "model": null,
+  "data_policy_confirmed": false,
+  "allow_internal_data_to_llm": false
+}
+```
+
+- `data_policy_confirmed=false`：任何非 mock provider 都會在呼叫前被拒絕。
+- `allow_internal_data_to_llm=false`：payload 只保留 `data_classification=public` 的 chunks，並回報本地剔除數。
+- Anthropic model 沒有程式預設值，必須由人工在 config 指定。
+- `ANTHROPIC_API_KEY` 只從環境變數讀取，不會寫入設定、audit 或錯誤訊息。
+
+政策審查前可安全檢視完整最小化 payload；此指令不會建立 provider 或呼叫外部 API：
+
+```bash
+.venv/bin/mka ask "內容問題" \
+  --db .mka/content_index.sqlite \
+  --provider anthropic \
+  --dry-run-llm \
+  --restricted-customers reports/excel_preview/restricted_customers.json
+```
+
+未提供 `--provider` 時維持既有離線回答：
+
+```bash
+.venv/bin/mka ask "內容問題" --provider mock
 ```
 
 依曝光渠道篩選 public metric：
@@ -439,7 +475,7 @@ excel-preview
 - `indexing`：建立 SQLite documents/chunks/FTS tables 與 local embeddings。
 - `retrieval`：執行 keyword/vector/hybrid search 與 metadata filters。
 - `reranking`：依 metadata match、keyword match、freshness 做簡單重排。
-- `generation`：mock generator，輸出 citations、freshness note、status warnings。
+- `generation`：本地組裝 citations、freshness note、status warnings；LLM provider 只可生成回答文字。
 - `agentic`：離線 Agentic-lite orchestration，負責 query analysis、plan、工具執行與 reflection；不直接取代 retrieval/generation。
 - `evaluation`：內建 prototype evaluation cases。
 
@@ -449,7 +485,7 @@ excel-preview
 
 `mka agent-ask` 會先判斷問題是否需要多步流程。若是 simple lookup，會走 fast path 並重用 `ask`；若偵測到比較、跨來源整理、資料新鮮度或 status governance 意圖，會建立最多 4 步的 deterministic plan，呼叫內部 search / index stats 工具，再用 reflection 記錄引用數、來源多樣性與不可引用狀態。
 
-第一版 Agentic-lite 不呼叫外部 LLM、不使用 API key，也不自行改寫公司資料；它的主要用途是驗證 Agentic RAG 的系統骨架與可觀測 trace。
+Agentic-lite 預設使用 mock provider，不呼叫外部 LLM；即使切換 provider，query gating、payload 過濾、citations、warnings 與 denylist 後檢查仍留在本地。
 
 ## 後續方向
 

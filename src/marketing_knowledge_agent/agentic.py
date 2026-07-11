@@ -17,6 +17,7 @@ from .models import GeneratedAnswer, SearchFilters, SearchResult
 
 SearchFn = Callable[[str, Path, Optional[SearchFilters], int, str], List[SearchResult]]
 AskFn = Callable[[str, Path, Optional[SearchFilters], int, str], GeneratedAnswer]
+GenerationFn = Callable[..., GeneratedAnswer]
 
 STATUS_GOVERNANCE_KEYWORDS = (
     "不可直接對外引用",
@@ -134,6 +135,7 @@ def agentic_ask(
     limit: int = 5,
     mode: str = "hybrid",
     governance_index: Optional[GovernanceIndex] = None,
+    generation_fn: GenerationFn = generate_answer,
 ) -> AgenticAnswer:
     filters = filters or SearchFilters()
     analysis = analyze_question(question)
@@ -165,7 +167,7 @@ def agentic_ask(
         limit,
         mode,
     ) if not ranked_results else 0
-    generated = generate_answer(
+    generated = generation_fn(
         question,
         ranked_results,
         citation_limit=min(3, limit),

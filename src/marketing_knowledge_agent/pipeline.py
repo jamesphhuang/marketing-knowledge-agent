@@ -6,7 +6,6 @@ from typing import List, Optional, Tuple
 
 from .agentic import AgenticAnswer, AgentReflection, AgentTrace, QueryAnalysis, agentic_ask
 from .chunking import chunk_documents
-from .generation import generate_answer
 from .governance import (
     RESTRICTED_RESULT_REMOVAL_WARNING,
     GovernanceIndex,
@@ -16,6 +15,15 @@ from .governance import (
 )
 from .indexing import SQLiteIndex
 from .ingestion import load_documents
+from .llm import (
+    DEFAULT_LLM_CONFIG_PATH,
+    LLMConfig,
+    LLMError,
+    LLMProvider,
+    load_llm_config,
+    validate_provider_policy,
+)
+from .llm_generation import generate_answer_with_llm
 from .models import GeneratedAnswer, SearchFilters, SearchResult
 from .reranking import rerank_results
 from .retrieval import SQLiteRetriever
@@ -71,6 +79,12 @@ def ask_index(
     governance_index: Optional[GovernanceIndex] = None,
     restricted_customers_path: Optional[Path] = None,
     audit_log_path: Path = DEFAULT_QUERY_AUDIT_LOG,
+    provider_name: str = "mock",
+    llm_config_path: Path = DEFAULT_LLM_CONFIG_PATH,
+    llm_config: Optional[LLMConfig] = None,
+    llm_provider: Optional[LLMProvider] = None,
+    dry_run_llm: bool = False,
+    llm_audit_log_path: Path = Path("reports/audit_log.csv"),
 ) -> GeneratedAnswer:
     filters = filters or SearchFilters()
     governance_index, load_warning = resolve_governance_index(governance_index, restricted_customers_path)
@@ -83,14 +97,31 @@ def ask_index(
     if refused is not None:
         return refused
 
+    provider_name = _normalize_provider_name(provider_name)
+    resolved_llm_config = _resolve_llm_config(
+        provider_name,
+        dry_run_llm,
+        llm_config,
+        llm_config_path,
+    )
+    if provider_name != "mock" and not dry_run_llm:
+        validate_provider_policy(resolved_llm_config, provider_name)
+
     results = search_index(question, db_path=db_path, filters=filters, limit=limit, mode=mode)
     results, removed_count = filter_restricted_results(results, governance_index)
     internal_result_count = _internal_result_count(question, db_path, filters, limit, mode) if not results else 0
-    answer = generate_answer(
+    answer = generate_answer_with_llm(
         question,
         results,
         filters=filters,
+        provider_name=provider_name,
+        config=resolved_llm_config,
+        provider=llm_provider,
+        dry_run=dry_run_llm,
+        citation_limit=min(3, limit),
         internal_result_count=internal_result_count,
+        audit_log_path=llm_audit_log_path,
+        command="ask",
     )
     answer = apply_governance_to_answer(answer, governance_index)
     _append_removal_warning(answer, removed_count)
@@ -108,6 +139,12 @@ def agent_ask(
     governance_index: Optional[GovernanceIndex] = None,
     restricted_customers_path: Optional[Path] = None,
     audit_log_path: Path = DEFAULT_QUERY_AUDIT_LOG,
+    provider_name: str = "mock",
+    llm_config_path: Path = DEFAULT_LLM_CONFIG_PATH,
+    llm_config: Optional[LLMConfig] = None,
+    llm_provider: Optional[LLMProvider] = None,
+    dry_run_llm: bool = False,
+    llm_audit_log_path: Path = Path("reports/audit_log.csv"),
 ) -> AgenticAnswer:
     filters = filters or SearchFilters()
     governance_index, load_warning = resolve_governance_index(governance_index, restricted_customers_path)
@@ -120,15 +157,56 @@ def agent_ask(
     if refused is not None:
         return _refused_agentic_answer(refused)
 
+    provider_name = _normalize_provider_name(provider_name)
+    resolved_llm_config = _resolve_llm_config(
+        provider_name,
+        dry_run_llm,
+        llm_config,
+        llm_config_path,
+    )
+    if provider_name != "mock" and not dry_run_llm:
+        validate_provider_policy(resolved_llm_config, provider_name)
+
+    def configured_ask(question, db_path, filters, limit, mode):
+        return ask_index(
+            question,
+            db_path,
+            filters=filters,
+            limit=limit,
+            mode=mode,
+            governance_index=governance_index,
+            provider_name=provider_name,
+            llm_config=resolved_llm_config,
+            llm_provider=llm_provider,
+            dry_run_llm=dry_run_llm,
+            llm_audit_log_path=llm_audit_log_path,
+        )
+
+    def configured_generation(question, results, citation_limit, filters, internal_result_count):
+        return generate_answer_with_llm(
+            question,
+            results,
+            filters=filters,
+            provider_name=provider_name,
+            config=resolved_llm_config,
+            provider=llm_provider,
+            dry_run=dry_run_llm,
+            citation_limit=citation_limit,
+            internal_result_count=internal_result_count,
+            audit_log_path=llm_audit_log_path,
+            command="agent-ask",
+        )
+
     answer = agentic_ask(
         question=question,
         db_path=db_path,
         search_fn=search_index,
-        ask_fn=ask_index,
+        ask_fn=configured_ask,
         filters=filters,
         limit=limit,
         mode=mode,
         governance_index=governance_index,
+        generation_fn=configured_generation,
     )
     _append_warning(answer.generated, load_warning)
     enforce_external_citations(answer.generated, filters)
@@ -215,3 +293,23 @@ def _refused_agentic_answer(generated: GeneratedAnswer) -> AgenticAnswer:
             reflection=AgentReflection(sufficient=False, notes=["未執行任何檢索。"]),
         ),
     )
+
+
+def _normalize_provider_name(provider_name: str) -> str:
+    normalized = str(provider_name).strip().lower()
+    if normalized not in {"mock", "anthropic"}:
+        raise LLMError(f"不支援的 LLM provider：{normalized}")
+    return normalized
+
+
+def _resolve_llm_config(
+    provider_name: str,
+    dry_run_llm: bool,
+    llm_config: Optional[LLMConfig],
+    llm_config_path: Path,
+) -> LLMConfig:
+    if llm_config is not None:
+        return llm_config
+    if provider_name == "mock" and not dry_run_llm:
+        return LLMConfig()
+    return load_llm_config(llm_config_path)
