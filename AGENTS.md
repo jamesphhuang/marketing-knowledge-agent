@@ -16,6 +16,14 @@ When changing code:
 - Do not add speculative features.
 - Match the existing codebase style.
 
+Git discipline (multi-agent repo — 2026-07-11 教訓,詳見 docs/governance/LESSONS.md):
+- 本 repo 可能有多個 agent 先後操作。commit 前必看 `git status` 與
+  `git diff --cached --name-only`;staged 清單含自己任務以外的檔案 → 停下確認,不要提交。
+- `git add` 永遠明確列檔/目錄;禁止 `git add -A` 或 `git add .`。
+- 不要對已存在的 commit 做歷史重寫(rebase/amend 他人 commit);
+  發現 git 狀態與你的認知不符(commit 消失、分支被 merge)→ 先回報,通常是
+  另一端已處理,你的視圖過時了——不要「修復」它。
+
 Project-specific rules:
 - 第一階段不得接正式公司資料，只能使用 `data/mock_vault/` 或測試臨時資料。
 - 第一階段不得要求外部 LLM 或 API key；`generation` 必須維持可離線測試。

@@ -68,3 +68,21 @@
   ——改斷言會讓深層防線失去測試覆蓋。新行為由新測試覆蓋,不與舊測試混用。
 - 驗收要求:授權修改既有測試時,明列准動的部分,收回時逐字 diff 核對
   (本輪實核:僅 2 測試名 + 2 查詢字串,零斷言變動)。
+
+## 2026-07-11 多 agent 並行操作同一 repo,commit 掃到別人的 staged 檔
+- 情境:Codex 做 Q sprint(改動已 staged 未 commit)的同時,另一個 agent(Claude)
+  在同一分支建 delegate skill 並執行 git add + commit——把 Codex 的 Q 改動
+  一起掃進了訊息只寫 delegate 的混合 commit(b356988)。
+- 錯誤:兩個 agent 共用同一個工作目錄與 git 索引,且 commit 前沒有先看 staged 清單。
+- 修復:reset --soft 撤銷混合 commit,拆成兩個乾淨 commit(0421497 delegate、
+  17540af feat(llm)),Q 補跑 accept-sprint 驗收後才 merge。無資料遺失。
+- 制度回饋:
+  1. 【並行紀律】同一時間只允許一個 agent 對 repo 做 git 寫操作(add/commit/merge)。
+     一方有 sprint 進行中(分支存在或有 staged 改動),另一方只能唯讀。
+  2. 【commit 紀律】任何 commit 前必看 `git status` 與 `git diff --cached --name-only`,
+     staged 清單含自己任務以外的檔案 → 停,先弄清楚是誰的。
+  3. 【git add 紀律】永遠明確列檔或列目錄,禁止在共用 repo 上 `git add -A` / `git add .`
+     (除非剛確認過 status 乾淨)。
+  4. 若未來需要真正並行,用 git worktree 隔離(不同目錄、不同索引)。
+  5. 收到「git collision / 歷史重寫」請求時,先驗證對方的 git 視圖是否過時
+     (本次 Codex 請求重寫的 commit 當時已不存在)——不要授權基於過時視圖的歷史操作。
