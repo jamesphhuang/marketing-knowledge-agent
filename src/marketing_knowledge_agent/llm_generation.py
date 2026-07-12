@@ -209,6 +209,27 @@ def append_llm_audit(
                 ]
             )
             return
+        if header == [
+            "timestamp",
+            "event",
+            "channel_id",
+            "user_id",
+            "citation_count",
+            "warning_count",
+            "query",
+        ]:
+            writer.writerow(
+                [
+                    _utc_now(),
+                    "llm_call",
+                    "",
+                    "",
+                    payload_chunk_count,
+                    internal_removed_count,
+                    "",
+                ]
+            )
+            return
         raise ValueError(f"unsupported audit log header: {header}")
 
 
