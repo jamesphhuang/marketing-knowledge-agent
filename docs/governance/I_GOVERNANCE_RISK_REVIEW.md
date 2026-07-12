@@ -61,7 +61,7 @@
 | GR-8 | Excel 日期 serial 靜默變 None → freshness 失真 | medium | high | 正式檔為文字日期（如 `2025.07`），33/33 解析成功、當前不觸發；code 仍未支援 native serial，未來若有原生日期格式需補 | summary 加 missing 計數 | `test_normalize_date_parses_excel_serial` | 部分緩解（當前格式不觸發，非全解） |
 | GR-9 | pending_metric / can_quote=false 內容在外部用途被引用（無 intent gating） | high | low（程式防線已關閉；政策未開）→ 首次真實 LLM 啟用時需重驗 | P sprint 的 intent gating + Q sprint 的雙鑰政策、public-only payload、LLM 輸出 denylist、local citation/warning 組裝；政策確認前非 mock provider 一律拒啟 | `SearchFilters.intent` + `data_policy_confirmed` + `allow_internal_data_to_llm` | EV-G1~G6、EV-L1~L3、transport zero-call tests | 已修（P/Q 離線程式層完成；首次真實 provider 呼叫仍須依 Q §7 驗收） |
 | GR-10 | enum 漂移（code vs GOVERNANCE_RULES.md）誤導維護者 | medium | 已發生 | J 已上線 code↔doc 對照測試；GOVERNANCE_RULES.md 補齊 review_identity_mapping | `test_enum_in_governance_rules_matches_code` | 同左（本 session 獨立實測 13 值全對） | 已修（J sprint） |
-| GR-11 | `review_identity_mapping` 無語意定義即被使用 | medium | medium | 使用者裁決後補文件（G 信第 6 節） | J 暫按 manual-review 類處理 | — | 待使用者 |
+| GR-11 | `review_identity_mapping` 無語意定義即被使用 | medium | medium | 使用者 2026-07-11 裁決:採納暫行定義(handle/品牌身分待人工確認,視同未完成審核,不產出內容);GOVERNANCE_RULES.md 已更新,code 行為不變 | J CR-18 維持 | 既有 J/K 測試 | 已修(使用者裁決,文件補齊) |
 | GR-12 | Excel 匯出的 publish_date=captured_date 造成「假新鮮」 | medium | medium | citation 顯示四種日期已可辨識；L 建議 freshness 以 metric_updated_date 優先 | — | freshness 測試 | 部分緩解 |
 
 ## 維護規則

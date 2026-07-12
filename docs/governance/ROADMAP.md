@@ -37,16 +37,10 @@ Excel 匯入(對正式檔驗證)→ 人工審核簽核流程 → J validation �
 ## Stage 4:Slack 介面(終點)
 
 - **目標**:Slack bot 對話取用。
-- **Spec 檔名**:`docs/specs/S_SLACK_INTERFACE_SPEC.md`(未寫;寫 spec 前先取得下列裁決;原編號 P 讓給 Stage 2)。
-- **前置**:Stage 3。
-- **需使用者裁決(政策,非技術)**:
-  | # | 問題 | 說明 |
-  | --- | --- | --- |
-  | a | internal-only 資料能否出現在 Slack 回覆? | Slack 訊息存雲端、頻道成員可見可搜尋——比 CLI 的暴露面大得多。建議:公開頻道只回 `can_quote_externally=true`;internal 內容僅限指定私有頻道或拒答引導走內部工具 |
-  | b | 誰能問? | 全 workspace / 指定頻道 / 指定成員 |
-  | c | denylist 命中的處理 | 拒答模板會留在頻道;是否同時通知 governance owner + 記 audit log(建議:是) |
-  | d | 回覆的 citation 呈現 | Slack 格式下 citation/warning 如何顯示不被裁切 |
-- **硬性要求(寫 spec 時不可省)**:所有 governance 檢查在本地服務端完成後才發訊;audit log 記錄每次問答(誰、問什麼、命中什麼防線);Slack 端零快取敏感內容。
+- **Spec**:`docs/specs/S_SLACK_INTERFACE_SPEC.md`(2026-07-11 已寫)。
+- **前置**:Stage 3 ✅(不依賴 LLM 政策鑰匙——mock provider 可先上,政策確認後改設定即升級)。
+- **政策裁決(使用者 2026-07-11 全數確定)**:(a) Slack 一律只回可對外內容(強制 external intent,Slack 端不可改);(b) 指定頻道白名單 only(含 DM 拒絕);(c) denylist 命中拒答+audit、不通知(留設定欄位);(d) 回覆進 thread,citations/warnings 永不截斷。
+- **硬性要求**:Slack 層是薄介面,全部 governance 在既有本地模組;tokens 只從環境變數;governance/pipeline 模組不得 import slack 套件(import 邊界測試)。
 
 ## 平行小任務(不佔階段,隨時可插隊)
 

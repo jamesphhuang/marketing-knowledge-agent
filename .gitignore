@@ -42,3 +42,6 @@ __pycache__/
 
 # LLM 設定(政策鑰匙由人工管理,不進版控)
 .mka/llm_config.json
+
+# Slack 設定(頻道白名單;tokens 只在環境變數,永不落檔)
+.mka/slack_config.json
