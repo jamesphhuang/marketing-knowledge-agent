@@ -30,6 +30,7 @@ from .query_gating import precheck_restricted_query
 from .retrieval import result_to_dict
 from .review_template import ReviewTemplateError, generate_review_template
 from .review_decision_validation import ReviewDecisionValidationError, validate_review_decisions
+from .slack_interface import SlackInterfaceError, run_slack_bot
 from .obsidian_sync import (
     DEFAULT_NAMESPACE,
     DEFAULT_OBSIDIAN_VAULT,
@@ -200,6 +201,10 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return summary["exit_code"]
 
+        if args.command == "slack-bot":
+            run_slack_bot(config_path=args.config)
+            return 0
+
     except IngestionError as exc:
         print(f"ingestion error: {exc}", file=sys.stderr)
         return 2
@@ -223,6 +228,9 @@ def main(argv=None) -> int:
         return 2
     except LLMError as exc:
         print(f"llm error: {exc}", file=sys.stderr)
+        return 2
+    except SlackInterfaceError as exc:
+        print(f"slack interface error: {exc}", file=sys.stderr)
         return 2
     except FileNotFoundError as exc:
         print(f"file error: {exc}", file=sys.stderr)
@@ -354,6 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
     content_index_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
     content_index_parser.add_argument("--report-dir", type=Path, default=DEFAULT_CONTENT_INDEX_REPORT_DIR)
     content_index_parser.add_argument("--confirm", action="store_true")
+
+    slack_parser = subparsers.add_parser(
+        "slack-bot",
+        help="Start the external-only Slack Socket Mode interface",
+    )
+    slack_parser.add_argument("--config", type=Path, default=Path(".mka/slack_config.json"))
 
     return parser
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Mapping, Optional, Tuple
 
 from .agentic import AgenticAnswer, AgentReflection, AgentTrace, QueryAnalysis, agentic_ask
 from .chunking import chunk_documents
@@ -145,6 +145,7 @@ def agent_ask(
     llm_provider: Optional[LLMProvider] = None,
     dry_run_llm: bool = False,
     llm_audit_log_path: Path = Path("reports/audit_log.csv"),
+    query_audit_metadata: Optional[Mapping[str, str]] = None,
 ) -> AgenticAnswer:
     filters = filters or SearchFilters()
     governance_index, load_warning = resolve_governance_index(governance_index, restricted_customers_path)
@@ -153,6 +154,7 @@ def agent_ask(
         governance_index,
         command="agent-ask",
         audit_log_path=audit_log_path,
+        audit_metadata=query_audit_metadata,
     )
     if refused is not None:
         return _refused_agentic_answer(refused)

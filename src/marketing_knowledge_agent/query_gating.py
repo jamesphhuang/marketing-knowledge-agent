@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from .governance import GovernanceIndex
 from .models import GeneratedAnswer, SearchFilters
@@ -25,6 +25,7 @@ def precheck_restricted_query(
     governance_index: Optional[GovernanceIndex],
     command: str,
     audit_log_path: Path = DEFAULT_QUERY_AUDIT_LOG,
+    audit_metadata: Optional[Mapping[str, str]] = None,
 ) -> Optional[GeneratedAnswer]:
     if governance_index is None:
         return None
@@ -36,6 +37,8 @@ def precheck_restricted_query(
         audit_log_path,
         command=command,
         match_count=decision.restricted_match_count,
+        audit_metadata=audit_metadata,
+        warning_count=len(decision.warnings),
     )
     return GeneratedAnswer(
         question=query,
@@ -81,7 +84,13 @@ def format_effective_filters(filters: SearchFilters) -> str:
     return ", ".join(parts)
 
 
-def append_denylist_query_audit(path: Path, command: str, match_count: int) -> None:
+def append_denylist_query_audit(
+    path: Path,
+    command: str,
+    match_count: int,
+    audit_metadata: Optional[Mapping[str, str]] = None,
+    warning_count: int = 0,
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists()
@@ -92,6 +101,31 @@ def append_denylist_query_audit(path: Path, command: str, match_count: int) -> N
 
     with path.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
+        slack_header = [
+            "timestamp",
+            "event",
+            "channel_id",
+            "user_id",
+            "citation_count",
+            "warning_count",
+            "query",
+        ]
+        if audit_metadata is not None and not exists:
+            header = slack_header
+            writer.writerow(header)
+        if header == slack_header:
+            writer.writerow(
+                [
+                    _utc_now(),
+                    "denylist_query_hit",
+                    audit_metadata.get("channel_id", "") if audit_metadata else "",
+                    audit_metadata.get("user_id", "") if audit_metadata else "",
+                    0,
+                    warning_count,
+                    "",
+                ]
+            )
+            return
         if not exists:
             header = ["timestamp", "command", "event", "match_count"]
             writer.writerow(header)
@@ -99,10 +133,40 @@ def append_denylist_query_audit(path: Path, command: str, match_count: int) -> N
             writer.writerow([_utc_now(), command, "denylist_query_hit", match_count])
             return
         if header == ["timestamp", "batch_id", "action", "add", "update", "archive", "operator", "plan_path"]:
-            writer.writerow([_utc_now(), "", "denylist_query_hit", match_count, 0, 0, "", command])
+            writer.writerow(
+                [
+                    _utc_now(),
+                    audit_metadata.get("channel_id", "") if audit_metadata else "",
+                    "denylist_query_hit",
+                    match_count,
+                    warning_count,
+                    0,
+                    audit_metadata.get("user_id", "") if audit_metadata else "",
+                    "" if audit_metadata else command,
+                ]
+            )
             return
         if header == ["timestamp", "command", "index_count", "db_path"]:
             writer.writerow([_utc_now(), command, "denylist_query_hit", match_count])
+            return
+        if header == [
+            "timestamp",
+            "command",
+            "provider",
+            "model",
+            "payload_chunk_count",
+            "internal_removed_count",
+        ]:
+            writer.writerow(
+                [
+                    _utc_now(),
+                    command,
+                    "denylist_query_hit",
+                    "",
+                    match_count,
+                    warning_count,
+                ]
+            )
             return
         raise ValueError(f"unsupported audit log header: {header}")
 

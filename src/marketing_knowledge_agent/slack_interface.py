@@ -1,0 +1,328 @@
+from __future__ import annotations
+
+import csv
+import json
+import os
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, List, Mapping, Optional
+
+from .content_index import DEFAULT_CONTENT_INDEX_DB
+from .llm import DEFAULT_LLM_CONFIG_PATH, load_llm_config
+from .models import SearchFilters
+from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, agent_ask
+
+
+DEFAULT_SLACK_CONFIG_PATH = Path(".mka/slack_config.json")
+DEFAULT_SLACK_AUDIT_LOG = Path("reports/audit_log.csv")
+DENIED_CHANNEL_MESSAGE = "此頻道未啟用行銷知識查詢"
+ANSWER_TRUNCATION_NOTICE = "(內容過長已截斷,完整結果請用內部工具查詢)"
+SLACK_AUDIT_HEADER = [
+    "timestamp",
+    "event",
+    "channel_id",
+    "user_id",
+    "citation_count",
+    "warning_count",
+    "query",
+]
+
+
+class SlackInterfaceError(ValueError):
+    """Raised when the Slack interface cannot start safely."""
+
+
+@dataclass(frozen=True)
+class SlackConfig:
+    allowed_channel_ids: List[str] = field(default_factory=list)
+    notify_owner_on_denylist: bool = False
+    max_answer_chars: int = 2500
+
+
+def load_slack_config(path: Path = DEFAULT_SLACK_CONFIG_PATH) -> SlackConfig:
+    path = Path(path)
+    if not path.is_file():
+        raise SlackInterfaceError(f"Slack 設定檔不存在：{path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SlackInterfaceError(f"Slack 設定檔無法解析：{path}") from exc
+    if not isinstance(payload, dict):
+        raise SlackInterfaceError("Slack 設定檔必須是 JSON object。")
+
+    allowed_channel_ids = payload.get("allowed_channel_ids", [])
+    if not isinstance(allowed_channel_ids, list) or any(
+        not isinstance(value, str) or not value.strip() for value in allowed_channel_ids
+    ):
+        raise SlackInterfaceError("allowed_channel_ids 必須是字串陣列。")
+    notify_owner = payload.get("notify_owner_on_denylist", False)
+    if not isinstance(notify_owner, bool):
+        raise SlackInterfaceError("notify_owner_on_denylist 必須是 boolean。")
+    max_answer_chars = payload.get("max_answer_chars", 2500)
+    if not isinstance(max_answer_chars, int) or isinstance(max_answer_chars, bool) or max_answer_chars <= 0:
+        raise SlackInterfaceError("max_answer_chars 必須是正整數。")
+    return SlackConfig(
+        allowed_channel_ids=[value.strip() for value in allowed_channel_ids],
+        notify_owner_on_denylist=notify_owner,
+        max_answer_chars=max_answer_chars,
+    )
+
+
+def handle_slack_event(
+    event: dict,
+    config: SlackConfig,
+    ask_fn: Callable = agent_ask,
+    db_path: Path = DEFAULT_CONTENT_INDEX_DB,
+    restricted_customers_path: Path = DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    llm_config_path: Path = DEFAULT_LLM_CONFIG_PATH,
+    audit_log_path: Path = DEFAULT_SLACK_AUDIT_LOG,
+) -> dict:
+    channel_id = str(event.get("channel") or "")
+    user_id = str(event.get("user") or "")
+    thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
+    raw_question = str(event.get("text") or "").strip()
+
+    if _is_direct_message(event) or channel_id not in config.allowed_channel_ids:
+        _append_slack_audit(
+            audit_log_path,
+            event="slack_denied_channel",
+            channel_id=channel_id,
+            user_id=user_id,
+            citation_count=0,
+            warning_count=0,
+            query=raw_question,
+        )
+        return _reply_dict(channel_id, thread_ts, DENIED_CHANNEL_MESSAGE)
+
+    question = _strip_app_mention(raw_question)
+    llm_config = load_llm_config(llm_config_path)
+    answer = ask_fn(
+        question,
+        db_path=Path(db_path),
+        filters=SearchFilters(intent="external"),
+        restricted_customers_path=Path(restricted_customers_path),
+        audit_log_path=Path(audit_log_path),
+        provider_name=llm_config.provider,
+        llm_config=llm_config,
+        llm_audit_log_path=Path(audit_log_path),
+        query_audit_metadata={"channel_id": channel_id, "user_id": user_id},
+    )
+    is_denylist_refusal = getattr(getattr(answer, "trace", None), "mode", None) == "refused"
+    if not is_denylist_refusal:
+        _append_slack_audit(
+            audit_log_path,
+            event="slack_qa",
+            channel_id=channel_id,
+            user_id=user_id,
+            citation_count=len(answer.citations),
+            warning_count=len(answer.warnings),
+            query=question,
+        )
+    return _reply_dict(channel_id, thread_ts, format_slack_reply(answer, config.max_answer_chars))
+
+
+def format_slack_reply(answer, max_answer_chars: int) -> str:
+    body = answer.answer
+    if len(body) > max_answer_chars:
+        body = f"{body[:max_answer_chars].rstrip()}\n{ANSWER_TRUNCATION_NOTICE}"
+    parts = [body]
+    if answer.citations:
+        parts.extend(["", "📚 來源:"])
+        for citation in answer.citations:
+            effective_date = (
+                citation.last_reviewed
+                or citation.updated_date
+                or citation.captured_date
+                or citation.publish_date
+            )
+            source_sheet = citation.source_sheet or "未知來源"
+            source_row = citation.source_row if citation.source_row is not None else "?"
+            parts.append(
+                f"{citation.label} {citation.title} — {source_sheet} r{source_row} · "
+                f"{effective_date} · 可對外引用"
+            )
+    if answer.warnings:
+        parts.extend(["", "⚠️ 提醒:"])
+        parts.extend(f"- {warning}" for warning in answer.warnings)
+    return "\n".join(parts)
+
+
+def post_slack_reply(client, reply: dict) -> None:
+    client.chat_postMessage(**reply)
+
+
+def run_slack_bot(
+    config_path: Path = DEFAULT_SLACK_CONFIG_PATH,
+    db_path: Path = DEFAULT_CONTENT_INDEX_DB,
+    restricted_customers_path: Path = DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    llm_config_path: Path = DEFAULT_LLM_CONFIG_PATH,
+    audit_log_path: Path = DEFAULT_SLACK_AUDIT_LOG,
+    environ: Optional[Mapping[str, str]] = None,
+    app_factory=None,
+    socket_mode_handler_factory=None,
+) -> None:
+    config = load_slack_config(config_path)
+    if not config.allowed_channel_ids:
+        raise SlackInterfaceError(
+            "allowed_channel_ids 為空；請先在 .mka/slack_config.json 設定啟用頻道。"
+        )
+
+    environment = environ if environ is not None else os.environ
+    bot_token = environment.get("SLACK_BOT_TOKEN")
+    app_token = environment.get("SLACK_APP_TOKEN")
+    if not bot_token or not app_token:
+        raise SlackInterfaceError(
+            "Slack tokens 未設定；請設定 SLACK_BOT_TOKEN 與 SLACK_APP_TOKEN。"
+        )
+
+    if app_factory is None:
+        from slack_bolt import App
+
+        app_factory = App
+    if socket_mode_handler_factory is None:
+        from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+        socket_mode_handler_factory = SocketModeHandler
+
+    app = app_factory(token=bot_token)
+
+    @app.event("app_mention")
+    def receive_app_mention(event, client):
+        reply = handle_slack_event(
+            event,
+            config=config,
+            db_path=db_path,
+            restricted_customers_path=restricted_customers_path,
+            llm_config_path=llm_config_path,
+            audit_log_path=audit_log_path,
+        )
+        post_slack_reply(client, reply)
+
+    socket_mode_handler_factory(app, app_token).start()
+
+
+def _append_slack_audit(
+    path: Path,
+    event: str,
+    channel_id: str,
+    user_id: str,
+    citation_count: int,
+    warning_count: int,
+    query: str,
+) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists()
+    header = []
+    if exists:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            header = next(csv.reader(handle), [])
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        if not exists:
+            header = SLACK_AUDIT_HEADER
+            writer.writerow(header)
+        writer.writerow(
+            _slack_audit_row(
+                header,
+                event=event,
+                channel_id=channel_id,
+                user_id=user_id,
+                citation_count=citation_count,
+                warning_count=warning_count,
+                query=query,
+            )
+        )
+
+
+def _slack_audit_row(
+    header: List[str],
+    event: str,
+    channel_id: str,
+    user_id: str,
+    citation_count: int,
+    warning_count: int,
+    query: str,
+) -> List[object]:
+    safe_query = query if event != "denylist_query_hit" else ""
+    timestamp = _utc_now()
+    if header == SLACK_AUDIT_HEADER:
+        return [timestamp, event, channel_id, user_id, citation_count, warning_count, safe_query]
+    if header == [
+        "timestamp",
+        "batch_id",
+        "action",
+        "add",
+        "update",
+        "archive",
+        "operator",
+        "plan_path",
+    ]:
+        return [
+            timestamp,
+            channel_id,
+            event,
+            citation_count,
+            warning_count,
+            0,
+            user_id,
+            safe_query,
+        ]
+    if header == ["timestamp", "command", "event", "match_count"]:
+        details = json.dumps(
+            {
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "citation_count": citation_count,
+                "warning_count": warning_count,
+                "query": safe_query,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return [timestamp, "slack-bot", event, details]
+    if header == ["timestamp", "command", "index_count", "db_path"]:
+        details = json.dumps(
+            {
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "warning_count": warning_count,
+                "query": safe_query,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return [timestamp, f"slack-bot:{event}", citation_count, details]
+    if header == [
+        "timestamp",
+        "command",
+        "provider",
+        "model",
+        "payload_chunk_count",
+        "internal_removed_count",
+    ]:
+        context = json.dumps(
+            {"channel_id": channel_id, "user_id": user_id, "query": safe_query},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return [timestamp, f"slack-bot:{event}", "slack", context, citation_count, warning_count]
+    raise SlackInterfaceError(f"不支援的 audit log header：{header}")
+
+
+def _reply_dict(channel_id: str, thread_ts: str, text: str) -> dict:
+    return {"channel": channel_id, "thread_ts": thread_ts, "text": text}
+
+
+def _strip_app_mention(text: str) -> str:
+    return re.sub(r"^\s*<@[A-Za-z0-9]+>\s*", "", text).strip()
+
+
+def _is_direct_message(event: dict) -> bool:
+    return event.get("channel_type") in {"im", "mpim"}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
