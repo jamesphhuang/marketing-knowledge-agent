@@ -34,7 +34,7 @@ Excel 匯入(對正式檔驗證)→ 人工審核簽核流程 → J validation �
 - **結果**:provider abstraction、Anthropic injectable transport、payload 最小化、dry-run、生成後 denylist、幻覺 citation label 檢查皆完成；全部測試與 smoke 均未呼叫真實外部 API。
 - **殘留**:公司政策確認、model 選定、API key 設定與首次真實呼叫驗收仍未執行；完成前外部 LLM 保持停用。
 
-## Stage 4:Slack 介面(終點)
+## Stage 4:Slack 介面(終點) ✅ 程式完成(2026-07-11;部署驗收待使用者,見 S spec §6)
 
 - **目標**:Slack bot 對話取用。
 - **Spec**:`docs/specs/S_SLACK_INTERFACE_SPEC.md`(2026-07-11 已寫)。
@@ -45,7 +45,7 @@ Excel 匯入(對正式檔驗證)→ 人工審核簽核流程 → J validation �
 ## 平行小任務(不佔階段,隨時可插隊)
 
 - GR-6:括號別名污染 denylist(alias 拆分規則)
-- GR-11:`review_identity_mapping` 語意(等使用者一句話裁決)
+- ~~GR-11~~ ✅ 已關閉(2026-07-11 使用者裁決:採納暫行定義)
 - Pydantic v2 遷移 + models.py 拆分(獨立 sprint,機械工作)
 - M 文件的 dashboard / data quality report(管理者體驗)
 
