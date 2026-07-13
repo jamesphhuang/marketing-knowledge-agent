@@ -213,6 +213,18 @@ def test_low_relevance_abstains_and_lists_closest_titles():
     assert answer.citations == []
 
 
+def test_zero_relevance_results_trigger_abstention():
+    result = _search_result("Unrelated title", score=0.0)
+    result.rerank_score = MIN_RELEVANCE_SCORE
+    result.chunk.text = "UNRELATED_DOCUMENT_CONTENT"
+
+    answer = generate_answer("query absent from index", [result], filters=SearchFilters(intent="external"))
+
+    assert "相關度不足" in answer.answer
+    assert "UNRELATED_DOCUMENT_CONTENT" not in answer.answer
+    assert answer.citations == []
+
+
 def test_external_zero_results_reports_internal_only_count(tmp_path):
     db_path = _build_index(
         tmp_path,
