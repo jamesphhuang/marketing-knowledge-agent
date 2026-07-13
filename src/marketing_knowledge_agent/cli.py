@@ -162,6 +162,7 @@ def main(argv=None) -> int:
                 preview_dir=args.preview_dir,
                 output_dir=args.output,
                 include_clean_records=args.include_clean_records,
+                include_clean_merchant_cases=args.include_clean_merchant_cases,
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
@@ -330,7 +331,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/excel_preview/apply_preview"),
     )
-    apply_decisions_parser.add_argument("--include-clean-records", action="store_true")
+    clean_record_group = apply_decisions_parser.add_mutually_exclusive_group()
+    clean_record_group.add_argument("--include-clean-records", action="store_true")
+    clean_record_group.add_argument("--include-clean-merchant-cases", action="store_true")
 
     sync_parser = subparsers.add_parser(
         "sync-obsidian",

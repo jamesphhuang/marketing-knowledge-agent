@@ -420,6 +420,18 @@ excel-preview
 - 不套用任何人工審核決策。
 - `review_decision`、`reviewer`、`reviewed_at` 預設留空，必須由人工填寫。
 
+套用已簽核決策並納入通過安全條件的 clean merchant cases：
+
+```bash
+.venv/bin/mka apply-review-decisions \
+  --decisions reports/excel_preview/review_decisions_template.csv \
+  --preview-dir reports/excel_preview \
+  --output reports/excel_preview/apply_preview \
+  --include-clean-merchant-cases
+```
+
+`--include-clean-merchant-cases` 預設關閉，只會納入「published、現有商家、品牌與 handle 完整、至少一個有效素材、public、可對外引用、可進 index，且沒有治理或重複標記」的 `merchant_case`。它不會納入 clean `public_metric`；不符合條件的紀錄仍留在 `not_reviewed_records.md`。既有的 `--include-clean-records` 是範圍較廣的管理者操作，兩個旗標不可同時使用。
+
 ### Obsidian Sync Workflow
 
 `sync-obsidian` 是 apply preview 經人工確認後的最後一步，預設只產生 plan；它只會讀寫 `obsidian_vault/MKA/` namespace，不會修改 `.obsidian/` 或 namespace 外檔案。

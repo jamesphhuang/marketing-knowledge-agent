@@ -137,6 +137,88 @@ def test_apply_review_decisions_include_clean_records_promotes_not_reviewed(tmp_
     assert "reviewer: \"default_policy\"" in vault_text
 
 
+def test_apply_review_decisions_include_clean_merchant_cases_keeps_public_metrics_isolated(tmp_path):
+    from marketing_knowledge_agent.apply_review_decisions import apply_review_decisions
+
+    preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
+    decisions = tmp_path / "decisions.csv"
+    output_dir = tmp_path / "apply_preview"
+    _write_decisions(decisions, _all_review_rows())
+
+    summary = apply_review_decisions(
+        decisions,
+        preview_dir,
+        output_dir,
+        include_clean_merchant_cases=True,
+    )
+
+    assert summary["bucket_counts"]["not_reviewed"] == 1
+    assert summary["bucket_counts"]["default_policy_approved"] == 1
+    assert summary["bucket_counts"]["clean_merchant_policy_approved"] == 1
+    assert summary["include_clean_merchant_cases"] is True
+    vault_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (output_dir / "approved_vault_preview").rglob("*.md")
+    )
+    not_reviewed = (output_dir / "not_reviewed_records.md").read_text(encoding="utf-8")
+    assert "Clean Merchant" in vault_text
+    assert "Included by --include-clean-merchant-cases policy." in vault_text
+    assert "Clean Metric" not in vault_text
+    assert "Clean Metric" in not_reviewed
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, True),
+        ({"merchant_status": "已關店"}, False),
+        ({"merchant_handle": None}, False),
+        ({"article_title": None}, False),
+        ({"data_classification": "internal"}, False),
+        ({"can_quote_externally": False}, False),
+        ({"can_enter_content_index": False}, False),
+        ({"governance_risk_reasons": ["risk"]}, False),
+        ({"invalid_asset_fields": ["文章"]}, False),
+        ({"same_brand_multiple_records": True}, False),
+        ({"suspected_duplicate_review": True}, False),
+    ],
+)
+def test_clean_merchant_policy_requires_all_safety_conditions(overrides, expected):
+    from marketing_knowledge_agent.apply_review_decisions import is_clean_merchant_case_policy_eligible
+
+    record = _merchant_record(80, "Policy Merchant")
+    record.update(overrides)
+
+    assert is_clean_merchant_case_policy_eligible(record) is expected
+
+
+def test_apply_cli_clean_record_flags_are_mutually_exclusive():
+    from marketing_knowledge_agent.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "apply-review-decisions",
+            "--decisions",
+            "decisions.csv",
+            "--include-clean-merchant-cases",
+        ]
+    )
+
+    assert args.include_clean_merchant_cases is True
+    assert args.include_clean_records is False
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "apply-review-decisions",
+                "--decisions",
+                "decisions.csv",
+                "--include-clean-records",
+                "--include-clean-merchant-cases",
+            ]
+        )
+
+
 def test_apply_preview_restricted_whitelist_assertion_fails_before_output(tmp_path):
     from marketing_knowledge_agent.apply_review_decisions import ApplyReviewDecisionsError, apply_review_decisions
 
@@ -352,6 +434,7 @@ def _merchant_record(source_row, brand_name, **overrides):
         {
             "brand_name": brand_name,
             "merchant_handle": f"handle-{source_row}",
+            "merchant_status": "現有商家",
             "article_title": f"{brand_name} article",
             "video_title": None,
             "podcast_title": None,

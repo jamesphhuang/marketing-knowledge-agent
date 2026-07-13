@@ -36,6 +36,7 @@ def apply_review_decisions(
     preview_dir: Path,
     output_dir: Path,
     include_clean_records: bool = False,
+    include_clean_merchant_cases: bool = False,
 ) -> dict:
     decisions_path = Path(decisions_path)
     preview_dir = Path(preview_dir)
@@ -75,6 +76,7 @@ def apply_review_decisions(
         decisions_path=decisions_path,
         applied_at=applied_at,
         include_clean_records=include_clean_records,
+        include_clean_merchant_cases=include_clean_merchant_cases,
         validation_summary=validation_summary,
         validation_warnings=validation_warnings,
         previous_output_exists=previous_output_exists,
@@ -149,6 +151,7 @@ def _build_apply_plan(
     decisions_path: Path,
     applied_at: str,
     include_clean_records: bool,
+    include_clean_merchant_cases: bool,
     validation_summary: dict,
     validation_warnings: List[dict],
     previous_output_exists: bool,
@@ -163,6 +166,7 @@ def _build_apply_plan(
     deprecated_records: List[dict] = []
     not_reviewed_records: List[dict] = []
     default_policy_records: List[dict] = []
+    clean_merchant_policy_records: List[dict] = []
     internal_pending_records: List[dict] = []
     governance_records: List[dict] = []
     markdown_records: List[dict] = []
@@ -222,11 +226,20 @@ def _build_apply_plan(
             raise ApplyReviewDecisionsError(f"unsupported review_decision: {decision}")
 
     for record in _not_reviewed_records(preview, rows_by_key):
-        if include_clean_records and record.get("record_type") in {"merchant_case", "public_metric", "content_asset"}:
-            row = _default_policy_row(record)
+        broad_policy_match = include_clean_records and record.get("record_type") in {
+            "merchant_case",
+            "public_metric",
+            "content_asset",
+        }
+        clean_merchant_policy_match = include_clean_merchant_cases and is_clean_merchant_case_policy_eligible(record)
+        if broad_policy_match or clean_merchant_policy_match:
+            policy_flag = "--include-clean-records" if broad_policy_match else "--include-clean-merchant-cases"
+            row = _default_policy_row(record, policy_flag)
             relative_path, content = _markdown_file_for_record(record, row, decisions_path, applied_at, "approve(default)")
             text_files[relative_path] = content
             default_policy_records.append(record)
+            if clean_merchant_policy_match and not broad_policy_match:
+                clean_merchant_policy_records.append(record)
             assignments.append(_assignment(record, "vault"))
         else:
             not_reviewed_records.append(record)
@@ -250,6 +263,7 @@ def _build_apply_plan(
         previous_output_exists=previous_output_exists,
         previous_output_mtime=previous_output_mtime,
         include_clean_records=include_clean_records,
+        include_clean_merchant_cases=include_clean_merchant_cases,
         decision_overrides=decision_overrides,
         governance_records=governance_records,
         internal_pending_records=internal_pending_records,
@@ -260,6 +274,7 @@ def _build_apply_plan(
         markdown_records=markdown_records,
         vault_only_records=vault_only_records,
         default_policy_records=default_policy_records,
+        clean_merchant_policy_records=clean_merchant_policy_records,
     )
     text_files[Path("apply_decisions_summary.md")] = _render_apply_summary(summary)
 
@@ -303,6 +318,39 @@ def _not_reviewed_records(preview: Dict[str, List[dict]], rows_by_key: Dict[Tupl
             if _record_key(record) not in rows_by_key:
                 records.append(record)
     return records
+
+
+def is_clean_merchant_case_policy_eligible(record: dict) -> bool:
+    has_valid_asset = any(
+        _text(record.get(field))
+        for field in ("article_title", "video_title", "podcast_title", "news_title")
+    )
+    blocked_markers = (
+        record.get("governance_issue_types"),
+        record.get("governance_risk_reasons"),
+        record.get("governance_risk_fields"),
+        record.get("invalid_asset_fields"),
+        record.get("invalid_asset_values"),
+    )
+    return all(
+        [
+            record.get("record_type") == "merchant_case",
+            _text(record.get("status")) == "published",
+            _text(record.get("merchant_status")) == "現有商家",
+            bool(_text(record.get("brand_name"))),
+            bool(_text(record.get("merchant_handle"))),
+            has_valid_asset,
+            record.get("data_classification") == "public",
+            record.get("can_quote_externally") is True,
+            record.get("can_enter_content_index") is True,
+            record.get("no_valid_content_asset") is not True,
+            not any(blocked_markers),
+            record.get("same_brand_multiple_records") is not True,
+            record.get("same_handle_multiple_records") is not True,
+            record.get("multi_interview_record") is not True,
+            record.get("suspected_duplicate_review") is not True,
+        ]
+    )
 
 
 def _markdown_file_for_record(
@@ -528,6 +576,7 @@ def _build_apply_summary(
     previous_output_exists: bool,
     previous_output_mtime: Optional[str],
     include_clean_records: bool,
+    include_clean_merchant_cases: bool,
     decision_overrides: List[dict],
     governance_records: List[dict],
     internal_pending_records: List[dict],
@@ -538,6 +587,7 @@ def _build_apply_summary(
     markdown_records: List[dict],
     vault_only_records: List[dict],
     default_policy_records: List[dict],
+    clean_merchant_policy_records: List[dict],
 ) -> dict:
     bucket_counts = {
         "approved_vault_preview_md": len(markdown_records) + len(default_policy_records),
@@ -549,6 +599,7 @@ def _build_apply_summary(
         "deprecated": len(deprecated_records),
         "not_reviewed": len(not_reviewed_records),
         "default_policy_approved": len(default_policy_records),
+        "clean_merchant_policy_approved": len(clean_merchant_policy_records),
     }
     conservation = _conservation(preview, assignments)
     return {
@@ -568,6 +619,7 @@ def _build_apply_summary(
         "decision_overrides": decision_overrides,
         "multi_record_excluded": _multi_record_excluded(excluded_records + deprecated_records + vault_only_records),
         "include_clean_records": include_clean_records,
+        "include_clean_merchant_cases": include_clean_merchant_cases,
         "preview_notice": "本輸出為 preview。Obsidian 未同步、正式 index 未建立。下一步需人工確認後另行執行 sync（尚未實作）。",
     }
 
@@ -694,12 +746,15 @@ def _render_apply_summary(summary: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _default_policy_row(record: dict) -> dict:
+def _default_policy_row(record: dict, policy_flag: str = "--include-clean-records") -> dict:
+    notes = "Included by --include-clean-records default policy."
+    if policy_flag == "--include-clean-merchant-cases":
+        notes = "Included by --include-clean-merchant-cases policy."
     return {
         "review_decision": "approve(default)",
         "reviewer": "default_policy",
         "reviewed_at": datetime.now(timezone.utc).date().isoformat(),
-        "notes": "Included by --include-clean-records default policy.",
+        "notes": notes,
     }
 
 
