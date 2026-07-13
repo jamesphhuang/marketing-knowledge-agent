@@ -19,6 +19,7 @@ DEFAULT_SLACK_CONFIG_PATH = Path(".mka/slack_config.json")
 DEFAULT_SLACK_AUDIT_LOG = Path("reports/audit_log.csv")
 DENIED_CHANNEL_MESSAGE = "此頻道未啟用行銷知識查詢"
 ANSWER_TRUNCATION_NOTICE = "(內容過長已截斷,完整結果請用內部工具查詢)"
+SLACK_NO_RESULTS_MESSAGE = "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
 SLACK_AUDIT_HEADER = [
     "timestamp",
     "event",
@@ -124,7 +125,7 @@ def handle_slack_event(
 
 
 def format_slack_reply(answer, max_answer_chars: int) -> str:
-    body = answer.answer
+    body = SLACK_NO_RESULTS_MESSAGE if _is_slack_abstention(answer) else _slackify_markdown(answer.answer)
     if len(body) > max_answer_chars:
         body = f"{body[:max_answer_chars].rstrip()}\n{ANSWER_TRUNCATION_NOTICE}"
     parts = [body]
@@ -318,6 +319,25 @@ def _reply_dict(channel_id: str, thread_ts: str, text: str) -> dict:
 
 def _strip_app_mention(text: str) -> str:
     return re.sub(r"^\s*<@[A-Za-z0-9]+>\s*", "", text).strip()
+
+
+def _is_slack_abstention(answer) -> bool:
+    trace_mode = getattr(getattr(answer, "trace", None), "mode", None)
+    return not answer.citations and trace_mode != "refused"
+
+
+def _slackify_markdown(text: str) -> str:
+    lines = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"(?<!\S)#{1,6}\s+", "", raw_line.strip())
+        if "|" in line:
+            cells = [cell.strip() for cell in line.split("|") if cell.strip()]
+            cells = [cell for cell in cells if not re.fullmatch(r":?-{3,}:?", cell)]
+            line = " · ".join(cells)
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def _is_direct_message(event: dict) -> bool:

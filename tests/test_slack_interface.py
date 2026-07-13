@@ -134,6 +134,52 @@ def test_long_answer_only_truncates_body_and_preserves_citations_and_warnings():
     assert all(warning in text for warning in warnings)
 
 
+def test_slack_abstention_reply_is_single_line_without_titles():
+    answer = _agentic_answer(
+        body="相關度不足，未產生事實性回答。最接近的內容：\n- Unrelated Brand A\n- Unrelated Brand B",
+        citations=[],
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=2500)
+
+    assert text == "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
+    assert "Unrelated Brand" not in text
+    assert "\n" not in text
+
+
+def test_slack_denylist_refusal_unchanged():
+    answer = _agentic_answer(
+        body=RESTRICTED_QUERY_REFUSAL,
+        citations=[],
+        trace_mode="refused",
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=2500)
+
+    assert text == RESTRICTED_QUERY_REFUSAL
+
+
+def test_slack_body_strips_markdown_tables():
+    answer = _agentic_answer(
+        body=(
+            "[1] # Example heading ## Content Assets | Asset | Title | "
+            "| --- | --- | | Article | Example case study |"
+        ),
+        citations=[_citation("Public source")],
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=2500)
+
+    assert "Example heading" in text
+    assert "Content Assets" in text
+    assert "Article" in text
+    assert "Example case study" in text
+    assert "| --- |" not in text
+    assert "# Example" not in text
+    assert "## Content Assets" not in text
+    assert not any(line.lstrip().startswith("#") for line in text.splitlines())
+
+
 def test_startup_rejects_empty_channel_allowlist_before_slack_import(tmp_path):
     config_path = tmp_path / "slack.json"
     config_path.write_text(json.dumps({"allowed_channel_ids": []}), encoding="utf-8")
@@ -264,7 +310,7 @@ class FakeSlackClient:
         self.messages.append(reply)
 
 
-def _agentic_answer(body="answer", citations=None, warnings=None):
+def _agentic_answer(body="answer", citations=None, warnings=None, trace_mode="fast_path"):
     generated = GeneratedAnswer(
         question="question",
         answer=body,
@@ -275,7 +321,7 @@ def _agentic_answer(body="answer", citations=None, warnings=None):
     return AgenticAnswer(
         generated=generated,
         trace=AgentTrace(
-            mode="fast_path",
+            mode=trace_mode,
             analysis=QueryAnalysis(question_type="simple_lookup", needs_agent=False, reasons=[]),
             plan=[],
             observations=[],
