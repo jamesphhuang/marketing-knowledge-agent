@@ -35,7 +35,7 @@ def generate_answer(
             warnings=[],
         )
 
-    if _effective_score(selected[0]) < MIN_RELEVANCE_SCORE:
+    if selected[0].score < MIN_RELEVANCE_SCORE:
         closest_titles = []
         for result in selected[:3]:
             title = result.chunk.metadata.title
@@ -122,7 +122,3 @@ def _snippet(text: str, max_length: int = 260) -> str:
     if len(compact) <= max_length:
         return compact
     return f"{compact[: max_length - 1].rstrip()}..."
-
-
-def _effective_score(result: SearchResult) -> float:
-    return result.rerank_score or result.score
