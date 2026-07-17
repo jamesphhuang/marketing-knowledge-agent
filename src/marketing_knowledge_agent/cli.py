@@ -43,6 +43,10 @@ from .missing_parent_resolution_preview import (
     MissingParentResolutionPreviewError,
     generate_missing_parent_resolution_preview,
 )
+from .missing_parent_resolution_apply_preview import (
+    MissingParentResolutionApplyPreviewError,
+    generate_resolution_apply_preview,
+)
 from .pipeline import (
     DEFAULT_RESTRICTED_CUSTOMERS_PATH,
     agent_ask,
@@ -279,6 +283,23 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "validate-missing-parent-resolution":
+            summary = generate_resolution_apply_preview(
+                resolution_dir=args.resolution_dir,
+                parent_records_path=args.parent_records,
+                review_decisions_path=args.review_decisions,
+                inventory_path=args.inventory,
+                asset_apply_preview_path=args.asset_apply_preview,
+                asset_blocked_preview_path=args.asset_blocked_preview,
+                restricted_customers_path=args.restricted_customers,
+                vault_path=args.vault,
+                db_path=args.db,
+                production_slack_renderer_path=args.production_slack_renderer,
+                output_dir=args.output,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "preview-slack-output":
             if args.sample_set:
                 summary = generate_slack_output_preview(
@@ -395,6 +416,9 @@ def main(argv=None) -> int:
         return 2
     except MissingParentResolutionPreviewError as exc:
         print(f"missing parent resolution preview error: {exc}", file=sys.stderr)
+        return 2
+    except MissingParentResolutionApplyPreviewError as exc:
+        print(f"missing parent resolution validation error: {exc}", file=sys.stderr)
         return 2
     except SlackOutputPreviewError as exc:
         print(f"slack output preview error: {exc}", file=sys.stderr)
@@ -743,6 +767,62 @@ def build_parser() -> argparse.ArgumentParser:
         "--reviewed-at",
         default=None,
         help="Optional ISO 8601 timestamp for reproducible tests; defaults to local time",
+    )
+
+    resolution_validation_parser = subparsers.add_parser(
+        "validate-missing-parent-resolution",
+        help="Validate and plan missing-parent resolution without applying it",
+    )
+    resolution_validation_parser.add_argument(
+        "--resolution-dir",
+        type=Path,
+        default=Path("reports/missing_parent_resolution_preview"),
+    )
+    resolution_validation_parser.add_argument(
+        "--parent-records",
+        type=Path,
+        default=Path("reports/excel_preview/merchant_cases.json"),
+    )
+    resolution_validation_parser.add_argument(
+        "--review-decisions",
+        type=Path,
+        default=Path("reports/excel_preview/review_decisions_template.csv"),
+    )
+    resolution_validation_parser.add_argument(
+        "--inventory",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/asset_metadata_inventory.csv"),
+    )
+    resolution_validation_parser.add_argument(
+        "--asset-apply-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv"),
+    )
+    resolution_validation_parser.add_argument(
+        "--asset-blocked-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv"),
+    )
+    resolution_validation_parser.add_argument(
+        "--restricted-customers",
+        type=Path,
+        default=DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    )
+    resolution_validation_parser.add_argument(
+        "--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT
+    )
+    resolution_validation_parser.add_argument(
+        "--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB
+    )
+    resolution_validation_parser.add_argument(
+        "--production-slack-renderer",
+        type=Path,
+        default=Path("src/marketing_knowledge_agent/slack_interface.py"),
+    )
+    resolution_validation_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/missing_parent_resolution_apply_preview"),
     )
 
     slack_preview_parser = subparsers.add_parser(

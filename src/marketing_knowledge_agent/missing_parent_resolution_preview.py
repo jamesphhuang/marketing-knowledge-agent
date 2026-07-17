@@ -504,6 +504,21 @@ def generate_missing_parent_resolution_preview(
     return summary
 
 
+def build_resolution_formal_search(
+    context: ResolutionContext,
+    db_path: Path,
+    restricted_customers_path: Path,
+    apply_preview_path: Path,
+) -> Callable[[str], Sequence[dict]]:
+    """Build the existing read-only formal-search adapter for resolution previews."""
+    return _formal_search_factory(
+        context,
+        Path(db_path),
+        Path(restricted_customers_path),
+        Path(apply_preview_path),
+    )
+
+
 def _formal_search_factory(
     context: ResolutionContext,
     db_path: Path,
