@@ -44,6 +44,12 @@ from .retrieval import result_to_dict
 from .review_template import ReviewTemplateError, generate_review_template
 from .review_decision_validation import ReviewDecisionValidationError, validate_review_decisions
 from .slack_interface import SlackInterfaceError, run_slack_bot
+from .slack_output_preview import (
+    SAMPLE_QUERIES,
+    SlackOutputPreviewError,
+    generate_slack_output_preview,
+    preview_slack_query,
+)
 from .obsidian_sync import (
     DEFAULT_NAMESPACE,
     DEFAULT_OBSIDIAN_VAULT,
@@ -209,6 +215,34 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0 if summary["error_count"] == 0 else 1
 
+        if args.command == "preview-slack-output":
+            if args.sample_set:
+                summary = generate_slack_output_preview(
+                    queries=SAMPLE_QUERIES,
+                    db_path=args.db,
+                    apply_preview_path=args.apply_preview,
+                    blocked_preview_path=args.blocked_preview,
+                    decisions_path=args.decisions,
+                    restricted_customers_path=args.restricted_customers,
+                    output_dir=args.output,
+                    vault_path=args.vault,
+                    workbook_path=args.workbook,
+                )
+                print(json.dumps(summary, ensure_ascii=False, indent=2))
+                return 0 if summary["error_count"] == 0 else 1
+            print(
+                preview_slack_query(
+                    query=args.query,
+                    variant=args.variant,
+                    db_path=args.db,
+                    apply_preview_path=args.apply_preview,
+                    blocked_preview_path=args.blocked_preview,
+                    decisions_path=args.decisions,
+                    restricted_customers_path=args.restricted_customers,
+                )
+            )
+            return 0
+
         if args.command == "review-template":
             summary = generate_review_template(
                 preview_dir=args.preview_dir,
@@ -288,6 +322,9 @@ def main(argv=None) -> int:
         return 2
     except AssetApplyPreviewError as exc:
         print(f"asset apply preview error: {exc}", file=sys.stderr)
+        return 2
+    except SlackOutputPreviewError as exc:
+        print(f"slack output preview error: {exc}", file=sys.stderr)
         return 2
     except AssetReviewValidationError as exc:
         print(f"asset review validation error: {exc}", file=sys.stderr)
@@ -475,6 +512,47 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/asset_metadata_apply_preview"),
+    )
+
+    slack_preview_parser = subparsers.add_parser(
+        "preview-slack-output",
+        help="Render offline Slack format previews without calling Slack or applying asset URLs",
+    )
+    preview_mode = slack_preview_parser.add_mutually_exclusive_group(required=True)
+    preview_mode.add_argument("--query")
+    preview_mode.add_argument("--sample-set", action="store_true")
+    slack_preview_parser.add_argument(
+        "--variant",
+        choices=("concise", "standard", "detailed"),
+        default="standard",
+    )
+    slack_preview_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    slack_preview_parser.add_argument(
+        "--apply-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv"),
+    )
+    slack_preview_parser.add_argument(
+        "--blocked-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv"),
+    )
+    slack_preview_parser.add_argument(
+        "--decisions",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/human_review_template.csv"),
+    )
+    slack_preview_parser.add_argument(
+        "--restricted-customers",
+        type=Path,
+        default=DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    )
+    slack_preview_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    slack_preview_parser.add_argument("--workbook", type=Path, default=None)
+    slack_preview_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/slack_output_preview"),
     )
 
     review_template_parser = subparsers.add_parser(

@@ -184,6 +184,17 @@ Runtime 支援狀態以 `query_planning.RUNTIME_SUPPORT_MATRIX` 為準。Parser 
 
 `apply-asset-review-decisions` 是獨立於 merchant `apply-review-decisions` 的 preview-only contract，沒有正式 Apply 模式。它會在暫存目錄重新驗證 decision，確認 persisted validation reports 未過期，只讓 `ready_for_apply_preview + approve` 的 `asset_url`／`canonical_url` 進 proposed diff；governance-blocked assets 只會出現在 blocked report。正式儲存建議為一個 asset 一筆的 flat managed record，再衍生 SQLite `content_assets` table；不可把多個 asset URL 塞入 parent record-level `canonical_url`。
 
+離線比較 Slack 回覆格式，不套用 URL、不讀 Slack Token，也不呼叫 Slack API：
+
+```bash
+.venv/bin/mka preview-slack-output --query "三風製麵" --variant standard
+.venv/bin/mka preview-slack-output --sample-set \
+  --workbook "reports/excel_preview/MKT 內容產出資料庫_店家_夥伴案例_對外數據-20260708.xlsx" \
+  --output reports/slack_output_preview
+```
+
+`preview-slack-output` 會以正式 external-intent `StructuredRetrievalResult` 為唯一結果集合，再用 `(record_id, asset_id, field)` 將已核准 `asset_url`／`canonical_url` 疊加於記憶體。Concise、standard、detailed 三種格式共用同一 payload，只改資訊量；`canonical_url`、內部 ID、路徑、provenance 與 retrieval scores 不會進 user-facing payload。此命令不會修改 production `slack-bot` renderer，也不會啟用任何新 query constraint。
+
 執行內建 evaluation：
 
 ```bash
