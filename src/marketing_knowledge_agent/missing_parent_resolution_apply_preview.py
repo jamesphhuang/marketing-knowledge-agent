@@ -384,7 +384,13 @@ def _source_metadata_preview(
                 "merchant_handle_requirement": "not_required" if expected_type == "partner" else "required_by_existing_rules",
                 "proposed_search_aliases": _stable_json(aliases),
                 "alias_storage_action": "add_source_record_field" if aliases else "no_change",
-                "alias_provenance": "James Huang human decision" if aliases else "",
+                "search_aliases": _stable_json(aliases),
+                "alias_provenance": "Admin human decision" if aliases else "",
+                "alias_reviewer": _text(proposal.get("reviewer")) if aliases else "",
+                "alias_reviewed_at": _text(proposal.get("reviewed_at")) if aliases else "",
+                "target_storage": _future_parent_target(record_id),
+                "action": "add_exact_aliases" if aliases else "validate_existing_identity",
+                "reason": _text(proposal.get("decision_reason")),
                 "reviewer": _text(proposal.get("reviewer")),
                 "reviewed_at": _text(proposal.get("reviewed_at")),
                 "future_vault_target": _future_parent_target(record_id),
@@ -464,8 +470,8 @@ def _alias_collisions(
                 "identity_collision_count": len(identity_matches),
                 "other_record_match_count": len(tag_matches),
                 "result_behavior": "include_all_legitimate_exact_field_matches" if tag_matches else "resolve_source_record",
-                "reviewer": _text(alias_row.get("reviewer")),
-                "reviewed_at": _text(alias_row.get("reviewed_at")),
+                "alias_reviewer": _text(alias_row.get("reviewer")),
+                "alias_reviewed_at": _text(alias_row.get("reviewed_at")),
             }
         )
     return rows, errors
@@ -513,7 +519,7 @@ def _asset_apply_preview_rows(
                 "content_tags_source": "eligible_parent_source_record" if tags else "not_resolved",
                 "future_asset_vault_target": _future_asset_target(asset_id),
                 "future_sqlite_target": "content_assets.asset_index_eligibility / asset_search_eligibility",
-                "reviewer": _text(asset.get("reviewer")),
+                "reviewed_by": _text(asset.get("reviewer")),
                 "reviewed_at": _text(asset.get("reviewed_at")),
                 "applied": "false",
             }
@@ -759,7 +765,7 @@ def _search_md(results: Sequence[dict]) -> str:
 def _checklist_md(summary: Mapping[str, object]) -> str:
     return f"""# Resolution Apply Confirmation Checklist
 
-- [x] Exact five James Huang decisions validated
+- [x] Exact five Admin decisions validated
 - [x] Parent / asset identity and count conservation checked
 - [x] Alias exact matching, collision and governance behavior checked
 - [x] Hold and exclude assets removed from search, Slack and citation previews

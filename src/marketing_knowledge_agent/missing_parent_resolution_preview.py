@@ -17,7 +17,7 @@ from .models import SearchFilters
 from .pipeline import ask_index
 
 
-REVIEWER = "James Huang"
+REVIEWER = "Admin"
 OLD_PLAN_ID = "asset-plan-07cd12338615c961"
 SOURCE_DISPLAY_NAME = "MKT 內容產出資料庫_店家 / 夥伴案例 / 對外數據"
 SEARCH_QUERIES = (
@@ -997,7 +997,7 @@ def _checklist_markdown(summary: Mapping[str, object]) -> str:
         [
             "# Resolution Confirmation Checklist",
             "",
-            "- [x] James Huang decisions represented without rewriting source decisions",
+            "- [x] Admin decisions represented without rewriting source decisions",
             "- [x] Partner Handle optional rule uses authoritative merchant_status",
             "- [x] Asset include / hold / exclude is independent from parent approval",
             "- [x] SLP and SHOPLINE Payments are exact, case-insensitive source-record aliases",

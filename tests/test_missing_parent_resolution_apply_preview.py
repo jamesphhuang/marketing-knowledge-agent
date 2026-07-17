@@ -35,6 +35,20 @@ def test_exact_five_parent_decisions_validate(tmp_path):
         ("Sheet:r7", "approve"),
     }
     assert all(row["validation_status"] == "valid" for row in rows)
+    assert all(row["reviewer"] == "Admin" for row in rows)
+
+
+def test_stale_reviewer_metadata_is_rejected(tmp_path):
+    paths = _prepared(tmp_path)
+    proposal = paths["output"] / "missing_parent_resolution_decisions.csv"
+    rows = _read_csv(proposal)
+    rows[0]["reviewer"] = "James Huang"
+    _write_csv(proposal, rows)
+
+    summary = _run(paths)
+
+    assert summary["execution_blocked"] is True
+    assert summary["validation_error_codes"]["invalid_reviewer"] == 1
 
 
 def test_stale_parent_decision_is_rejected(tmp_path):
@@ -116,6 +130,25 @@ def test_alias_resolution_is_exact_case_insensitive_and_governed(tmp_path):
     assert all(row["match_type"] == "case_insensitive_exact" for row in alias_rows)
     assert all(row["fuzzy_matching"] == "false" for row in alias_rows)
     assert all(row["governance_required"] == "true" for row in alias_rows)
+    assert all(row["alias_reviewer"] == "Admin" for row in alias_rows)
+
+
+def test_new_review_metadata_uses_admin_specific_fields(tmp_path):
+    paths = _prepared(tmp_path)
+    _run(paths)
+    source_rows = _read_csv(paths["apply_output"] / "source_metadata_apply_preview.csv")
+    asset_rows = _read_csv(paths["apply_output"] / "asset_eligibility_apply_preview.csv")
+    manifest = json.loads(
+        (paths["apply_output"] / "resolution_apply_manifest.json").read_text(encoding="utf-8")
+    )
+
+    alias_source = next(row for row in source_rows if row["record_id"] == "Sheet:r32")
+    assert alias_source["alias_reviewer"] == "Admin"
+    assert alias_source["alias_reviewed_at"] == REVIEWED_AT
+    assert alias_source["search_aliases"] == '["SLP","SHOPLINE Payments"]'
+    assert all(row["reviewed_by"] == "Admin" for row in asset_rows)
+    assert manifest["reviewer"] == "Admin"
+    assert "James Huang" not in json.dumps(manifest, ensure_ascii=False)
 
 
 def test_held_video_is_excluded_from_manifest_search_slack_and_citation(tmp_path):
