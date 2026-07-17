@@ -35,6 +35,10 @@ from .excel_preview import ExcelPreviewError, generate_excel_preview
 from .ingestion import IngestionError
 from .llm import LLMError
 from .models import SearchFilters
+from .missing_parent_diagnostic import (
+    MissingParentDiagnosticError,
+    diagnose_missing_formal_parents,
+)
 from .pipeline import (
     DEFAULT_RESTRICTED_CUSTOMERS_PATH,
     agent_ask,
@@ -240,6 +244,20 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 1 if summary["execution_blocked"] else 0
 
+        if args.command == "diagnose-missing-formal-parents":
+            summary = diagnose_missing_formal_parents(
+                join_validation_path=args.join_validation,
+                apply_preview_path=args.apply_preview,
+                parent_records_path=args.parent_records,
+                review_decisions_path=args.review_decisions,
+                restricted_customers_path=args.restricted_customers,
+                vault_path=args.vault,
+                db_path=args.db,
+                output_dir=args.output,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "preview-slack-output":
             if args.sample_set:
                 summary = generate_slack_output_preview(
@@ -350,6 +368,9 @@ def main(argv=None) -> int:
         return 2
     except AssetApplyPlanError as exc:
         print(f"asset apply plan error: {exc}", file=sys.stderr)
+        return 2
+    except MissingParentDiagnosticError as exc:
+        print(f"missing parent diagnostic error: {exc}", file=sys.stderr)
         return 2
     except SlackOutputPreviewError as exc:
         print(f"slack output preview error: {exc}", file=sys.stderr)
@@ -607,6 +628,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/asset_metadata_apply_plan"),
+    )
+
+    missing_parent_parser = subparsers.add_parser(
+        "diagnose-missing-formal-parents",
+        help="Diagnose orphan assets and missing formal parents without applying repairs",
+    )
+    missing_parent_parser.add_argument(
+        "--join-validation",
+        type=Path,
+        default=Path(
+            "reports/asset_metadata_apply_plan/asset_source_record_join_validation.csv"
+        ),
+    )
+    missing_parent_parser.add_argument(
+        "--apply-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv"),
+    )
+    missing_parent_parser.add_argument(
+        "--parent-records",
+        type=Path,
+        default=Path("reports/excel_preview/merchant_cases.json"),
+    )
+    missing_parent_parser.add_argument(
+        "--review-decisions",
+        type=Path,
+        default=Path("reports/excel_preview/review_decisions_template.csv"),
+    )
+    missing_parent_parser.add_argument(
+        "--restricted-customers",
+        type=Path,
+        default=DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    )
+    missing_parent_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    missing_parent_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    missing_parent_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/missing_formal_parent_diagnostic"),
     )
 
     slack_preview_parser = subparsers.add_parser(
