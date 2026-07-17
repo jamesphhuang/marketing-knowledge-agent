@@ -20,8 +20,9 @@ Marketing Knowledge Agent 是一個預設離線的 Python RAG prototype，用來
 - Metadata schema v0.2 支援 Excel 來源的 merchant case、public metric、pending metric、restricted customer denylist 與 handle mapping。
 - Restricted customer 與 handle mapping 是治理/正規化資料，不進一般向量檢索 citation。
 - 內建 mock vault 與 evaluation cases。
-- 欄位感知 query planning：名稱、Handle、採訪年份、Category、Tag、asset type 與明確狀態可轉成 typed hard constraints。
+- 欄位感知 query planning：名稱、Handle、採訪年份、Category、Tag 與 asset type 可轉成 typed hard constraints。
 - Structured lookup 不會用其他品牌補滿 Top K；CLI、agentic 與 Slack 共用相同 candidate selection。
+- 不可執行的欄位或 operator 會 fail closed；AND 查詢不會只執行其中可支援的條件。
 
 ## 安裝
 
@@ -75,6 +76,24 @@ python3 -m venv .venv
 ```
 
 Query plan 的 hard constraints 預設使用 AND。找不到交集時不會自動改成 OR、移除年份／分類／資產類型，或加入低相關來源。
+
+### 欄位搜尋支援範圍
+
+Runtime 支援狀態以 `query_planning.RUNTIME_SUPPORT_MATRIX` 為準。Parser 能辨識或 Query Plan 能表達某欄位，不代表 formal data 已具備資料，也不代表 Slack 可正式使用。
+
+| 欄位 | Parser / Plan | Executor | Formal data | Slack |
+| --- | --- | --- | --- | --- |
+| 商家名稱、Handle | 支援 | 支援 | 有 | 可用 |
+| Sales Category LV1 / LV2 | 支援 | 支援 | 有 | 可用 |
+| 採訪年份與年份區間 | 支援 | 支援 | 有 | 可用 |
+| exact content tag、asset type | 支援 | 支援 | 有 | 可用 |
+| partner name | 可表達 | 不支援 | 無 | fail closed |
+| interview date / status | 可辨識、可表達 | 不支援 | 無 | fail closed |
+| review status | 可辨識、可表達 | 不支援 | 無 | fail closed |
+| asset URL / published date | 可辨識、可表達 | 不支援 | 無 | fail closed |
+| asset publication status | 可辨識、可表達 | 不支援 | 無 | fail closed |
+
+完整日期會先被辨識為 date constraint，不會降級成採訪年份。`status` 是 record-level 狀態，不會被當作每個 article/video/podcast/news 的上線狀態；缺少 asset-level 狀態時顯示「資料未提供」。後續需以 Asset-Level Metadata Enrichment Sprint 補齊各素材的 URL、published date 與 publication status，再開放這些條件。
 
 ### LLM 雙鑰政策閘門
 

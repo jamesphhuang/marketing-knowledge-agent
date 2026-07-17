@@ -77,6 +77,8 @@ def search_index(
     requested_filters = filters or SearchFilters()
     filters = apply_intent_gating(requested_filters)
     query_plan = query_plan or build_index_query_plan(query, db_path, requested_filters)
+    if query_plan.execution_blocked:
+        return []
     retriever = SQLiteRetriever(Path(db_path))
     initial_results = retriever.search(
         query=query,
@@ -413,6 +415,10 @@ def explain_query(
     )
     return {
         "query_plan": query_plan.to_dict(),
+        "unsupported_constraints": [item.to_dict() for item in query_plan.unsupported_constraints],
+        "ambiguous_constraints": [item.to_dict() for item in query_plan.ambiguous_constraints],
+        "invalid_constraints": [item.to_dict() for item in query_plan.invalid_constraints],
+        "execution_blocked": query_plan.execution_blocked,
         "candidate_count_before_filtering": len(before_documents),
         "candidate_count_after_filtering": len(after_documents),
         "governance_removed_count": governance_removed_count,

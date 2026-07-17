@@ -14,7 +14,13 @@ from marketing_knowledge_agent.chunking import chunk_documents
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.indexing import SQLiteIndex
 from marketing_knowledge_agent.llm_generation import append_llm_audit
-from marketing_knowledge_agent.models import Citation, Document, DocumentMetadata, GeneratedAnswer
+from marketing_knowledge_agent.models import (
+    Citation,
+    Document,
+    DocumentMetadata,
+    GeneratedAnswer,
+    StructuredRetrievalResult,
+)
 from marketing_knowledge_agent.query_gating import RESTRICTED_QUERY_REFUSAL
 from marketing_knowledge_agent.query_gating import append_denylist_query_audit
 from marketing_knowledge_agent.slack_interface import (
@@ -157,6 +163,43 @@ def test_slack_denylist_refusal_unchanged():
     text = format_slack_reply(answer, max_answer_chars=2500)
 
     assert text == RESTRICTED_QUERY_REFUSAL
+
+
+def test_slack_unsupported_constraint_explains_condition_without_citations():
+    unsupported = {
+        "field": "publication_status",
+        "value": "published",
+        "operator": "exact",
+        "hard_filter": True,
+        "support_status": "unsupported",
+        "reason": "asset-level publication status is not available",
+    }
+    structured = StructuredRetrievalResult(
+        query_plan={
+            "hard_filters": [unsupported],
+            "unsupported_constraints": [unsupported],
+            "abstain_reason": "unsupported_hard_constraint",
+        },
+        unsupported_constraints=[unsupported],
+        execution_blocked=True,
+        abstained=True,
+        abstain_reason="unsupported_hard_constraint",
+    )
+    answer = _agentic_answer(
+        body=(
+            "目前資料尚不支援以下搜尋條件：\n"
+            "- 上線狀態\n\n"
+            "目前可使用品牌名稱、Handle、Sales Category、採訪年份、內容標籤與內容類型進行搜尋。"
+        ),
+        citations=[],
+        structured_result=structured,
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=2500)
+
+    assert "目前資料尚不支援以下搜尋條件" in text
+    assert "上線狀態" in text
+    assert "📚 來源" not in text
 
 
 def test_slack_body_strips_markdown_tables():
@@ -310,13 +353,20 @@ class FakeSlackClient:
         self.messages.append(reply)
 
 
-def _agentic_answer(body="answer", citations=None, warnings=None, trace_mode="fast_path"):
+def _agentic_answer(
+    body="answer",
+    citations=None,
+    warnings=None,
+    trace_mode="fast_path",
+    structured_result=None,
+):
     generated = GeneratedAnswer(
         question="question",
         answer=body,
         citations=citations or [],
         warnings=warnings or [],
         governance_checked=True,
+        structured_result=structured_result,
     )
     return AgenticAnswer(
         generated=generated,

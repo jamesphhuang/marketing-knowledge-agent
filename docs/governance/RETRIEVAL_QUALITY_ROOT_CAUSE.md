@@ -66,7 +66,7 @@ Generator 沒有自行重新檢索，但會依序使用收到的前幾個 chunks
 - `sales_category_lv1` / `sales_category_lv2`
 - `content_tags`
 - `article_title` / `video_title` / `podcast_title` / `news_title`
-- `status`
+- record-level `status`（只供既有治理，不代表 asset 已上線）
 - `claim_status`
 - `allowed_exposure_channels`
 - `can_quote_externally`
@@ -84,13 +84,25 @@ Generator 沒有自行重新檢索，但會依序使用收到的前幾個 chunks
 
 缺少的欄位不得從正文、擷取日期或檔名推測。
 
+## Acceptance Follow-up: Fail-Closed Constraints
+
+`98700af` 的 acceptance review 發現三個 blocking root causes：
+
+1. Field Registry 只描述欄位，沒有驅動 executor；未知欄位最後會回傳 match。
+2. 完整日期先被單一年份 regex 部分命中，造成 date query 降級成 `interview_year`。
+3. asset-level `publication_status` 被錯誤映射到 record-level `status`。
+
+修正後，每個 `QueryConstraint` 都有 `support_status` 與 `reason`，Field Registry 同時聲明 `searchable`、`executable`、`metadata_source`、value scope 與 unsupported reason。Plan 會衍生 supported / unsupported / ambiguous / invalid constraint 清單；任何不可執行的 hard constraint 都令 `execution_blocked=true`，retrieval 在 FTS/vector 前直接停止。Executor 對未知欄位與未知 operator 明確 non-match，作為第二道防線。
+
+解析順序改為完整日期 → 年份區間 → 單一年份。完整日期與 `partner_name`、`review_status`、`interview_status`、asset URL/date/status 等未具正式資料的條件會保留在 plan 並 fail closed，不會刪除後只執行 AND 查詢的其他條件。
+
 ## Corrective Architecture
 
 新流程在共用 pipeline 內加入：
 
 ```text
 normalize → resolve canonical fields → TypedQueryPlan
-→ hard constraint filtering → governance filtering
+→ support validation / fail closed → hard constraint filtering → governance filtering
 → lexical/vector ranking inside legal candidates
 → structured entity/asset aggregation
 → channel renderer
@@ -105,3 +117,6 @@ normalize → resolve canonical fields → TypedQueryPlan
 - Restricted customer 與 handle mapping 仍不進 content index 或 citation。
 - 本 sprint 未新增外部 API、LLM 呼叫或 token handling。
 
+## Follow-up Migration
+
+後續應建立 Asset-Level Metadata Enrichment Sprint，新增經人工審核的 `content_assets` 資料：record id、asset type、title、URL、published_at 與 publication status。完成 schema migration、Vault preview、formal index rebuild 與 governance assertions 前，asset URL、published date 與 publication status 必須維持 fail closed。

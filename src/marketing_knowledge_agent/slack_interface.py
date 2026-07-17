@@ -323,6 +323,10 @@ def _strip_app_mention(text: str) -> str:
 
 def _is_slack_abstention(answer) -> bool:
     trace_mode = getattr(getattr(answer, "trace", None), "mode", None)
+    generated = getattr(answer, "generated", answer)
+    structured = getattr(generated, "structured_result", None)
+    if structured is not None and structured.execution_blocked:
+        return False
     return not answer.citations and trace_mode != "refused"
 
 

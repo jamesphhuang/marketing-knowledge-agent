@@ -34,7 +34,7 @@ def generate_structured_answer(
     today: date = None,
     governance_index: Optional[GovernanceIndex] = None,
 ) -> GeneratedAnswer:
-    unique_results = _unique_document_results(results)
+    unique_results = [] if query_plan.execution_blocked else _unique_document_results(results)
     entities, citations, warnings, removed_asset_count = _aggregate_entities(
         unique_results,
         query_plan,
@@ -45,13 +45,19 @@ def generate_structured_answer(
         warnings.append(f"已依 restricted denylist 移除 {removed_asset_count} 筆結構化資產")
     total_assets = sum(len(entity.assets) for entity in entities)
     abstained = not total_assets
-    abstain_reason = query_plan.abstain_reason or ("no_constraint_intersection" if abstained else None)
+    abstain_reason = query_plan.effective_abstain_reason or ("no_constraint_intersection" if abstained else None)
+    plan_dict = query_plan.to_dict()
     structured = StructuredRetrievalResult(
-        query_plan=query_plan.to_dict(),
+        query_plan=plan_dict,
         matched_entities=entities,
         total_entities=len(entities),
         total_assets=total_assets,
         warnings=warnings,
+        supported_constraints=plan_dict["supported_constraints"],
+        unsupported_constraints=plan_dict["unsupported_constraints"],
+        ambiguous_constraints=plan_dict["ambiguous_constraints"],
+        invalid_constraints=plan_dict["invalid_constraints"],
+        execution_blocked=query_plan.execution_blocked,
         abstained=abstained,
         abstain_reason=abstain_reason,
     )
@@ -61,7 +67,7 @@ def generate_structured_answer(
         answer=answer_text,
         citations=citations,
         warnings=warnings,
-        query_plan=query_plan.to_dict(),
+        query_plan=plan_dict,
         structured_result=structured,
     )
 
@@ -70,10 +76,17 @@ def render_structured_result(result: StructuredRetrievalResult) -> str:
     plan = result.query_plan
     constraints = plan.get("hard_filters", [])
     if result.abstained:
-        if plan.get("abstain_reason") == "unsupported_status_field":
+        if result.unsupported_constraints:
+            labels = _constraint_labels(result.unsupported_constraints)
             return (
-                "目前資料 schema 無法可靠判斷這個狀態條件，因此未執行近似搜尋。"
-                "請改用商家狀態、上線狀態或對外引用資格等明確條件。"
+                "目前資料尚不支援以下搜尋條件：\n"
+                + "\n".join(f"- {label}" for label in labels)
+                + "\n\n目前可使用品牌名稱、Handle、Sales Category、採訪年份、內容標籤與內容類型進行搜尋。"
+            )
+        if result.invalid_constraints:
+            labels = _constraint_labels(result.invalid_constraints)
+            return "以下搜尋條件格式無效，因此未執行搜尋：\n" + "\n".join(
+                f"- {label}" for label in labels
             )
         if plan.get("abstain_reason") in {"unresolved_structured_lookup", "ambiguous_entity_type"}:
             return (
@@ -170,7 +183,7 @@ def _aggregate_entities(
                     if metadata.record_type == "content_asset" and metadata.publish_date
                     else None
                 ),
-                publication_status=metadata.status,
+                publication_status=None,
                 external_usage_status=_external_usage_label(metadata),
                 source_record_id=source_record_id,
                 source_sheet=metadata.source_sheet,
@@ -240,6 +253,17 @@ def _constraint_summary(constraint: Dict[str, object]) -> str:
     else:
         display_value = str(value)
     return f"{label}：{display_value}"
+
+
+def _constraint_labels(constraints: Iterable[Dict[str, object]]) -> List[str]:
+    labels: List[str] = []
+    for constraint in constraints:
+        field_name = str(constraint.get("field") or "")
+        definition = FIELD_REGISTRY.get(field_name)
+        label = definition.output_label if definition else field_name
+        if label and label not in labels:
+            labels.append(label)
+    return labels
 
 
 def _status_label(value: Optional[str]) -> str:

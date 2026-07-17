@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import asdict, dataclass, field, replace
+from datetime import date
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from .models import DocumentMetadata
@@ -12,6 +13,7 @@ from .models import DocumentMetadata
 class FieldDefinition:
     canonical_name: str
     source_field: Optional[str]
+    metadata_source: Optional[str]
     data_type: str
     accepted_aliases: List[str]
     normalization_rule: str
@@ -21,6 +23,10 @@ class FieldDefinition:
     output_label: str
     governance_sensitivity: str = "normal"
     available: bool = True
+    searchable: bool = True
+    executable: bool = True
+    value_scope: str = "record_level"
+    unsupported_reason: Optional[str] = None
 
 
 def _field(
@@ -35,10 +41,17 @@ def _field(
     hard_filter: bool = True,
     governance_sensitivity: str = "normal",
     available: bool = True,
+    searchable: Optional[bool] = None,
+    executable: Optional[bool] = None,
+    value_scope: str = "record_level",
+    unsupported_reason: Optional[str] = None,
 ) -> FieldDefinition:
+    searchable = available if searchable is None else searchable
+    executable = available if executable is None else executable
     return FieldDefinition(
         canonical_name=canonical_name,
         source_field=source_field,
+        metadata_source=source_field,
         data_type=data_type,
         accepted_aliases=list(aliases),
         normalization_rule="unicode_nfkc_casefold_trim",
@@ -48,6 +61,10 @@ def _field(
         output_label=output_label,
         governance_sensitivity=governance_sensitivity,
         available=available,
+        searchable=searchable,
+        executable=executable,
+        value_scope=value_scope,
+        unsupported_reason=unsupported_reason,
     )
 
 
@@ -59,7 +76,8 @@ FIELD_REGISTRY: Dict[str, FieldDefinition] = {
     ),
     "interview_date": _field(
         "interview_date", None, "date", ["採訪日期"],
-        ["eq", "range", "before", "after"], "採訪日期", available=False
+        ["eq", "range", "before", "after"], "採訪日期", available=False,
+        value_scope="record_level", unsupported_reason="formal index does not contain interview_date"
     ),
     "entity_name": _field(
         "entity_name", "brand_name", "string", ["商家名稱", "夥伴名稱", "品牌"],
@@ -71,7 +89,8 @@ FIELD_REGISTRY: Dict[str, FieldDefinition] = {
     ),
     "partner_name": _field(
         "partner_name", None, "string", ["夥伴名稱"], ["exact"], "夥伴名稱",
-        exact_behavior="canonical_exact", available=False
+        exact_behavior="canonical_exact", available=False,
+        unsupported_reason="formal index does not contain partner_name"
     ),
     "merchant_handle": _field(
         "merchant_handle", "merchant_handle", "normalized_string", ["handle", "merchant handle"],
@@ -96,15 +115,19 @@ FIELD_REGISTRY: Dict[str, FieldDefinition] = {
     ),
     "interview_status": _field(
         "interview_status", None, "enum", ["採訪狀態", "已採訪"],
-        ["exact", "in"], "採訪狀態", available=False
+        ["exact", "in"], "採訪狀態", available=False,
+        unsupported_reason="formal index does not contain interview_status"
     ),
     "content_status": _field(
         "content_status", None, "enum", ["內容狀態"], ["exact", "in"], "內容狀態",
-        governance_sensitivity="publication", available=False
+        governance_sensitivity="publication", available=False,
+        unsupported_reason="formal index does not contain content_status"
     ),
     "publication_status": _field(
-        "publication_status", "status", "enum", ["上線狀態", "發布狀態", "已上線", "已發布"],
-        ["exact", "in"], "上線狀態", governance_sensitivity="external_usage"
+        "publication_status", None, "enum", ["上線狀態", "發布狀態", "已上線", "已發布", "已公開"],
+        ["exact", "in"], "內容上線狀態", governance_sensitivity="external_usage",
+        available=False, value_scope="asset_level",
+        unsupported_reason="asset-level publication status is not available"
     ),
     "merchant_status": _field(
         "merchant_status", "merchant_status", "string", ["商家狀態", "夥伴狀態"],
@@ -112,15 +135,18 @@ FIELD_REGISTRY: Dict[str, FieldDefinition] = {
     ),
     "review_status": _field(
         "review_status", None, "enum", ["審核狀態", "待審核", "已審核"],
-        ["exact", "in"], "審核狀態", governance_sensitivity="review", available=False
+        ["exact", "in"], "審核狀態", governance_sensitivity="review", available=False,
+        unsupported_reason="formal index does not contain review_status"
     ),
     "review_decision": _field(
         "review_decision", None, "enum", ["審核決策"], ["exact", "in"], "審核決策",
-        governance_sensitivity="review", available=False
+        governance_sensitivity="review", available=False,
+        unsupported_reason="review_decision is not searchable in the formal index"
     ),
     "governance_status": _field(
         "governance_status", None, "enum", ["治理狀態"], ["exact", "in"], "治理狀態",
-        governance_sensitivity="governance", available=False
+        governance_sensitivity="governance", available=False,
+        unsupported_reason="formal index does not contain governance_status"
     ),
     "claim_status": _field(
         "claim_status", "claim_status", "enum", ["數據審核狀態"],
@@ -140,14 +166,16 @@ FIELD_REGISTRY: Dict[str, FieldDefinition] = {
     ),
     "asset_url": _field(
         "asset_url", None, "url", ["素材連結", "內容連結"], ["exact"], "素材連結",
-        available=False
+        available=False, value_scope="asset_level",
+        unsupported_reason="asset-level URL is not available"
     ),
     "published_at": _field(
         "published_at", None, "date", ["上線日期", "發布日期"],
-        ["eq", "range", "before", "after"], "上線日期", available=False
+        ["eq", "range", "before", "after"], "上線日期", available=False,
+        value_scope="asset_level", unsupported_reason="asset-level published_at is not available"
     ),
     "title": _field(
-        "title", "title", "string", ["標題", "內容標題"], ["lexical", "semantic"], "標題",
+        "title", "title", "string", ["標題", "內容標題"], ["exact", "lexical", "semantic"], "標題",
         exact_behavior="lexical_then_semantic", hard_filter=False
     ),
     "metric_name": _field(
@@ -172,6 +200,20 @@ FIELD_REGISTRY: Dict[str, FieldDefinition] = {
 }
 
 
+RUNTIME_SUPPORT_MATRIX: Dict[str, Dict[str, object]] = {
+    name: {
+        "parser_recognizable": bool(definition.accepted_aliases),
+        "query_plan_expressible": True,
+        "executor_supported": definition.executable,
+        "formal_data_available": bool(definition.metadata_source) and definition.executable,
+        "slack_ready": definition.searchable and definition.executable,
+        "value_scope": definition.value_scope,
+        "unsupported_reason": definition.unsupported_reason,
+    }
+    for name, definition in FIELD_REGISTRY.items()
+}
+
+
 ASSET_TYPE_ALIASES = {
     "article": ("article", "文章"),
     "video": ("video", "影片", "影音"),
@@ -188,6 +230,7 @@ CATEGORY_ALIASES = {
 PUBLICATION_STATUS_ALIASES = {
     "已上線": "published",
     "已發布": "published",
+    "已公開": "published",
     "published": "published",
     "草稿": "draft",
     "draft": "draft",
@@ -205,6 +248,13 @@ EXPOSURE_CHANNEL_ALIASES = {
     "speaking_deck": ("speaking_deck", "演講簡報"),
     "website_recruiting": ("website_recruiting", "官網", "招募網站"),
     "ads": ("ads", "廣告"),
+}
+
+FULL_DATE_PATTERN = r"(?<!\d)(20\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])(?!\d)"
+EXPLICIT_CONSTRAINT_PATTERN = r"(?<![a-z0-9_])([a-z_][a-z0-9_]*)\s*=\s*([^+\s，,]+)"
+REVIEW_STATUS_ALIASES = {
+    "待審核": "pending",
+    "已審核": "approved",
 }
 
 
@@ -265,6 +315,9 @@ class QueryConstraint:
     hard_filter: bool
     source: str
     confidence: float = 1.0
+    support_status: str = "supported"
+    reason: Optional[str] = None
+    raw_value: Any = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -290,7 +343,43 @@ class TypedQueryPlan:
 
     @property
     def hard_constraints(self) -> List[QueryConstraint]:
-        return [constraint for constraint in self.constraints if constraint.hard_filter]
+        return [constraint for constraint in self.validated_constraints if constraint.hard_filter]
+
+    @property
+    def validated_constraints(self) -> List[QueryConstraint]:
+        return [validate_constraint(constraint) for constraint in self.constraints]
+
+    @property
+    def supported_constraints(self) -> List[QueryConstraint]:
+        return [item for item in self.validated_constraints if item.support_status == "supported"]
+
+    @property
+    def unsupported_constraints(self) -> List[QueryConstraint]:
+        return [item for item in self.validated_constraints if item.support_status == "unsupported"]
+
+    @property
+    def ambiguous_constraints(self) -> List[QueryConstraint]:
+        return [item for item in self.validated_constraints if item.support_status == "ambiguous"]
+
+    @property
+    def invalid_constraints(self) -> List[QueryConstraint]:
+        return [item for item in self.validated_constraints if item.support_status == "invalid"]
+
+    @property
+    def effective_abstain_reason(self) -> Optional[str]:
+        if self.abstain_reason:
+            return self.abstain_reason
+        if any(item.hard_filter for item in self.unsupported_constraints):
+            return "unsupported_hard_constraint"
+        if any(item.hard_filter for item in self.ambiguous_constraints):
+            return "ambiguous_hard_constraint"
+        if any(item.hard_filter for item in self.invalid_constraints):
+            return "invalid_hard_constraint"
+        return None
+
+    @property
+    def execution_blocked(self) -> bool:
+        return self.effective_abstain_reason is not None
 
     def to_dict(self) -> dict:
         return {
@@ -299,9 +388,14 @@ class TypedQueryPlan:
             "query_mode": self.query_mode,
             "parsed_terms": list(self.parsed_terms),
             "resolved_entities": [asdict(entity) for entity in self.resolved_entities],
-            "constraints": [constraint.to_dict() for constraint in self.constraints],
+            "constraints": [constraint.to_dict() for constraint in self.validated_constraints],
             "operator": self.operator,
             "hard_filters": [constraint.to_dict() for constraint in self.hard_constraints],
+            "supported_constraints": [item.to_dict() for item in self.supported_constraints],
+            "unsupported_constraints": [item.to_dict() for item in self.unsupported_constraints],
+            "ambiguous_constraints": [item.to_dict() for item in self.ambiguous_constraints],
+            "invalid_constraints": [item.to_dict() for item in self.invalid_constraints],
+            "execution_blocked": self.execution_blocked,
             "free_text_terms": list(self.free_text_terms),
             "requested_asset_types": list(self.requested_asset_types),
             "sort": list(self.sort),
@@ -309,7 +403,7 @@ class TypedQueryPlan:
             "fallback_policy": self.fallback_policy,
             "ambiguity_flags": list(self.ambiguity_flags),
             "parser_warnings": list(self.parser_warnings),
-            "abstain_reason": self.abstain_reason,
+            "abstain_reason": self.effective_abstain_reason,
         }
 
     @classmethod
@@ -320,7 +414,7 @@ class TypedQueryPlan:
             query_mode=str(payload.get("query_mode") or "semantic_question"),
             parsed_terms=list(payload.get("parsed_terms") or []),
             resolved_entities=[ResolvedEntity(**item) for item in payload.get("resolved_entities") or []],
-            constraints=[QueryConstraint(**item) for item in payload.get("constraints") or []],
+            constraints=[validate_constraint(QueryConstraint(**item)) for item in payload.get("constraints") or []],
             operator=str(payload.get("operator") or "AND"),
             free_text_terms=list(payload.get("free_text_terms") or []),
             requested_asset_types=list(payload.get("requested_asset_types") or []),
@@ -346,6 +440,40 @@ def normalize_exact_value(value: object, *, handle: bool = False) -> str:
     return normalized
 
 
+def validate_constraint(constraint: QueryConstraint) -> QueryConstraint:
+    definition = FIELD_REGISTRY.get(constraint.field)
+    raw_value = constraint.value if constraint.raw_value is None else constraint.raw_value
+    if definition is None:
+        return replace(
+            constraint,
+            support_status="unsupported",
+            reason="unknown constraint field",
+            raw_value=raw_value,
+        )
+    if constraint.operator not in definition.allowed_operators:
+        return replace(
+            constraint,
+            support_status="invalid",
+            reason=f"operator {constraint.operator} is not allowed for {constraint.field}",
+            raw_value=raw_value,
+        )
+    if not definition.searchable or not definition.executable or not definition.metadata_source:
+        return replace(
+            constraint,
+            support_status="unsupported",
+            reason=definition.unsupported_reason or "constraint is not executable in the formal index",
+            raw_value=raw_value,
+        )
+    if constraint.support_status not in {"supported", "unsupported", "ambiguous", "invalid"}:
+        return replace(
+            constraint,
+            support_status="invalid",
+            reason="unknown constraint support status",
+            raw_value=raw_value,
+        )
+    return replace(constraint, raw_value=raw_value)
+
+
 def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
     normalized = normalize_query_text(raw_query)
     constraints: List[QueryConstraint] = []
@@ -358,14 +486,45 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
     identity_fragments: List[str] = []
     operator = "OR" if re.search(r"(?:或|任一|其中之一)", normalized) else "AND"
 
-    range_match = re.search(r"(?<!\d)(20\d{2})\s*(?:~|～|至|到|-)\s*(20\d{2})(?!\d)", normalized)
+    for match in re.finditer(EXPLICIT_CONSTRAINT_PATTERN, normalized):
+        field_name, raw_value = match.group(1), match.group(2)
+        value, explicit_operator = _explicit_constraint_value(field_name, raw_value)
+        constraints.append(_constraint(field_name, value, explicit_operator, "explicit_field_parser", raw_value=raw_value))
+        parsed_terms.append(match.group(0))
+        matched_fragments.append(match.group(0))
+        if field_name == "asset_type" and str(value) in ASSET_TYPE_ALIASES:
+            requested_asset_types.append(str(value))
+
+    date_query = _remove_fragments(normalized, matched_fragments)
+    for match in re.finditer(FULL_DATE_PATTERN, date_query):
+        raw_date = match.group(0)
+        canonical_date = _canonical_date(match)
+        date_field = (
+            "published_at"
+            if any(marker in date_query for marker in ("上線", "發布", "公開", "published"))
+            else "interview_date"
+        )
+        constraints.append(_constraint(date_field, canonical_date, "eq", "typed_date_parser", raw_value=raw_date))
+        parsed_terms.append(raw_date)
+        matched_fragments.append(raw_date)
+
+    for match in re.finditer(r"https?://[^\s+，,]+", normalized):
+        raw_url = match.group(0)
+        if any(raw_url in fragment for fragment in matched_fragments):
+            continue
+        constraints.append(_constraint("asset_url", raw_url, "exact", "typed_url_parser", raw_value=raw_url))
+        parsed_terms.append(raw_url)
+        matched_fragments.append(raw_url)
+
+    year_query = re.sub(FULL_DATE_PATTERN, " ", date_query)
+    range_match = re.search(r"(?<!\d)(20\d{2})\s*(?:~|～|至|到|-)\s*(20\d{2})(?!\d)", year_query)
     if range_match:
         start, end = int(range_match.group(1)), int(range_match.group(2))
         constraints.append(_constraint("interview_year", [min(start, end), max(start, end)], "range", "typed_date_parser"))
         parsed_terms.append(range_match.group(0))
         matched_fragments.append(range_match.group(0))
     else:
-        year_matches = list(re.finditer(r"(?<!\d)(20\d{2})(?:\s*年)?(?!\d)", normalized))
+        year_matches = list(re.finditer(r"(?<!\d)(20\d{2})(?:\s*年)?(?!\d)", year_query))
         for match in year_matches:
             constraints.append(_constraint("interview_year", int(match.group(1)), "eq", "typed_date_parser"))
             parsed_terms.append(match.group(0))
@@ -399,6 +558,10 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
         parsed_terms.append(partner_match)
         matched_fragments.append(partner_match)
         identity_fragments.append(partner_match)
+    elif _contains_exact_phrase(normalized, "夥伴名稱"):
+        constraints.append(_constraint("partner_name", "夥伴名稱", "exact", "field_resolver"))
+        parsed_terms.append("夥伴名稱")
+        matched_fragments.append("夥伴名稱")
 
     field_query = _remove_fragments(normalized, identity_fragments)
     category_match = _first_catalog_match(field_query, catalog.sales_category_lv1)
@@ -482,12 +645,22 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
         matched_fragments.append(alias)
 
     if _contains_exact_phrase(field_query, "已採訪"):
+        constraints.append(_constraint("interview_status", "interviewed", "exact", "status_resolver", raw_value="已採訪"))
         ambiguity_flags.append("interview_status_unavailable")
         parser_warnings.append("目前 schema 沒有 interview_status，不能以 publication_status 代替。")
+        parsed_terms.append("已採訪")
+        matched_fragments.append("已採訪")
+
+    for alias, canonical in REVIEW_STATUS_ALIASES.items():
+        if _contains_exact_phrase(field_query, alias):
+            constraints.append(_constraint("review_status", canonical, "exact", "status_resolver", raw_value=alias))
+            parsed_terms.append(alias)
+            matched_fragments.append(alias)
+            break
 
     for alias, canonical in PUBLICATION_STATUS_ALIASES.items():
         if _contains_exact_phrase(field_query, alias):
-            constraints.append(_constraint("publication_status", canonical, "exact", "status_resolver"))
+            constraints.append(_constraint("publication_status", canonical, "exact", "status_resolver", raw_value=alias))
             parsed_terms.append(alias)
             matched_fragments.append(alias)
             break
@@ -497,10 +670,30 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
         parsed_terms.append("可對外引用")
         matched_fragments.append("可對外引用")
 
+    constraints = _dedupe_constraints(constraints)
+    unsupported_constraints = [item for item in constraints if item.support_status == "unsupported"]
+    invalid_constraints = [item for item in constraints if item.support_status == "invalid"]
+    for constraint in unsupported_constraints:
+        flag = f"unsupported_constraint:{constraint.field}"
+        if flag not in ambiguity_flags:
+            ambiguity_flags.append(flag)
+        warning = _constraint_warning(constraint)
+        if warning not in parser_warnings:
+            parser_warnings.append(warning)
+    for constraint in invalid_constraints:
+        flag = f"invalid_constraint:{constraint.field}"
+        if flag not in ambiguity_flags:
+            ambiguity_flags.append(flag)
+        warning = _constraint_warning(constraint)
+        if warning not in parser_warnings:
+            parser_warnings.append(warning)
+
     free_text_terms = _remaining_terms(normalized, matched_fragments)
     semantic_markers = ("如何", "為什麼", "原因", "策略", "比較", "分析", "摘要", "共同", "提升", "成效")
     has_semantic_intent = any(marker in normalized for marker in semantic_markers)
-    if constraints and not has_semantic_intent:
+    if any(item.hard_filter and item.support_status != "supported" for item in constraints):
+        query_mode = "structured_lookup"
+    elif constraints and not has_semantic_intent:
         query_mode = "structured_lookup"
     elif constraints:
         query_mode = "semantic_question"
@@ -512,8 +705,10 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
         query_mode = "semantic_question"
 
     abstain_reason = None
-    if "interview_status_unavailable" in ambiguity_flags:
-        abstain_reason = "unsupported_status_field"
+    if any(item.hard_filter for item in unsupported_constraints):
+        abstain_reason = "unsupported_hard_constraint"
+    elif any(item.hard_filter for item in invalid_constraints):
+        abstain_reason = "invalid_hard_constraint"
     elif "conflicting_interview_years" in ambiguity_flags:
         abstain_reason = "conflicting_constraints"
     elif query_mode == "structured_lookup" and not constraints:
@@ -527,7 +722,7 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
         query_mode=query_mode,
         parsed_terms=_unique(parsed_terms),
         resolved_entities=resolved_entities,
-        constraints=_dedupe_constraints(constraints),
+        constraints=constraints,
         operator=operator,
         free_text_terms=free_text_terms,
         requested_asset_types=_unique(requested_asset_types),
@@ -543,7 +738,7 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
 def metadata_matches_query_plan(metadata: DocumentMetadata, plan: Optional[TypedQueryPlan]) -> bool:
     if plan is None:
         return True
-    if plan.abstain_reason:
+    if plan.execution_blocked:
         return False
     hard_constraints = plan.hard_constraints
     if not hard_constraints:
@@ -553,6 +748,9 @@ def metadata_matches_query_plan(metadata: DocumentMetadata, plan: Optional[Typed
 
 
 def _metadata_matches_constraint(metadata: DocumentMetadata, constraint: QueryConstraint) -> bool:
+    constraint = validate_constraint(constraint)
+    if constraint.support_status != "supported":
+        return False
     field_name = constraint.field
     value = constraint.normalized_value
     if field_name in {"entity_name", "merchant_name"}:
@@ -561,7 +759,7 @@ def _metadata_matches_constraint(metadata: DocumentMetadata, constraint: QueryCo
         return False
     if field_name == "merchant_handle":
         return normalize_exact_value(metadata.merchant_handle, handle=True) == normalize_exact_value(value, handle=True)
-    if field_name in {"sales_category_lv1", "sales_category_lv2", "merchant_status", "publication_status", "claim_status"}:
+    if field_name in {"sales_category_lv1", "sales_category_lv2", "merchant_status", "claim_status"}:
         source_field = FIELD_REGISTRY[field_name].source_field
         return normalize_exact_value(getattr(metadata, source_field or "", None)) == normalize_exact_value(value)
     if field_name == "content_tags":
@@ -597,7 +795,7 @@ def _metadata_matches_constraint(metadata: DocumentMetadata, constraint: QueryCo
         if constraint.operator == "lte":
             return metadata.interview_year <= int(constraint.value)
         return metadata.interview_year == int(constraint.value)
-    if field_name == "external_usage_status":
+    if field_name in {"external_usage_status", "citation_status"}:
         return metadata.can_quote_externally is bool(value) or metadata.can_quote_externally == value
     if field_name == "allowed_exposure_channels":
         return normalize_exact_value(value) in {normalize_exact_value(item) for item in metadata.allowed_exposure_channels}
@@ -606,7 +804,7 @@ def _metadata_matches_constraint(metadata: DocumentMetadata, constraint: QueryCo
     if field_name == "source_record_id":
         record_id = f"{metadata.source_sheet}:r{metadata.source_row}"
         return normalize_exact_value(record_id) == normalize_exact_value(value)
-    return True
+    return False
 
 
 def _metadata_has_asset_type(metadata: DocumentMetadata, asset_type: str) -> bool:
@@ -621,20 +819,66 @@ def _metadata_has_asset_type(metadata: DocumentMetadata, asset_type: str) -> boo
     return normalize_exact_value(metadata.asset_type) == normalize_exact_value(asset_type)
 
 
-def _constraint(field_name: str, value: Any, operator: str, source: str) -> QueryConstraint:
+def _constraint(
+    field_name: str,
+    value: Any,
+    operator: str,
+    source: str,
+    *,
+    raw_value: Any = None,
+) -> QueryConstraint:
+    definition = FIELD_REGISTRY.get(field_name)
     normalized_value = value
     if isinstance(value, str):
         normalized_value = normalize_exact_value(value, handle=field_name == "merchant_handle")
-    return QueryConstraint(
+    constraint = QueryConstraint(
         field=field_name,
         value=value,
         normalized_value=normalized_value,
         operator=operator,
-        match_type=FIELD_REGISTRY[field_name].exact_behavior,
-        hard_filter=FIELD_REGISTRY[field_name].hard_filter,
+        match_type=definition.exact_behavior if definition else "exact",
+        hard_filter=definition.hard_filter if definition else True,
         source=source,
         confidence=1.0,
+        raw_value=value if raw_value is None else raw_value,
     )
+    return validate_constraint(constraint)
+
+
+def _explicit_constraint_value(field_name: str, raw_value: str) -> tuple:
+    if field_name == "interview_year" and raw_value.isdigit():
+        return int(raw_value), "eq"
+    if field_name in {"interview_date", "published_at"}:
+        return raw_value, "eq"
+    if field_name in {"external_usage_status", "citation_status", "can_enter_content_index"}:
+        normalized = normalize_exact_value(raw_value)
+        if normalized in {"true", "1", "yes"}:
+            return True, "eq"
+        if normalized in {"false", "0", "no"}:
+            return False, "eq"
+    operator = {
+        "sales_category_lv1": "canonical_exact",
+        "sales_category_lv2": "canonical_exact",
+        "content_tags": "contains_exact_tag",
+        "allowed_exposure_channels": "contains_exact",
+    }.get(field_name, "exact")
+    return raw_value, operator
+
+
+def _canonical_date(match: re.Match) -> str:
+    year, month, day = (int(match.group(index)) for index in (1, 2, 3))
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return match.group(0)
+
+
+def _constraint_warning(constraint: QueryConstraint) -> str:
+    definition = FIELD_REGISTRY.get(constraint.field)
+    label = definition.output_label if definition else constraint.field
+    if constraint.support_status == "invalid":
+        return f"搜尋條件「{label}」格式或 operator 無效，未執行近似搜尋。"
+    return f"目前正式索引不支援搜尋條件「{label}」，未執行近似搜尋。"
 
 
 def _first_catalog_match(query: str, values: Sequence[str], handle: bool = False) -> Optional[str]:
@@ -702,13 +946,13 @@ def _looks_like_lookup(query: str) -> bool:
 
 def allow_semantic_fallback(plan: TypedQueryPlan) -> TypedQueryPlan:
     """Keep explicit caller filters useful without weakening resolved hard constraints."""
-    if plan.abstain_reason != "unresolved_structured_lookup":
+    if plan.execution_blocked and plan.effective_abstain_reason != "unresolved_structured_lookup":
+        return plan
+    if plan.effective_abstain_reason != "unresolved_structured_lookup":
         return plan
     return replace(
         plan,
         query_mode="semantic_question",
-        ambiguity_flags=[],
-        parser_warnings=[],
         abstain_reason=None,
     )
 

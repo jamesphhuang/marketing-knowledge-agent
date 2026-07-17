@@ -1,16 +1,22 @@
 from datetime import date
 
+import pytest
+
 from marketing_knowledge_agent.chunking import chunk_documents
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.indexing import SQLiteIndex
 from marketing_knowledge_agent.governance import GovernanceIndex, RestrictedCustomerRecord
 from marketing_knowledge_agent.models import Document, DocumentMetadata, SearchFilters
 from marketing_knowledge_agent.pipeline import agent_ask, ask_index, explain_query, search_index
+from marketing_knowledge_agent.pipeline import build_index_query_plan
 from marketing_knowledge_agent.query_planning import (
     FIELD_REGISTRY,
     QueryCatalog,
+    QueryConstraint,
+    RUNTIME_SUPPORT_MATRIX,
     TypedQueryPlan,
     build_query_plan,
+    metadata_matches_query_plan,
     normalize_query_text,
 )
 
@@ -19,9 +25,39 @@ def test_field_registry_keeps_searchable_fields_and_status_semantics_distinct():
     assert FIELD_REGISTRY["merchant_handle"].allowed_operators == ["exact"]
     assert FIELD_REGISTRY["sales_category_lv1"].hard_filter is True
     assert FIELD_REGISTRY["interview_year"].data_type == "integer"
-    assert FIELD_REGISTRY["publication_status"].source_field == "status"
-    assert FIELD_REGISTRY["interview_status"].available is False
+    assert FIELD_REGISTRY["publication_status"].source_field is None
+    assert FIELD_REGISTRY["publication_status"].executable is False
+    assert FIELD_REGISTRY["publication_status"].value_scope == "asset_level"
+    assert FIELD_REGISTRY["interview_status"].executable is False
     assert FIELD_REGISTRY["external_usage_status"].source_field == "can_quote_externally"
+
+
+def test_runtime_support_matrix_distinguishes_expressible_from_executable_fields():
+    supported = {
+        "merchant_name",
+        "merchant_handle",
+        "sales_category_lv1",
+        "sales_category_lv2",
+        "interview_year",
+        "content_tags",
+        "asset_type",
+        "external_usage_status",
+    }
+    unsupported = {
+        "partner_name",
+        "interview_date",
+        "published_at",
+        "publication_status",
+        "interview_status",
+        "review_status",
+        "asset_url",
+    }
+
+    assert all(RUNTIME_SUPPORT_MATRIX[field]["executor_supported"] for field in supported)
+    assert all(RUNTIME_SUPPORT_MATRIX[field]["slack_ready"] for field in supported)
+    assert all(RUNTIME_SUPPORT_MATRIX[field]["query_plan_expressible"] for field in unsupported)
+    assert all(not RUNTIME_SUPPORT_MATRIX[field]["executor_supported"] for field in unsupported)
+    assert all(not RUNTIME_SUPPORT_MATRIX[field]["slack_ready"] for field in unsupported)
 
 
 def test_query_normalization_handles_nfkc_spacing_case_and_handle_prefix():
@@ -66,12 +102,13 @@ def test_interview_year_and_range_are_typed_constraints():
     assert _constraint(ranged, "interview_year").operator == "range"
 
 
-def test_publication_status_and_asset_type_do_not_mix_status_fields():
+def test_publication_status_and_asset_type_fail_closed_without_asset_status():
     plan = build_query_plan("已上線的影片", _catalog())
 
-    assert _constraint(plan, "publication_status").normalized_value == "published"
+    assert _constraint(plan, "publication_status").support_status == "unsupported"
     assert _constraint(plan, "asset_type").normalized_value == "video"
-    assert not any(item.field == "interview_status" for item in plan.constraints)
+    assert plan.execution_blocked is True
+    assert plan.abstain_reason == "unsupported_hard_constraint"
 
 
 def test_press_release_is_exposure_channel_not_news_asset():
@@ -85,7 +122,8 @@ def test_unsupported_interview_status_is_ambiguous_not_silently_mapped():
     plan = build_query_plan("已採訪", _catalog())
 
     assert plan.ambiguity_flags
-    assert plan.abstain_reason == "unsupported_status_field"
+    assert plan.unsupported_constraints
+    assert plan.abstain_reason == "unsupported_hard_constraint"
     assert not any(item.field == "publication_status" for item in plan.constraints)
 
 
@@ -99,6 +137,7 @@ def test_multiple_constraints_default_to_and():
         "publication_status",
         "asset_type",
     }
+    assert plan.execution_blocked is True
 
 
 def test_query_plan_round_trips_without_losing_typed_constraints():
@@ -126,6 +165,74 @@ def test_same_merchant_and_partner_name_preserves_entity_ambiguity():
 
     assert "entity_type_ambiguous" in plan.ambiguity_flags
     assert plan.abstain_reason == "ambiguous_entity_type"
+
+
+def test_unknown_field_and_operator_fail_closed():
+    metadata, _ = _record("Example", "example", "美食", 2025, article="Example article")
+    unknown_field = _manual_plan("review_status", "pending", "exact")
+    unknown_operator = _manual_plan("interview_year", 2025, "contains")
+
+    assert unknown_field.execution_blocked is True
+    assert [item.field for item in unknown_field.unsupported_constraints] == ["review_status"]
+    assert metadata_matches_query_plan(metadata, unknown_field) is False
+    assert unknown_operator.execution_blocked is True
+    assert [item.field for item in unknown_operator.invalid_constraints] == ["interview_year"]
+    assert metadata_matches_query_plan(metadata, unknown_operator) is False
+
+
+@pytest.mark.parametrize(
+    ("query", "unsupported_field", "supported_field"),
+    [
+        ("某夥伴名稱＋影片", "partner_name", "asset_type"),
+        ("待審核＋影片", "review_status", "asset_type"),
+        ("已上線的影片", "publication_status", "asset_type"),
+        ("review_status=pending＋asset_type=video", "review_status", "asset_type"),
+        ("asset_url=https://example.com＋asset_type=article", "asset_url", "asset_type"),
+        ("published_at=2025-07-01＋asset_type=video", "published_at", "asset_type"),
+    ],
+)
+def test_unsupported_and_supported_constraints_block_the_whole_plan(query, unsupported_field, supported_field):
+    plan = build_query_plan(query, _catalog())
+
+    assert _constraint(plan, unsupported_field).support_status == "unsupported"
+    assert _constraint(plan, supported_field).support_status == "supported"
+    assert plan.execution_blocked is True
+    assert plan.abstain_reason == "unsupported_hard_constraint"
+    assert plan.ambiguity_flags
+    assert plan.parser_warnings
+
+
+@pytest.mark.parametrize("query", ["2025-07-01", "2025/07/01", "2025.07.01"])
+def test_full_date_is_unsupported_and_never_parsed_as_interview_year(query):
+    plan = build_query_plan(query, _catalog())
+
+    assert not any(item.field == "interview_year" for item in plan.constraints)
+    assert _constraint(plan, "interview_date").support_status == "unsupported"
+    assert plan.execution_blocked is True
+
+
+def test_published_date_is_unsupported_and_never_downgraded_to_interview_year():
+    plan = build_query_plan("2025-07-01 上線的影片", _catalog())
+
+    assert not any(item.field == "interview_year" for item in plan.constraints)
+    assert _constraint(plan, "published_at").support_status == "unsupported"
+    assert _constraint(plan, "asset_type").support_status == "supported"
+    assert plan.execution_blocked is True
+
+
+def test_unsupported_messages_survive_explicit_filters(tmp_path):
+    db_path = _build_index(tmp_path)
+    plan = build_index_query_plan(
+        "待審核內容",
+        db_path,
+        SearchFilters(record_type=["merchant_case"]),
+    )
+
+    assert plan.unsupported_constraints
+    assert plan.ambiguity_flags
+    assert plan.parser_warnings
+    assert plan.execution_blocked is True
+    assert plan.abstain_reason == "unsupported_hard_constraint"
 
 
 def test_exact_brand_search_does_not_fill_with_similar_brands(tmp_path):
@@ -236,6 +343,32 @@ def test_zero_intersection_does_not_relax_to_or(tmp_path):
     assert "找不到同時符合" in answer.answer
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "某夥伴名稱＋影片",
+        "待審核＋影片",
+        "已上線的影片",
+        "review_status=pending＋asset_type=video",
+        "asset_url=https://example.com＋asset_type=article",
+        "published_at=2025-07-01＋asset_type=video",
+    ],
+)
+def test_unsupported_constraint_returns_no_partial_results_or_citations(tmp_path, query):
+    db_path = _build_index(tmp_path)
+
+    answer = ask_index(query, db_path, limit=20)
+
+    assert answer.structured_result is not None
+    assert answer.structured_result.abstained is True
+    assert answer.structured_result.total_entities == 0
+    assert answer.structured_result.total_assets == 0
+    assert answer.structured_result.unsupported_constraints
+    assert answer.citations == []
+    assert answer.query_plan["execution_blocked"] is True
+    assert answer.query_plan["abstain_reason"] == "unsupported_hard_constraint"
+
+
 def test_unknown_bare_entity_abstains_instead_of_returning_similar_brand(tmp_path):
     db_path = _build_index(tmp_path)
 
@@ -258,6 +391,17 @@ def test_structured_renderer_omits_empty_asset_sections_and_preserves_traceabili
     assert "連結：資料未提供" in answer.answer
     assert "資料來源：商家夥伴案例資料庫 r8" in answer.answer
     assert all(citation.source_sheet and citation.source_row for citation in answer.citations)
+
+
+def test_parent_record_status_is_not_copied_to_structured_assets(tmp_path):
+    db_path = _build_index(tmp_path)
+
+    answer = ask_index("提供我三風製麵的內容", db_path, limit=5)
+
+    assets = [asset for entity in answer.structured_result.matched_entities for asset in entity.assets]
+    assert assets
+    assert all(asset.publication_status is None for asset in assets)
+    assert "狀態：資料未提供" in answer.answer
 
 
 def test_agentic_path_reuses_same_hard_constraints(tmp_path):
@@ -290,6 +434,19 @@ def test_explain_query_reports_safe_counts_and_no_content(tmp_path):
     assert explanation["candidate_count_before_filtering"] > explanation["candidate_count_after_filtering"]
     assert "document_content" not in explanation
     assert "source_path" not in str(explanation)
+
+
+def test_explain_query_reports_unsupported_constraint_without_retrieval(tmp_path):
+    db_path = _build_index(tmp_path)
+
+    explanation = explain_query("已上線的影片", db_path)
+
+    assert explanation["execution_blocked"] is True
+    assert [item["field"] for item in explanation["unsupported_constraints"]] == ["publication_status"]
+    assert explanation["candidate_count_after_filtering"] == 0
+    assert explanation["final_entity_count"] == 0
+    assert explanation["final_asset_count"] == 0
+    assert explanation["abstain_reason"] == "unsupported_hard_constraint"
 
 
 def test_explain_query_cli_outputs_plan_without_content_or_source_path(tmp_path, capsys):
@@ -351,6 +508,26 @@ def test_structured_asset_title_is_governed_before_contract_output(tmp_path):
 
 def _constraint(plan, field):
     return next(item for item in plan.constraints if item.field == field)
+
+
+def _manual_plan(field, value, operator):
+    constraint = QueryConstraint(
+        field=field,
+        value=value,
+        normalized_value=value,
+        operator=operator,
+        match_type="exact",
+        hard_filter=True,
+        source="test",
+    )
+    return TypedQueryPlan(
+        raw_query=f"{field}={value}",
+        normalized_query=f"{field}={value}",
+        query_mode="structured_lookup",
+        parsed_terms=[str(value)],
+        resolved_entities=[],
+        constraints=[constraint],
+    )
 
 
 def _catalog():

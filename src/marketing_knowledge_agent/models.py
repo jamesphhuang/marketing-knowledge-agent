@@ -478,6 +478,11 @@ class StructuredRetrievalResult(BaseModel):
     total_entities: int = 0
     total_assets: int = 0
     warnings: List[str] = Field(default_factory=list)
+    supported_constraints: List[Dict[str, Any]] = Field(default_factory=list)
+    unsupported_constraints: List[Dict[str, Any]] = Field(default_factory=list)
+    ambiguous_constraints: List[Dict[str, Any]] = Field(default_factory=list)
+    invalid_constraints: List[Dict[str, Any]] = Field(default_factory=list)
+    execution_blocked: bool = False
     abstained: bool = False
     abstain_reason: Optional[str] = None
 

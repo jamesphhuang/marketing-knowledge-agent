@@ -23,7 +23,7 @@ Canonical source 位於 `query_planning.FIELD_REGISTRY`。文件表只摘要；c
 | `asset_title` | article/video/podcast/news title | string | exact/lexical | exact can be hard | yes |
 | `asset_url` | - | URL | exact | output/filter | migration required |
 | `published_at` | - | date | eq/range/before/after | hard | migration required |
-| `publication_status` | `status` | enum | exact/in | hard | yes |
+| `publication_status` | - | enum | exact/in | hard | recognized, fail closed |
 | `content_status` | - | enum | exact/in | hard | migration required |
 | `interview_status` | - | enum | exact/in | hard | migration required |
 | `merchant_status` | same | string | exact/in | hard | yes |
@@ -55,6 +55,10 @@ Normalization 使用 Unicode NFKC、casefold、trim 與重複空白壓縮。Hand
 - requested asset types
 - sort/grouping/fallback
 - ambiguity flags, parser warnings, abstain reason
+- supported / unsupported / ambiguous / invalid constraint lists
+- `execution_blocked`
+
+每個 constraint 包含 `support_status` 與不含敏感資料的 `reason`。Field Registry 驗證欄位、operator、searchable/executable 狀態與 metadata source；任何 unsupported / ambiguous / invalid hard constraint 都使整個 AND query fail closed，不得只執行可支援子集合。Executor 對未知欄位與未知 operator 明確 non-match。
 
 ```json
 {
@@ -102,12 +106,15 @@ Resolution order：
 
 ## 5. Status Semantics
 
-- `已上線` / `已發布` → `publication_status=published` → current `status`。
+- `已上線` / `已發布` / `已公開` / `published` → 可辨識為 asset-level `publication_status`，但目前 formal data 無此欄位，因此 fail closed。
 - `可對外引用` → `external_usage_status=true` → `can_quote_externally`。
 - `已採訪` → unsupported，因 schema 無 `interview_status`；回 ambiguity，不映射到 published。
 - `merchant_status` 只描述商家關係／營運狀態。
 - `claim_status` 只描述 metric claim review。
 - `review_status` / `review_decision` 目前不在 formal index，不可 runtime 猜測。
+- record-level `status` 只供既有內容治理，不得套用成每個 asset 的 publication status。
+
+完整日期先於年份區間與單一年份解析。`2025-07-01`、`2025/07/01`、`2025.07.01` 會保留為 unsupported date constraint，不得降級成 `interview_year=2025`。
 
 ## 6. Filtering and Ranking
 
@@ -116,14 +123,15 @@ Execution order：
 1. query normalization
 2. parser and resolver
 3. TypedQueryPlan
-4. `SearchFilters` intent gating
-5. typed hard constraints
-6. non-retrievable record type guard
-7. FTS/vector scoring inside candidates
-8. reranking inside candidates
-9. restricted source filtering
-10. structured aggregation or semantic generation
-11. answer/citation governance gate
+4. runtime support validation；blocked plan 在 retrieval 前停止
+5. `SearchFilters` intent gating
+6. typed hard constraints
+7. non-retrievable record type guard
+8. FTS/vector scoring inside candidates
+9. reranking inside candidates
+10. restricted source filtering
+11. structured aggregation or semantic generation
+12. answer/citation governance gate
 
 Across fields 預設 AND；明確「或／任一／其中之一」才使用 OR。多個互斥年份沒有 OR 或 range 時標示 ambiguity。Hard constraint 為 0 筆時不得移除條件或補 Top K。
 
@@ -141,6 +149,8 @@ Across fields 預設 AND；明確「或／任一／其中之一」才使用 OR�
 Merchant case 的 article/video/podcast/news 只從對應非空 metadata 欄位建立；空欄位不渲染。每個資產建立獨立 citation label，即使同一 source row 有多個資產。
 Structured contract 建立前也會掃描資產標題；denylist 命中的資產不會進 answer、citation 或 structured result，並留下不含敏感名稱的 removal warning。
 
+Blocked result 另包含 supported / unsupported / ambiguous / invalid constraints 與 `execution_blocked=true`。asset-level publication status 缺失時保留 `null`，renderer 顯示「資料未提供」，不得使用 parent record status。
+
 ## 8. Renderer Contract
 
 Retrieval 不組 Slack 文案。`structured_results` 先產生 channel-neutral contract 與文字；Slack 只做既有長度處理、citation/warning 區塊與 Markdown cleanup。
@@ -154,7 +164,7 @@ mka explain-query "2025 居家生活 已上線 影片" \
   --db .mka/content_index.sqlite --intent external
 ```
 
-輸出 query plan、filter 前後 document counts、governance removed count、final entity/asset counts 與 abstain reason。禁止輸出 chunk text、source path、token、restricted record 或完整敏感 metadata。
+輸出 query plan、constraint support lists、execution blocked、filter 前後 document counts、governance removed count、final entity/asset counts 與 abstain reason。禁止輸出 chunk text、source path、token、restricted record 或完整敏感 metadata。
 
 ## 10. Backward Compatibility and Migration
 
@@ -170,9 +180,11 @@ mka explain-query "2025 居家生活 已上線 影片" \
 
 Rebuild procedure：備份 DB → 從 managed Vault 全量重建新 DB → 跑 eligibility/denylist/conservation/retrieval assertions → 原子替換。Rollback：保留上一版 DB，失敗時不替換。測試資料以 synthetic managed Vault 重建，不複製 restricted records。
 
+第 2 項應由後續 Asset-Level Metadata Enrichment Sprint 執行；本 sprint 不修改 index schema、不重建正式 index，也不從 record status 推導 asset status。
+
 ## 11. Test Matrix
 
-`tests/test_typed_query_retrieval.py` 覆蓋：名稱、Handle、Category、年份/range、狀態分流、asset type、AND、零交集、不存在名稱、空 asset、agentic 共用 hard constraints、plan round-trip、ambiguity 與 explain-query 安全輸出。既有 governance、LLM、Slack、index 與 citation tests 必須全綠。
+`tests/test_typed_query_retrieval.py` 覆蓋：名稱、Handle、Category、年份/range、完整日期、unsupported/invalid fail closed、狀態分流、asset type、AND、零交集、不存在名稱、空 asset、agentic 共用 hard constraints、plan round-trip、ambiguity 與 explain-query 安全輸出。既有 governance、LLM、Slack、index 與 citation tests 必須全綠。
 
 ## 12. Next Multi-Constraint Sprint
 
