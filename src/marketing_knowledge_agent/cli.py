@@ -22,6 +22,7 @@ from .pipeline import (
     DEFAULT_RESTRICTED_CUSTOMERS_PATH,
     agent_ask,
     ask_index,
+    explain_query,
     ingest_vault,
     resolve_governance_index,
     search_index,
@@ -88,6 +89,26 @@ def main(argv=None) -> int:
                 dry_run_llm=args.dry_run_llm,
             )
             _print_answer(answer)
+            return 0
+
+        if args.command == "explain-query":
+            filters = _filters_from_args(args)
+            governance_index, load_warning = resolve_governance_index(None, args.restricted_customers)
+            refused = precheck_restricted_query(args.query, governance_index, command="explain-query")
+            if refused is not None:
+                print(refused.answer)
+                return 0
+            payload = explain_query(
+                args.query,
+                db_path=args.db,
+                filters=filters,
+                limit=args.limit,
+                mode=args.mode,
+                governance_index=governance_index,
+            )
+            if load_warning:
+                payload["warnings"] = [load_warning]
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
 
         if args.command == "agent-ask":
@@ -279,6 +300,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_governance_args(agent_ask_parser)
     _add_llm_args(agent_ask_parser)
     agent_ask_parser.add_argument("--show-trace", action="store_true")
+
+    explain_parser = subparsers.add_parser(
+        "explain-query",
+        help="Explain the typed query plan and safe candidate counts without returning content",
+    )
+    explain_parser.add_argument("query")
+    _add_retrieval_args(explain_parser)
+    _add_governance_args(explain_parser)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="Run built-in prototype evaluation cases")
     evaluate_parser.add_argument("--vault", type=Path, default=DEFAULT_VAULT)

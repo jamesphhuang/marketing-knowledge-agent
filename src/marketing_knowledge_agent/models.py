@@ -444,6 +444,42 @@ class Citation(BaseModel):
     source_row: Optional[int] = None
     canonical_url: Optional[str] = None
     freshness_note: str
+    allowed_exposure_channels: List[AllowedExposureChannel] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    retrieval_reason: Optional[str] = None
+
+
+class StructuredAsset(BaseModel):
+    asset_type: str
+    title: str
+    url: Optional[str] = None
+    published_at: Optional[str] = None
+    publication_status: Optional[str] = None
+    external_usage_status: str
+    source_record_id: str
+    source_sheet: Optional[str] = None
+    source_row: Optional[int] = None
+    citation_label: str
+
+
+class StructuredEntity(BaseModel):
+    entity_type: Literal["merchant", "partner", "unknown"] = "unknown"
+    entity_name: str
+    merchant_handle: Optional[str] = None
+    sales_category_lv1: Optional[str] = None
+    sales_category_lv2: Optional[str] = None
+    interview_year: Optional[int] = None
+    assets: List[StructuredAsset] = Field(default_factory=list)
+
+
+class StructuredRetrievalResult(BaseModel):
+    query_plan: Dict[str, Any]
+    matched_entities: List[StructuredEntity] = Field(default_factory=list)
+    total_entities: int = 0
+    total_assets: int = 0
+    warnings: List[str] = Field(default_factory=list)
+    abstained: bool = False
+    abstain_reason: Optional[str] = None
 
 
 class GeneratedAnswer(BaseModel):
@@ -452,3 +488,5 @@ class GeneratedAnswer(BaseModel):
     citations: List[Citation]
     warnings: List[str] = Field(default_factory=list)
     governance_checked: bool = False
+    query_plan: Optional[Dict[str, Any]] = None
+    structured_result: Optional[StructuredRetrievalResult] = None

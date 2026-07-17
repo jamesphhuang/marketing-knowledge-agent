@@ -20,6 +20,8 @@ Marketing Knowledge Agent 是一個預設離線的 Python RAG prototype，用來
 - Metadata schema v0.2 支援 Excel 來源的 merchant case、public metric、pending metric、restricted customer denylist 與 handle mapping。
 - Restricted customer 與 handle mapping 是治理/正規化資料，不進一般向量檢索 citation。
 - 內建 mock vault 與 evaluation cases。
+- 欄位感知 query planning：名稱、Handle、採訪年份、Category、Tag、asset type 與明確狀態可轉成 typed hard constraints。
+- Structured lookup 不會用其他品牌補滿 Top K；CLI、agentic 與 Slack 共用相同 candidate selection。
 
 ## 安裝
 
@@ -53,6 +55,26 @@ python3 -m venv .venv
 ```bash
 .venv/bin/mka agent-ask "比較 Product A 製造業 pricing case study 與 ROI blog" --product product-a --show-trace
 ```
+
+檢視安全的 Typed Query Plan 與候選數量（不輸出正文或 source path）：
+
+```bash
+.venv/bin/mka explain-query "2025 居家生活 已上線 影片" \
+  --db .mka/content_index.sqlite \
+  --intent external \
+  --restricted-customers reports/excel_preview/restricted_customers.json
+```
+
+欄位精確查找範例：
+
+```bash
+.venv/bin/mka ask "dachun" --db .mka/content_index.sqlite --intent external
+.venv/bin/mka ask "提供我三風製麵的內容" --db .mka/content_index.sqlite --intent external
+.venv/bin/mka ask "我們有什麼居家生活品牌相關內容？" \
+  --db .mka/content_index.sqlite --intent external
+```
+
+Query plan 的 hard constraints 預設使用 AND。找不到交集時不會自動改成 OR、移除年份／分類／資產類型，或加入低相關來源。
 
 ### LLM 雙鑰政策閘門
 

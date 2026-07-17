@@ -62,28 +62,7 @@ def generate_answer(
         snippet = _snippet(chunk.text)
         answer_lines.append(f"{label} {snippet}")
 
-        freshness_note = freshness_note_for(metadata.effective_date, today)
-        citations.append(
-            Citation(
-                label=label,
-                title=metadata.title,
-                source_path=metadata.source_path,
-                chunk_id=chunk.id,
-                status=metadata.status,
-                source_type=metadata.source_type,
-                record_type=metadata.record_type,
-                data_classification=metadata.data_classification,
-                can_quote_externally=metadata.can_quote_externally,
-                publish_date=metadata.publish_date.isoformat(),
-                updated_date=metadata.updated_date.isoformat() if metadata.updated_date else None,
-                captured_date=metadata.captured_date.isoformat() if metadata.captured_date else None,
-                last_reviewed=metadata.last_reviewed.isoformat() if metadata.last_reviewed else None,
-                source_sheet=metadata.source_sheet,
-                source_row=metadata.source_row,
-                canonical_url=metadata.canonical_url,
-                freshness_note=freshness_note,
-            )
-        )
+        citations.append(citation_for_result(result, label, today=today))
 
         if metadata.status in NON_PUBLIC_STATUSES:
             warnings.append(
@@ -115,6 +94,39 @@ def freshness_note_for(effective_date: date, today: date = None) -> str:
     if age_days > 540:
         return f"最新日期 {effective_date.isoformat()}；距今約 {age_days} 天，建議重新確認資料新鮮度。"
     return f"最新日期 {effective_date.isoformat()}；距今約 {age_days} 天。"
+
+
+def citation_for_result(
+    result: SearchResult,
+    label: str,
+    *,
+    title: Optional[str] = None,
+    chunk_id: Optional[str] = None,
+    retrieval_reason: Optional[str] = None,
+    today: date = None,
+) -> Citation:
+    metadata = result.chunk.metadata
+    return Citation(
+        label=label,
+        title=title or metadata.title,
+        source_path=metadata.source_path,
+        chunk_id=chunk_id or result.chunk.id,
+        status=metadata.status,
+        source_type=metadata.source_type,
+        record_type=metadata.record_type,
+        data_classification=metadata.data_classification,
+        can_quote_externally=metadata.can_quote_externally,
+        publish_date=metadata.publish_date.isoformat(),
+        updated_date=metadata.updated_date.isoformat() if metadata.updated_date else None,
+        captured_date=metadata.captured_date.isoformat() if metadata.captured_date else None,
+        last_reviewed=metadata.last_reviewed.isoformat() if metadata.last_reviewed else None,
+        source_sheet=metadata.source_sheet,
+        source_row=metadata.source_row,
+        canonical_url=metadata.canonical_url,
+        freshness_note=freshness_note_for(metadata.effective_date, today=today),
+        allowed_exposure_channels=metadata.allowed_exposure_channels,
+        retrieval_reason=retrieval_reason,
+    )
 
 
 def _snippet(text: str, max_length: int = 260) -> str:
