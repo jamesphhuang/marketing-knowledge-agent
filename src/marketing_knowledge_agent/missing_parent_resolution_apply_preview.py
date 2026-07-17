@@ -618,14 +618,27 @@ def _target_locations() -> dict:
             "join_key": ["source_sheet", "source_row", "record_type"],
             "status": "existing_authoritative_decision_file",
         },
+        "parent_review_audit": {
+            "target": "reports/excel_preview/review_decisions_template.csv reviewer / reviewed_at",
+            "status": "existing authoritative review metadata columns",
+        },
         "entity_type": {
             "target": "source record merchant_status -> normalized runtime entity_type",
             "join_key": ["source_sheet", "source_row"],
             "status": "derive_from_existing_authoritative_field; no duplicate field write",
         },
+        "merchant_handle_requirement": {
+            "target": "governance policy derived from source record merchant_status",
+            "status": "partner means not_required; no synthetic field or Handle write",
+        },
         "search_aliases": {
             "target": "obsidian_vault/MKA/merchant_cases/<managed-parent>.md frontmatter.search_aliases",
             "sqlite_projection": "documents.metadata_json.search_aliases",
+            "status": "schema migration required before Apply",
+        },
+        "search_alias_review_audit": {
+            "target": "managed parent frontmatter search_alias_reviewed_by / search_alias_reviewed_at",
+            "sqlite_projection": "documents.metadata_json alias review fields",
             "status": "schema migration required before Apply",
         },
         "asset_eligibility": {
@@ -633,10 +646,15 @@ def _target_locations() -> dict:
             "sqlite_projection": "content_assets.asset_index_eligibility / asset_search_eligibility",
             "status": "asset managed-record and table migration required before Apply",
         },
-        "review_audit": {
-            "target": "parent decision row plus source/asset reviewed_by and reviewed_at fields",
-            "governance_only": "exclude and hold evidence in append-only resolution audit manifest",
-            "status": "schema migration required for aliases and asset records",
+        "asset_review_audit": {
+            "target": "managed asset frontmatter reviewed_by / reviewed_at",
+            "sqlite_projection": "content_assets.reviewed_by / reviewed_at",
+            "status": "asset managed-record and table migration required before Apply",
+        },
+        "governance_audit": {
+            "target": "reports/audit_log.csv plus immutable confirmed resolution manifest reference",
+            "scope": "exclude / hold evidence and execution outcome only",
+            "status": "future Apply only; no audit append in this preview Sprint",
         },
     }
 
@@ -713,11 +731,14 @@ def _target_md() -> str:
 | Data | Future authoritative target | SQLite projection | Current readiness |
 | --- | --- | --- | --- |
 | Parent review decision | `reports/excel_preview/review_decisions_template.csv`, keyed by source_sheet/source_row/record_type | Parent document governance metadata after sync | Existing decision file; no write in this Sprint |
+| Parent reviewer / reviewed_at | Same authoritative decision row | Parent governance audit projection | Existing columns; no write in this Sprint |
 | Entity type | Existing source `merchant_status`; `合作夥伴` maps to partner | Derived normalized entity type | Ready; no duplicate field migration |
+| Merchant Handle requirement | Governance rule derived from `merchant_status` | Runtime validation policy | Partner means `not_required`; no synthetic Handle write |
 | Search aliases | Managed parent frontmatter `search_aliases` | `documents.metadata_json.search_aliases` | Not implemented; Apply blocked |
+| Alias reviewer / reviewed_at | Managed parent `search_alias_reviewed_by` / `search_alias_reviewed_at` | `documents.metadata_json` alias audit fields | Not implemented; Apply blocked |
 | Asset eligibility | `obsidian_vault/MKA/managed/assets/<sha256(asset_id)>.md` | normalized `content_assets` eligibility columns | Not implemented; Apply blocked |
-| Reviewer / reviewed_at | Parent decision row, alias audit fields and asset managed record | Corresponding audit projection | Partial schema only; migration required |
-| Governance audit | Append-only resolution manifest for exclude/hold evidence | Governance audit log only | Design preview only |
+| Asset reviewer / reviewed_at | Managed asset frontmatter `reviewed_by` / `reviewed_at` | `content_assets.reviewed_by` / `reviewed_at` | Not implemented; Apply blocked |
+| Governance audit | `reports/audit_log.csv` plus confirmed immutable manifest reference | Audit only, not retrieval | Future Apply only; no append in this Sprint |
 
 Future managed Vault writes would include r7, r12, r32 and r122 parents plus eligible asset records. r30 remains excluded. No write is authorized by this plan.
 """

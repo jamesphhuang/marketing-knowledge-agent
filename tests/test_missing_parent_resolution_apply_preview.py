@@ -227,6 +227,17 @@ def test_storage_gaps_block_execution_and_old_plan_stays_invalid(tmp_path):
     assert manifest["old_asset_plan_status"] == "DO NOT CONFIRM"
     assert manifest["confirm_supported"] is False
     assert manifest["execute_supported"] is False
+    assert set(manifest["target_locations"]) >= {
+        "parent_review_decision",
+        "parent_review_audit",
+        "entity_type",
+        "merchant_handle_requirement",
+        "search_aliases",
+        "search_alias_review_audit",
+        "asset_eligibility",
+        "asset_review_audit",
+        "governance_audit",
+    }
 
 
 def test_input_checksum_mismatch_blocks_future_execution(tmp_path):
