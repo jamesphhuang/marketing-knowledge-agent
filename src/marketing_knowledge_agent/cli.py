@@ -10,6 +10,11 @@ from .asset_apply_preview import (
     AssetApplyPreviewError,
     generate_asset_apply_preview,
 )
+from .asset_apply_plan import (
+    AssetApplyPlanError,
+    create_asset_metadata_apply_plan,
+    reject_unimplemented_apply_stage,
+)
 from .asset_metadata_preview import (
     AssetMetadataPreviewError,
     generate_asset_metadata_preview,
@@ -215,6 +220,26 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0 if summary["error_count"] == 0 else 1
 
+        if args.command == "apply-asset-metadata":
+            if args.confirm_plan_id:
+                reject_unimplemented_apply_stage("confirm", args.confirm_plan_id)
+            if args.execute_plan_id:
+                reject_unimplemented_apply_stage("execute", args.execute_plan_id)
+            summary = create_asset_metadata_apply_plan(
+                apply_preview_path=args.apply_preview,
+                blocked_preview_path=args.blocked_preview,
+                inventory_path=args.inventory,
+                parent_records_path=args.parent_records,
+                decisions_path=args.decisions,
+                validation_dir=args.validation_dir,
+                restricted_customers_path=args.restricted_customers,
+                vault_path=args.vault,
+                db_path=args.db,
+                output_dir=args.output,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 1 if summary["execution_blocked"] else 0
+
         if args.command == "preview-slack-output":
             if args.sample_set:
                 summary = generate_slack_output_preview(
@@ -322,6 +347,9 @@ def main(argv=None) -> int:
         return 2
     except AssetApplyPreviewError as exc:
         print(f"asset apply preview error: {exc}", file=sys.stderr)
+        return 2
+    except AssetApplyPlanError as exc:
+        print(f"asset apply plan error: {exc}", file=sys.stderr)
         return 2
     except SlackOutputPreviewError as exc:
         print(f"slack output preview error: {exc}", file=sys.stderr)
@@ -512,6 +540,73 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/asset_metadata_apply_preview"),
+    )
+
+    asset_plan_parser = subparsers.add_parser(
+        "apply-asset-metadata",
+        help="Create a read-only formal asset metadata Apply Plan",
+    )
+    asset_plan_stage = asset_plan_parser.add_mutually_exclusive_group(required=True)
+    asset_plan_stage.add_argument(
+        "--plan",
+        action="store_true",
+        help="Create the only enabled stage: a read-only Apply Plan",
+    )
+    asset_plan_stage.add_argument(
+        "--confirm",
+        dest="confirm_plan_id",
+        metavar="PLAN_ID",
+        help="Reserved contract; disabled until a separately approved sprint",
+    )
+    asset_plan_stage.add_argument(
+        "--execute",
+        dest="execute_plan_id",
+        metavar="PLAN_ID",
+        help="Reserved contract; disabled until a separately approved sprint",
+    )
+    asset_plan_parser.add_argument(
+        "--apply-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv"),
+    )
+    asset_plan_parser.add_argument(
+        "--blocked-preview",
+        type=Path,
+        default=Path(
+            "reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv"
+        ),
+    )
+    asset_plan_parser.add_argument(
+        "--inventory",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/asset_metadata_inventory.csv"),
+    )
+    asset_plan_parser.add_argument(
+        "--parent-records",
+        type=Path,
+        default=Path("reports/excel_preview/merchant_cases.json"),
+    )
+    asset_plan_parser.add_argument(
+        "--decisions",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/human_review_template.csv"),
+    )
+    asset_plan_parser.add_argument(
+        "--validation-dir",
+        type=Path,
+        default=Path("reports/asset_metadata_review_validation"),
+    )
+    asset_plan_parser.add_argument(
+        "--restricted-customers",
+        type=Path,
+        default=DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    )
+    asset_plan_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    asset_plan_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    asset_plan_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_plan"),
     )
 
     slack_preview_parser = subparsers.add_parser(

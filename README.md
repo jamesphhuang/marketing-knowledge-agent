@@ -184,6 +184,23 @@ Runtime 支援狀態以 `query_planning.RUNTIME_SUPPORT_MATRIX` 為準。Parser 
 
 `apply-asset-review-decisions` 是獨立於 merchant `apply-review-decisions` 的 preview-only contract，沒有正式 Apply 模式。它會在暫存目錄重新驗證 decision，確認 persisted validation reports 未過期，只讓 `ready_for_apply_preview + approve` 的 `asset_url`／`canonical_url` 進 proposed diff；governance-blocked assets 只會出現在 blocked report。正式儲存建議為一個 asset 一筆的 flat managed record，再衍生 SQLite `content_assets` table；不可把多個 asset URL 塞入 parent record-level `canonical_url`。
 
+建立正式 Asset Metadata Apply Plan（本階段只有 plan 可用）：
+
+```bash
+.venv/bin/mka apply-asset-metadata --plan \
+  --apply-preview reports/asset_metadata_apply_preview/asset_apply_preview.csv \
+  --blocked-preview reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv \
+  --inventory reports/asset_metadata_preview/asset_metadata_inventory.csv \
+  --parent-records reports/excel_preview/merchant_cases.json \
+  --vault obsidian_vault \
+  --db .mka/content_index.sqlite \
+  --output reports/asset_metadata_apply_plan
+```
+
+Plan 會以 checksum 綁定 decisions、preview、managed Vault 與 formal SQLite，產生 deterministic `PLAN_ID`、`MKA/managed/assets/{sha256(asset_id)}.md` 路徑、`content_assets` migration、parent join、tags lookup、backup、atomic swap 與 rollback 設計。`content_tags` 不會複製到 asset record，只能由 `asset.record_id` 回查正式 parent；parent 缺失或 governance 不允許時 fail closed／省略 tags。`--confirm PLAN_ID` 與 `--execute PLAN_ID` 目前保留為 contract 並一律拒絕執行，不存在 skip-confirm。
+
+目前正式 plan 雖維持 206 eligible assets、412 approved URL fields 與 16 governance exclusions，但其中 9 個 assets（5 個 parents）尚無 managed Vault／formal SQLite parent，因此結論為 `C. Not ready for Apply`。必須先由人工決定補齊 parent review/sync/index，或排除這些 orphan assets，再重新產生 plan；不得自動建立 parent 或只套用其餘子集。完整 contract 見 `docs/specs/Y_ASSET_METADATA_APPLY_PLAN_SPEC.md`。
+
 離線比較 Slack 回覆格式，不套用 URL、不讀 Slack Token，也不呼叫 Slack API：
 
 ```bash
