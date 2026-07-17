@@ -10,6 +10,10 @@ from .asset_metadata_preview import (
     AssetMetadataPreviewError,
     generate_asset_metadata_preview,
 )
+from .asset_review_validation import (
+    AssetReviewValidationError,
+    validate_asset_review_decisions,
+)
 from .backfill import generate_backfill_report
 from .content_index import (
     DEFAULT_CONTENT_INDEX_DB,
@@ -175,6 +179,17 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "validate-asset-review-decisions":
+            summary = validate_asset_review_decisions(
+                decisions_path=args.decisions,
+                inventory_path=args.inventory,
+                enrichment_path=args.enrichment,
+                output_dir=args.output,
+                restricted_customers_path=args.restricted_customers,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0 if summary["error_count"] == 0 else 1
+
         if args.command == "review-template":
             summary = generate_review_template(
                 preview_dir=args.preview_dir,
@@ -251,6 +266,9 @@ def main(argv=None) -> int:
         return 2
     except AssetMetadataPreviewError as exc:
         print(f"asset metadata preview error: {exc}", file=sys.stderr)
+        return 2
+    except AssetReviewValidationError as exc:
+        print(f"asset review validation error: {exc}", file=sys.stderr)
         return 2
     except ReviewTemplateError as exc:
         print(f"review template error: {exc}", file=sys.stderr)
@@ -361,6 +379,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/asset_metadata_preview"),
+    )
+
+    asset_review_parser = subparsers.add_parser(
+        "validate-asset-review-decisions",
+        help="Validate asset URL and identity review decisions without applying them",
+    )
+    asset_review_parser.add_argument(
+        "--decisions",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/human_review_template.csv"),
+    )
+    asset_review_parser.add_argument(
+        "--inventory",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/asset_metadata_inventory.csv"),
+    )
+    asset_review_parser.add_argument(
+        "--enrichment",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/asset_metadata_enrichment_preview.csv"),
+    )
+    asset_review_parser.add_argument(
+        "--restricted-customers",
+        type=Path,
+        default=DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    )
+    asset_review_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/asset_metadata_review_validation"),
     )
 
     review_template_parser = subparsers.add_parser(

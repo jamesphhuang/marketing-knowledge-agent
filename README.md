@@ -158,6 +158,18 @@ Runtime 支援狀態以 `query_planning.RUNTIME_SUPPORT_MATRIX` 為準。Parser 
 
 此命令以 `source_sheet + source_row + asset_type` 建立穩定的 asset ID，抽取 Excel 儲存格 hyperlink 作為 URL evidence，並以 Vault、SQLite 與人工 decision 做交叉盤點。它只產出 inventory、enrichment、conflict、missing 與人工審核模板；不會套用 proposal，也不會因 URL 存在而推定已發布。`asset_url`、`published_at`、`publication_status`、`partner_name` 等查詢在人工核准、schema migration 與 formal index rebuild 前仍維持 fail closed。
 
+驗證人工填寫的 asset URL / canonical URL 決策（唯讀，不套用）：
+
+```bash
+.venv/bin/mka validate-asset-review-decisions \
+  --decisions reports/asset_metadata_preview/human_review_template.csv \
+  --inventory reports/asset_metadata_preview/asset_metadata_inventory.csv \
+  --enrichment reports/asset_metadata_preview/asset_metadata_enrichment_preview.csv \
+  --output reports/asset_metadata_review_validation
+```
+
+此命令以 `(asset_id, field)` 對回原始 enrichment proposal，驗證主鍵守恆、decision enum、reviewer、ISO reviewed_at、URL 格式、治理 blocker 與 CSV injection。合法 decision 為 `approve`、`reject`、`needs_update`、`exclude_asset`、`manual_review`；空白不是 approve。現有模板沒有 replacement value 欄位，因此不得直接改寫 `proposed_value`。輸出的 `ready_for_apply_preview` 只是驗證資格，不代表已套用，也不會啟用 published date/status、interview/review status 或 partner 查詢。
+
 執行內建 evaluation：
 
 ```bash
