@@ -144,6 +144,20 @@ Runtime 支援狀態以 `query_planning.RUNTIME_SUPPORT_MATRIX` 為準。Parser 
   --captured-date 2026-07-01
 ```
 
+盤點 asset-level metadata 候選來源（唯讀，不修改 Vault 或 formal index）：
+
+```bash
+.venv/bin/mka asset-metadata-preview \
+  --preview-dir reports/excel_preview \
+  --workbook "reports/excel_preview/MKT 內容產出資料庫_店家_夥伴案例_對外數據-20260708.xlsx" \
+  --vault obsidian_vault \
+  --db .mka/content_index.sqlite \
+  --decisions reports/excel_preview/review_decisions_template.csv \
+  --output reports/asset_metadata_preview
+```
+
+此命令以 `source_sheet + source_row + asset_type` 建立穩定的 asset ID，抽取 Excel 儲存格 hyperlink 作為 URL evidence，並以 Vault、SQLite 與人工 decision 做交叉盤點。它只產出 inventory、enrichment、conflict、missing 與人工審核模板；不會套用 proposal，也不會因 URL 存在而推定已發布。`asset_url`、`published_at`、`publication_status`、`partner_name` 等查詢在人工核准、schema migration 與 formal index rebuild 前仍維持 fail closed。
+
 執行內建 evaluation：
 
 ```bash

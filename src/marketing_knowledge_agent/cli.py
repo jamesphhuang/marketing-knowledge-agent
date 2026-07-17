@@ -6,6 +6,10 @@ import sys
 from pathlib import Path
 
 from .apply_review_decisions import ApplyReviewDecisionsError, apply_review_decisions
+from .asset_metadata_preview import (
+    AssetMetadataPreviewError,
+    generate_asset_metadata_preview,
+)
 from .backfill import generate_backfill_report
 from .content_index import (
     DEFAULT_CONTENT_INDEX_DB,
@@ -159,6 +163,18 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "asset-metadata-preview":
+            summary = generate_asset_metadata_preview(
+                preview_dir=args.preview_dir,
+                output_dir=args.output,
+                workbook_path=args.workbook,
+                vault_path=args.vault,
+                db_path=args.db,
+                decisions_path=args.decisions,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "review-template":
             summary = generate_review_template(
                 preview_dir=args.preview_dir,
@@ -232,6 +248,9 @@ def main(argv=None) -> int:
         return 2
     except ExcelPreviewError as exc:
         print(f"excel preview error: {exc}", file=sys.stderr)
+        return 2
+    except AssetMetadataPreviewError as exc:
+        print(f"asset metadata preview error: {exc}", file=sys.stderr)
         return 2
     except ReviewTemplateError as exc:
         print(f"review template error: {exc}", file=sys.stderr)
@@ -320,6 +339,29 @@ def build_parser() -> argparse.ArgumentParser:
     excel_preview_parser.add_argument("--workbook", type=Path, required=True)
     excel_preview_parser.add_argument("--output", type=Path, default=Path("reports/excel_preview"))
     excel_preview_parser.add_argument("--captured-date", type=_date_arg, default=None)
+
+    asset_metadata_parser = subparsers.add_parser(
+        "asset-metadata-preview",
+        help="Build a read-only asset metadata inventory and enrichment review preview",
+    )
+    asset_metadata_parser.add_argument(
+        "--preview-dir",
+        type=Path,
+        default=Path("reports/excel_preview"),
+    )
+    asset_metadata_parser.add_argument("--workbook", type=Path, default=None)
+    asset_metadata_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    asset_metadata_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    asset_metadata_parser.add_argument(
+        "--decisions",
+        type=Path,
+        default=Path("reports/excel_preview/review_decisions_template.csv"),
+    )
+    asset_metadata_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/asset_metadata_preview"),
+    )
 
     review_template_parser = subparsers.add_parser(
         "review-template",

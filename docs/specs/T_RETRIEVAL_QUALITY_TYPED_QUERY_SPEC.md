@@ -182,6 +182,8 @@ Rebuild procedure：備份 DB → 從 managed Vault 全量重建新 DB → 跑 e
 
 第 2 項應由後續 Asset-Level Metadata Enrichment Sprint 執行；本 sprint 不修改 index schema、不重建正式 index，也不從 record status 推導 asset status。
 
+Asset-Level Metadata Inventory & Enrichment Preview 已提供 `mka asset-metadata-preview` 作為唯讀盤點工具。它只建立可追溯候選與人工 review template，不改本節的 runtime availability；所有未具 human-approved formal data 的欄位仍 fail closed。Canonical 規格與 Apply Sprint 前置條件見 `docs/specs/U_ASSET_METADATA_INVENTORY_PREVIEW_SPEC.md`。
+
 ## 11. Test Matrix
 
 `tests/test_typed_query_retrieval.py` 覆蓋：名稱、Handle、Category、年份/range、完整日期、unsupported/invalid fail closed、狀態分流、asset type、AND、零交集、不存在名稱、空 asset、agentic 共用 hard constraints、plan round-trip、ambiguity 與 explain-query 安全輸出。既有 governance、LLM、Slack、index 與 citation tests 必須全綠。

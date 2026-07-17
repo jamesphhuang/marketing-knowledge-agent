@@ -59,3 +59,5 @@ Warnings are the pre-existing Pydantic V1-style validator deprecations. Governan
 ## Follow-up
 
 Asset-Level Metadata Enrichment Sprint must add reviewed per-asset URL, published_at, and publication status before these search conditions can become executable. Partner identity and interview/review status require separate schema and governance decisions. Until then they remain plan-expressible but fail closed.
+
+The read-only inventory stage is now available through `mka asset-metadata-preview`. Its URL/date/status proposals are evidence candidates, not approved metadata, and do not change the formal index or this fail-closed acceptance result.
