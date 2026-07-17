@@ -6,6 +6,10 @@ import sys
 from pathlib import Path
 
 from .apply_review_decisions import ApplyReviewDecisionsError, apply_review_decisions
+from .asset_apply_preview import (
+    AssetApplyPreviewError,
+    generate_asset_apply_preview,
+)
 from .asset_metadata_preview import (
     AssetMetadataPreviewError,
     generate_asset_metadata_preview,
@@ -190,6 +194,21 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0 if summary["error_count"] == 0 else 1
 
+        if args.command == "apply-asset-review-decisions":
+            summary = generate_asset_apply_preview(
+                decisions_path=args.decisions,
+                inventory_path=args.inventory,
+                enrichment_path=args.enrichment,
+                validation_dir=args.validation_dir,
+                output_dir=args.output,
+                restricted_customers_path=args.restricted_customers,
+                vault_path=args.vault,
+                db_path=args.db,
+                workbook_path=args.workbook,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0 if summary["error_count"] == 0 else 1
+
         if args.command == "review-template":
             summary = generate_review_template(
                 preview_dir=args.preview_dir,
@@ -266,6 +285,9 @@ def main(argv=None) -> int:
         return 2
     except AssetMetadataPreviewError as exc:
         print(f"asset metadata preview error: {exc}", file=sys.stderr)
+        return 2
+    except AssetApplyPreviewError as exc:
+        print(f"asset apply preview error: {exc}", file=sys.stderr)
         return 2
     except AssetReviewValidationError as exc:
         print(f"asset review validation error: {exc}", file=sys.stderr)
@@ -409,6 +431,50 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/asset_metadata_review_validation"),
+    )
+
+    asset_apply_parser = subparsers.add_parser(
+        "apply-asset-review-decisions",
+        help="Create a dry-run asset URL Apply Preview without changing formal data",
+    )
+    asset_apply_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=True,
+        help="Preview only; this command has no formal apply mode",
+    )
+    asset_apply_parser.add_argument(
+        "--decisions",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/human_review_template.csv"),
+    )
+    asset_apply_parser.add_argument(
+        "--inventory",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/asset_metadata_inventory.csv"),
+    )
+    asset_apply_parser.add_argument(
+        "--enrichment",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/asset_metadata_enrichment_preview.csv"),
+    )
+    asset_apply_parser.add_argument(
+        "--validation-dir",
+        type=Path,
+        default=Path("reports/asset_metadata_review_validation"),
+    )
+    asset_apply_parser.add_argument(
+        "--restricted-customers",
+        type=Path,
+        default=DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    )
+    asset_apply_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    asset_apply_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    asset_apply_parser.add_argument("--workbook", type=Path, default=None)
+    asset_apply_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview"),
     )
 
     review_template_parser = subparsers.add_parser(

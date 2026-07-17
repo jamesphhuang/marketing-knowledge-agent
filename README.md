@@ -170,6 +170,20 @@ Runtime 支援狀態以 `query_planning.RUNTIME_SUPPORT_MATRIX` 為準。Parser 
 
 此命令以 `(asset_id, field)` 對回原始 enrichment proposal，驗證主鍵守恆、decision enum、reviewer、ISO reviewed_at、URL 格式、治理 blocker 與 CSV injection。合法 decision 為 `approve`、`reject`、`needs_update`、`exclude_asset`、`manual_review`；空白不是 approve。現有模板沒有 replacement value 欄位，因此不得直接改寫 `proposed_value`。輸出的 `ready_for_apply_preview` 只是驗證資格，不代表已套用，也不會啟用 published date/status、interview/review status 或 partner 查詢。
 
+預覽已核准 asset URL 決策未來可能造成的 schema／Vault／index 差異：
+
+```bash
+.venv/bin/mka apply-asset-review-decisions --dry-run \
+  --decisions reports/asset_metadata_preview/human_review_template.csv \
+  --inventory reports/asset_metadata_preview/asset_metadata_inventory.csv \
+  --enrichment reports/asset_metadata_preview/asset_metadata_enrichment_preview.csv \
+  --validation-dir reports/asset_metadata_review_validation \
+  --workbook "reports/excel_preview/MKT 內容產出資料庫_店家_夥伴案例_對外數據-20260708.xlsx" \
+  --output reports/asset_metadata_apply_preview
+```
+
+`apply-asset-review-decisions` 是獨立於 merchant `apply-review-decisions` 的 preview-only contract，沒有正式 Apply 模式。它會在暫存目錄重新驗證 decision，確認 persisted validation reports 未過期，只讓 `ready_for_apply_preview + approve` 的 `asset_url`／`canonical_url` 進 proposed diff；governance-blocked assets 只會出現在 blocked report。正式儲存建議為一個 asset 一筆的 flat managed record，再衍生 SQLite `content_assets` table；不可把多個 asset URL 塞入 parent record-level `canonical_url`。
+
 執行內建 evaluation：
 
 ```bash
