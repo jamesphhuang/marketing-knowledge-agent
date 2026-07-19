@@ -51,6 +51,10 @@ from .resolution_storage_schema_preview import (
     ResolutionStorageSchemaError,
     generate_resolution_storage_schema_preview,
 )
+from .governance_decision_store_plan import (
+    GovernanceDecisionStorePlanError,
+    generate_governance_decision_store_plan,
+)
 from .pipeline import (
     DEFAULT_RESTRICTED_CUSTOMERS_PATH,
     agent_ask,
@@ -318,6 +322,27 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "governance-decision-store":
+            summary = generate_governance_decision_store_plan(
+                review_decisions_path=args.review_decisions,
+                merchant_cases_path=args.merchant_cases,
+                public_metrics_path=args.public_metrics,
+                pending_metrics_path=args.pending_metrics,
+                restricted_customers_path=args.restricted_customers,
+                asset_decisions_path=args.asset_decisions,
+                asset_validation_path=args.asset_validation,
+                asset_apply_preview_path=args.asset_apply_preview,
+                asset_blocked_preview_path=args.asset_blocked_preview,
+                resolution_dir=args.resolution_dir,
+                formal_vault_path=args.vault,
+                formal_db_path=args.db,
+                production_renderer_path=args.production_slack_renderer,
+                output_dir=args.output,
+                created_at=args.created_at,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 1 if summary["execution_blocked"] else 0
+
         if args.command == "preview-slack-output":
             if args.sample_set:
                 summary = generate_slack_output_preview(
@@ -440,6 +465,9 @@ def main(argv=None) -> int:
         return 2
     except ResolutionStorageSchemaError as exc:
         print(f"resolution storage schema preview error: {exc}", file=sys.stderr)
+        return 2
+    except GovernanceDecisionStorePlanError as exc:
+        print(f"governance decision store plan error: {exc}", file=sys.stderr)
         return 2
     except SlackOutputPreviewError as exc:
         print(f"slack output preview error: {exc}", file=sys.stderr)
@@ -885,6 +913,81 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/resolution_storage_schema_preview"),
+    )
+
+    decision_store_parser = subparsers.add_parser(
+        "governance-decision-store",
+        help="Inventory and plan an append-only Governance Decision Store",
+    )
+    decision_store_parser.add_argument(
+        "--plan", action="store_true", required=True, help="Plan only; no execute mode exists"
+    )
+    decision_store_parser.add_argument(
+        "--review-decisions",
+        type=Path,
+        default=Path("reports/excel_preview/review_decisions_template.csv"),
+    )
+    decision_store_parser.add_argument(
+        "--merchant-cases",
+        type=Path,
+        default=Path("reports/excel_preview/merchant_cases.json"),
+    )
+    decision_store_parser.add_argument(
+        "--public-metrics",
+        type=Path,
+        default=Path("reports/excel_preview/public_metrics.json"),
+    )
+    decision_store_parser.add_argument(
+        "--pending-metrics",
+        type=Path,
+        default=Path("reports/excel_preview/pending_metrics.json"),
+    )
+    decision_store_parser.add_argument(
+        "--restricted-customers",
+        type=Path,
+        default=Path("reports/excel_preview/restricted_customers.json"),
+    )
+    decision_store_parser.add_argument(
+        "--asset-decisions",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/human_review_template.csv"),
+    )
+    decision_store_parser.add_argument(
+        "--asset-validation",
+        type=Path,
+        default=Path("reports/asset_metadata_review_validation/review_decision_status.csv"),
+    )
+    decision_store_parser.add_argument(
+        "--asset-apply-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv"),
+    )
+    decision_store_parser.add_argument(
+        "--asset-blocked-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv"),
+    )
+    decision_store_parser.add_argument(
+        "--resolution-dir",
+        type=Path,
+        default=Path("reports/missing_parent_resolution_preview"),
+    )
+    decision_store_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    decision_store_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    decision_store_parser.add_argument(
+        "--production-slack-renderer",
+        type=Path,
+        default=Path("src/marketing_knowledge_agent/slack_interface.py"),
+    )
+    decision_store_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/governance_decision_store_plan"),
+    )
+    decision_store_parser.add_argument(
+        "--created-at",
+        default=None,
+        help="Optional timezone-aware ISO timestamp for deterministic dry-run output",
     )
 
     slack_preview_parser = subparsers.add_parser(
