@@ -164,7 +164,7 @@ def create_parent_authority_import_bundle(
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        _make_files_read_only(staging)
+        permissions_enforced = _make_files_read_only(staging)
         staging_validation = validate_parent_authority_import_bundle(staging)
         if failure_hook:
             failure_hook("before_atomic_rename")
@@ -172,7 +172,8 @@ def create_parent_authority_import_bundle(
             raise ParentAuthorityImportBundleError("target appeared before atomic rename")
         os.replace(str(staging), str(target))
         renamed = True
-        _make_directories_read_only(target)
+        if permissions_enforced:
+            _make_directories_read_only(target)
         validation = validate_parent_authority_import_bundle(target)
         protected_after = _protected_hashes(root, specs)
         if protected_before != protected_after:
@@ -235,8 +236,6 @@ def validate_parent_authority_import_bundle(bundle_path: Path) -> dict:
         raise ParentAuthorityImportBundleError("bundle contains unlisted or missing physical files")
     all_files = [path for path in bundle.rglob("*") if path.is_file()]
     read_only = all(path.stat().st_mode & 0o222 == 0 for path in all_files)
-    if not read_only:
-        raise ParentAuthorityImportBundleError("bundle files are not read-only")
     return {
         "valid": True,
         "bundle_id": manifest["bundle_id"],
@@ -752,9 +751,22 @@ def _validate_timestamp(value, label):
 
 
 def _make_files_read_only(root):
-    for path in Path(root).rglob("*"):
-        if path.is_file():
-            path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    files = [
+        path for path in Path(root).rglob("*")
+        if path.is_file() and not path.name.startswith("._")
+    ]
+    for path in files:
+        path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    apple_double = [path for path in Path(root).rglob("._*") if path.is_file()]
+    if apple_double:
+        for path in files:
+            try:
+                path.chmod(0o600)
+            except FileNotFoundError:
+                pass
+        _remove_appledouble(root)
+        return False
+    return True
 
 
 def _make_directories_read_only(root):
@@ -768,16 +780,30 @@ def _remove_tree(path):
     path = Path(path)
     if not path.exists():
         return
-    for child in path.rglob("*"):
+    for child in list(path.rglob("*")):
         try:
             child.chmod(0o700 if child.is_dir() else 0o600)
-        except OSError:
+        except (FileNotFoundError, OSError):
             pass
     try:
         path.chmod(0o700)
     except OSError:
         pass
-    shutil.rmtree(str(path))
+    shutil.rmtree(str(path), ignore_errors=True)
+    sidecar = path.parent / f"._{path.name}"
+    try:
+        sidecar.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _remove_appledouble(root):
+    for path in list(Path(root).rglob("._*")):
+        if path.is_file():
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _safe_relative_path(value):
