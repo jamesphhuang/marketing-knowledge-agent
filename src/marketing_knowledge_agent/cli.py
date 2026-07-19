@@ -55,6 +55,10 @@ from .governance_decision_store_plan import (
     GovernanceDecisionStorePlanError,
     generate_governance_decision_store_plan,
 )
+from .parent_authority_review import (
+    ParentAuthorityReviewError,
+    prepare_parent_authority_review,
+)
 from .pipeline import (
     DEFAULT_RESTRICTED_CUSTOMERS_PATH,
     agent_ask,
@@ -343,6 +347,24 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 1 if summary["execution_blocked"] else 0
 
+        if args.command == "prepare-parent-authority-review":
+            summary = prepare_parent_authority_review(
+                merchant_cases_path=args.merchant_cases,
+                review_decisions_path=args.review_decisions,
+                admin_resolutions_path=args.admin_resolutions,
+                baseline_import_preview_path=args.baseline_import_preview,
+                decision_source_inventory_path=args.decision_source_inventory,
+                asset_inventory_path=args.asset_inventory,
+                asset_resolution_path=args.asset_resolution,
+                asset_url_decisions_path=args.asset_url_decisions,
+                formal_vault_path=args.vault,
+                formal_db_path=args.db,
+                decision_store_path=args.decision_store,
+                output_dir=args.output,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "preview-slack-output":
             if args.sample_set:
                 summary = generate_slack_output_preview(
@@ -468,6 +490,9 @@ def main(argv=None) -> int:
         return 2
     except GovernanceDecisionStorePlanError as exc:
         print(f"governance decision store plan error: {exc}", file=sys.stderr)
+        return 2
+    except ParentAuthorityReviewError as exc:
+        print(f"parent authority review error: {exc}", file=sys.stderr)
         return 2
     except SlackOutputPreviewError as exc:
         print(f"slack output preview error: {exc}", file=sys.stderr)
@@ -983,6 +1008,63 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/governance_decision_store_plan"),
+    )
+
+    parent_authority_parser = subparsers.add_parser(
+        "prepare-parent-authority-review",
+        help="Prepare a read-only Admin review packet for Parent authority gaps",
+    )
+    parent_authority_parser.add_argument(
+        "--merchant-cases",
+        type=Path,
+        default=Path("reports/excel_preview/merchant_cases.json"),
+    )
+    parent_authority_parser.add_argument(
+        "--review-decisions",
+        type=Path,
+        default=Path("reports/excel_preview/review_decisions_template.csv"),
+    )
+    parent_authority_parser.add_argument(
+        "--admin-resolutions",
+        type=Path,
+        default=Path("reports/missing_parent_resolution_preview/missing_parent_resolution_decisions.csv"),
+    )
+    parent_authority_parser.add_argument(
+        "--baseline-import-preview",
+        type=Path,
+        default=Path("reports/governance_decision_store_plan/baseline_import_preview.csv"),
+    )
+    parent_authority_parser.add_argument(
+        "--decision-source-inventory",
+        type=Path,
+        default=Path("reports/governance_decision_store_plan/decision_source_inventory.csv"),
+    )
+    parent_authority_parser.add_argument(
+        "--asset-inventory",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/asset_metadata_inventory.csv"),
+    )
+    parent_authority_parser.add_argument(
+        "--asset-resolution",
+        type=Path,
+        default=Path("reports/missing_parent_resolution_preview/asset_eligibility_preview.csv"),
+    )
+    parent_authority_parser.add_argument(
+        "--asset-url-decisions",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/human_review_template.csv"),
+    )
+    parent_authority_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    parent_authority_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    parent_authority_parser.add_argument(
+        "--decision-store",
+        type=Path,
+        default=Path("data/governance/governance_decisions.sqlite"),
+    )
+    parent_authority_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/parent_baseline_authority_review"),
     )
     decision_store_parser.add_argument(
         "--created-at",
