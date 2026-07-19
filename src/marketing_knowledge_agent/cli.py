@@ -47,6 +47,10 @@ from .missing_parent_resolution_apply_preview import (
     MissingParentResolutionApplyPreviewError,
     generate_resolution_apply_preview,
 )
+from .resolution_storage_schema_preview import (
+    ResolutionStorageSchemaError,
+    generate_resolution_storage_schema_preview,
+)
 from .pipeline import (
     DEFAULT_RESTRICTED_CUSTOMERS_PATH,
     agent_ask,
@@ -300,6 +304,20 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "preview-resolution-storage-schema":
+            summary = generate_resolution_storage_schema_preview(
+                resolution_dir=args.resolution_dir,
+                parent_records_path=args.parent_records,
+                review_decisions_path=args.review_decisions,
+                asset_apply_preview_path=args.asset_apply_preview,
+                asset_blocked_preview_path=args.asset_blocked_preview,
+                vault_path=args.vault,
+                db_path=args.db,
+                output_dir=args.output,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "preview-slack-output":
             if args.sample_set:
                 summary = generate_slack_output_preview(
@@ -419,6 +437,9 @@ def main(argv=None) -> int:
         return 2
     except MissingParentResolutionApplyPreviewError as exc:
         print(f"missing parent resolution validation error: {exc}", file=sys.stderr)
+        return 2
+    except ResolutionStorageSchemaError as exc:
+        print(f"resolution storage schema preview error: {exc}", file=sys.stderr)
         return 2
     except SlackOutputPreviewError as exc:
         print(f"slack output preview error: {exc}", file=sys.stderr)
@@ -823,6 +844,47 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/missing_parent_resolution_apply_preview"),
+    )
+
+    storage_schema_parser = subparsers.add_parser(
+        "preview-resolution-storage-schema",
+        help="Validate resolution storage schemas using temporary fixtures only",
+    )
+    storage_schema_parser.add_argument(
+        "--resolution-dir",
+        type=Path,
+        default=Path("reports/missing_parent_resolution_preview"),
+    )
+    storage_schema_parser.add_argument(
+        "--parent-records",
+        type=Path,
+        default=Path("reports/excel_preview/merchant_cases.json"),
+    )
+    storage_schema_parser.add_argument(
+        "--review-decisions",
+        type=Path,
+        default=Path("reports/excel_preview/review_decisions_template.csv"),
+    )
+    storage_schema_parser.add_argument(
+        "--asset-apply-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv"),
+    )
+    storage_schema_parser.add_argument(
+        "--asset-blocked-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv"),
+    )
+    storage_schema_parser.add_argument(
+        "--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT
+    )
+    storage_schema_parser.add_argument(
+        "--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB
+    )
+    storage_schema_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/resolution_storage_schema_preview"),
     )
 
     slack_preview_parser = subparsers.add_parser(
