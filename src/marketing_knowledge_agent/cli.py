@@ -59,6 +59,13 @@ from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
 )
+from .parent_authority_import_bundle import (
+    DEFAULT_BUNDLE_PATH as DEFAULT_PARENT_AUTHORITY_BUNDLE_PATH,
+    DEFAULT_REPORT_DIR as DEFAULT_PARENT_AUTHORITY_BUNDLE_REPORT_DIR,
+    ParentAuthorityImportBundleError,
+    create_parent_authority_import_bundle,
+    validate_parent_authority_import_bundle,
+)
 from .pipeline import (
     DEFAULT_RESTRICTED_CUSTOMERS_PATH,
     agent_ask,
@@ -365,6 +372,21 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "create-parent-authority-import-bundle":
+            summary = create_parent_authority_import_bundle(
+                repo_root=Path.cwd(),
+                target_path=args.target,
+                report_dir=args.output,
+                created_at=args.created_at,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "validate-parent-authority-import-bundle":
+            summary = validate_parent_authority_import_bundle(args.bundle)
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "preview-slack-output":
             if args.sample_set:
                 summary = generate_slack_output_preview(
@@ -493,6 +515,9 @@ def main(argv=None) -> int:
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
+        return 2
+    except ParentAuthorityImportBundleError as exc:
+        print(f"parent authority import bundle error: {exc}", file=sys.stderr)
         return 2
     except SlackOutputPreviewError as exc:
         print(f"slack output preview error: {exc}", file=sys.stderr)
@@ -1065,6 +1090,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/parent_baseline_authority_review"),
+    )
+
+    parent_bundle_parser = subparsers.add_parser(
+        "create-parent-authority-import-bundle",
+        help="Create an immutable Parent authority approval evidence bundle",
+    )
+    parent_bundle_parser.add_argument(
+        "--target",
+        type=Path,
+        default=DEFAULT_PARENT_AUTHORITY_BUNDLE_PATH,
+    )
+    parent_bundle_parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_PARENT_AUTHORITY_BUNDLE_REPORT_DIR,
+    )
+    parent_bundle_parser.add_argument(
+        "--created-at",
+        default=None,
+        help="Optional timezone-aware ISO timestamp for deterministic creation",
+    )
+
+    validate_parent_bundle_parser = subparsers.add_parser(
+        "validate-parent-authority-import-bundle",
+        help="Validate an immutable Parent authority approval evidence bundle",
+    )
+    validate_parent_bundle_parser.add_argument(
+        "--bundle",
+        type=Path,
+        default=DEFAULT_PARENT_AUTHORITY_BUNDLE_PATH,
     )
     decision_store_parser.add_argument(
         "--created-at",
