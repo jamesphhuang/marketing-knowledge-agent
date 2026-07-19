@@ -55,6 +55,13 @@ from .governance_decision_store_plan import (
     GovernanceDecisionStorePlanError,
     generate_governance_decision_store_plan,
 )
+from .governance_decision_store_regenerated_plan import (
+    DEFAULT_BUNDLE_PATH as DEFAULT_PARENT_AUTHORITY_IMPORT_BUNDLE,
+    DEFAULT_OUTPUT_DIR as DEFAULT_REGENERATED_DECISION_STORE_PLAN_OUTPUT,
+    DEFAULT_TARGET_PATH as DEFAULT_GOVERNANCE_DECISION_STORE_TARGET,
+    RegeneratedDecisionStorePlanError,
+    generate_regenerated_governance_decision_store_plan,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -354,6 +361,26 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 1 if summary["execution_blocked"] else 0
 
+        if args.command == "regenerate-governance-decision-store-plan":
+            summary = generate_regenerated_governance_decision_store_plan(
+                repo_root=Path.cwd(),
+                bundle_path=args.bundle,
+                legacy_decisions_path=args.legacy_decisions,
+                merchant_cases_path=args.merchant_cases,
+                asset_url_decisions_path=args.asset_url_decisions,
+                asset_url_validation_path=args.asset_url_validation,
+                asset_apply_preview_path=args.asset_apply_preview,
+                asset_blocked_preview_path=args.asset_blocked_preview,
+                formal_vault_path=args.vault,
+                formal_db_path=args.db,
+                production_renderer_path=args.production_slack_renderer,
+                target_path=args.target,
+                output_dir=args.output,
+                created_at=args.created_at,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 1 if summary["execution_blocked"] else 0
+
         if args.command == "prepare-parent-authority-review":
             summary = prepare_parent_authority_review(
                 merchant_cases_path=args.merchant_cases,
@@ -512,6 +539,9 @@ def main(argv=None) -> int:
         return 2
     except GovernanceDecisionStorePlanError as exc:
         print(f"governance decision store plan error: {exc}", file=sys.stderr)
+        return 2
+    except RegeneratedDecisionStorePlanError as exc:
+        print(f"regenerated decision store plan error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1033,6 +1063,62 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("reports/governance_decision_store_plan"),
+    )
+
+    regenerated_store_parser = subparsers.add_parser(
+        "regenerate-governance-decision-store-plan",
+        help="Regenerate a preview-only Decision Store Plan from the immutable Parent authority Bundle",
+    )
+    regenerated_store_parser.add_argument(
+        "--bundle", type=Path, default=DEFAULT_PARENT_AUTHORITY_IMPORT_BUNDLE
+    )
+    regenerated_store_parser.add_argument(
+        "--legacy-decisions",
+        type=Path,
+        default=Path("reports/excel_preview/review_decisions_template.csv"),
+    )
+    regenerated_store_parser.add_argument(
+        "--merchant-cases",
+        type=Path,
+        default=Path("reports/excel_preview/merchant_cases.json"),
+    )
+    regenerated_store_parser.add_argument(
+        "--asset-url-decisions",
+        type=Path,
+        default=Path("reports/asset_metadata_preview/human_review_template.csv"),
+    )
+    regenerated_store_parser.add_argument(
+        "--asset-url-validation",
+        type=Path,
+        default=Path("reports/asset_metadata_review_validation/review_decision_status.csv"),
+    )
+    regenerated_store_parser.add_argument(
+        "--asset-apply-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv"),
+    )
+    regenerated_store_parser.add_argument(
+        "--asset-blocked-preview",
+        type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv"),
+    )
+    regenerated_store_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    regenerated_store_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    regenerated_store_parser.add_argument(
+        "--production-slack-renderer",
+        type=Path,
+        default=Path("src/marketing_knowledge_agent/slack_interface.py"),
+    )
+    regenerated_store_parser.add_argument(
+        "--target", type=Path, default=DEFAULT_GOVERNANCE_DECISION_STORE_TARGET
+    )
+    regenerated_store_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_REGENERATED_DECISION_STORE_PLAN_OUTPUT
+    )
+    regenerated_store_parser.add_argument(
+        "--created-at",
+        default=None,
+        help="Optional timezone-aware ISO timestamp for deterministic dry-run output",
     )
 
     parent_authority_parser = subparsers.add_parser(

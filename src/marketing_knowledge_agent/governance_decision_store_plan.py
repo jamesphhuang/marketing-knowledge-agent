@@ -97,6 +97,8 @@ CREATE TABLE decision_events (
     provenance TEXT NOT NULL,
     source_plan_id TEXT NOT NULL,
     source_manifest_hash TEXT NOT NULL,
+    source_bundle_id TEXT,
+    source_bundle_root_hash TEXT,
     input_checksums_json TEXT NOT NULL,
     supersedes_event_id TEXT,
     previous_event_hash TEXT,
@@ -215,6 +217,8 @@ class GovernanceDecisionEvent:
     supersedes_event_id: Optional[str]
     created_at: str
     code_version: str
+    source_bundle_id: Optional[str] = None
+    source_bundle_root_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -254,6 +258,10 @@ class GovernanceDecisionEvent:
             raise GovernanceDecisionStorePlanError("new Resolution Events require reviewer Admin")
         if not isinstance(self.input_checksums, Mapping) or not self.input_checksums:
             raise GovernanceDecisionStorePlanError("input_checksums are required")
+        if bool(self.source_bundle_id) != bool(self.source_bundle_root_hash):
+            raise GovernanceDecisionStorePlanError(
+                "source_bundle_id and source_bundle_root_hash must be provided together"
+            )
 
     @property
     def idempotency_key(self) -> str:
@@ -281,6 +289,8 @@ def normalize_event_payload(event: GovernanceDecisionEvent) -> dict:
         "provenance": event.provenance,
         "source_plan_id": event.source_plan_id,
         "source_manifest_hash": event.source_manifest_hash,
+        "source_bundle_id": event.source_bundle_id,
+        "source_bundle_root_hash": event.source_bundle_root_hash,
         "input_checksums": dict(sorted(event.input_checksums.items())),
         "supersedes_event_id": event.supersedes_event_id,
     }
@@ -914,9 +924,10 @@ def _insert_event(connection, event):
             event_id, idempotency_key, event_type, subject_type, subject_id,
             record_id, asset_id, field_name, action, previous_value_json,
             new_value_json, reviewer, reviewed_at, decision_reason, provenance,
-            source_plan_id, source_manifest_hash, input_checksums_json,
+            source_plan_id, source_manifest_hash, source_bundle_id,
+            source_bundle_root_hash, input_checksums_json,
             supersedes_event_id, previous_event_hash, event_hash, created_at, code_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event.event_id,
             event.idempotency_key,
@@ -935,6 +946,8 @@ def _insert_event(connection, event):
             event.provenance,
             event.source_plan_id,
             event.source_manifest_hash,
+            event.source_bundle_id,
+            event.source_bundle_root_hash,
             _canonical_json(dict(sorted(event.input_checksums.items()))),
             event.supersedes_event_id,
             previous_hash,
@@ -963,6 +976,8 @@ def _row_hash_payload(row):
         "provenance": row["provenance"],
         "source_plan_id": row["source_plan_id"],
         "source_manifest_hash": row["source_manifest_hash"],
+        "source_bundle_id": row["source_bundle_id"],
+        "source_bundle_root_hash": row["source_bundle_root_hash"],
         "input_checksums": json.loads(row["input_checksums_json"]),
         "supersedes_event_id": row["supersedes_event_id"],
         "event_id": row["event_id"],
