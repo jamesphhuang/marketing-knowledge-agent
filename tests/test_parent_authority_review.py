@@ -223,7 +223,7 @@ def _real_paths(tmp_path):
         "asset_url_decisions_path": root / "reports/asset_metadata_preview/human_review_template.csv",
         "formal_vault_path": root / "obsidian_vault",
         "formal_db_path": root / ".mka/content_index.sqlite",
-        "decision_store_path": root / "data/governance/governance_decisions.sqlite",
+        "decision_store_path": tmp_path / "not-yet-created-governance-decisions.sqlite",
         "output_dir": tmp_path / "out",
     }
 

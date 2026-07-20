@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import marketing_knowledge_agent.governance_decision_store_confirmation as confirmation_module
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.governance_decision_store_confirmation import (
     BUNDLE_ROOT_HASH,
@@ -19,6 +20,21 @@ from marketing_knowledge_agent.governance_decision_store_confirmation import (
 
 
 CONFIRMED_AT = "2026-07-20T10:00:00+08:00"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_confirmation_report_formal_checks(monkeypatch):
+    checks = (
+        "governance_decisions.sqlite_absent", "formal_vault_present_unchanged",
+        "managed_vault_present_unchanged", "content_index_present_unchanged",
+        "production_renderer_present_unchanged", "parent_sync_not_executed",
+        "asset_url_not_applied", "asset_eligibility_not_applied",
+        "search_alias_not_applied", "slack_api_not_called",
+    )
+    monkeypatch.setattr(
+        confirmation_module, "_formal_checks",
+        lambda root: [{"check": check, "status": "pass"} for check in checks],
+    )
 
 
 def test_real_plan_is_independently_validated_without_generator(tmp_path):

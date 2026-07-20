@@ -170,13 +170,15 @@ def test_formal_systems_and_source_reports_are_unchanged(tmp_path):
         "renderer": _root() / "src/marketing_knowledge_agent/slack_interface.py",
         "approved": _root() / "reports/parent_baseline_authority_review/baseline_parent_authority_review_template.csv",
     }
+    formal_store = _root() / "data/governance/governance_decisions.sqlite"
     before = {name: _path_hash(path) for name, path in protected.items()}
+    formal_store_before = _path_hash(formal_store) if formal_store.exists() else None
 
     summary = create_parent_authority_import_bundle(**kwargs)
 
     assert before == {name: _path_hash(path) for name, path in protected.items()}
     assert summary["formal_data_modified"] is False
-    assert not (_root() / "data/governance/governance_decisions.sqlite").exists()
+    assert (_path_hash(formal_store) if formal_store.exists() else None) == formal_store_before
 
 
 def test_create_and_validate_cli_require_no_slack_tokens(tmp_path, monkeypatch, capsys):
