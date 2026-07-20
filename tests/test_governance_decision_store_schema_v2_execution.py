@@ -11,6 +11,7 @@ from marketing_knowledge_agent.governance_decision_store_schema_v2_execution imp
     EXPECTED_PLAN_ID,
     EXPECTED_SCHEMA_HASH,
     GovernanceDecisionStoreSchemaV2ExecutionError,
+    _is_git_ignored,
     execute_governance_decision_store_schema_v2_plan,
     validate_governance_decision_store_schema_v2_execution_bundle,
 )
@@ -18,6 +19,11 @@ from marketing_knowledge_agent.cli import main
 
 
 EXECUTED_AT = "2026-07-20T20:00:00+08:00"
+
+
+def test_nonexistent_formal_governance_paths_are_recognized_as_git_ignored():
+    root = Path(__file__).resolve().parents[1]
+    assert _is_git_ignored(root, root / "data/governance/not-yet-created.sqlite") is True
 
 
 @pytest.mark.parametrize(("field", "value", "message"), [

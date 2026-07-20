@@ -839,7 +839,7 @@ def _protected_paths(root):
 def _is_git_ignored(root, path):
     try:
         subprocess.check_call(
-            ["git", "check-ignore", "-q", str(path)], cwd=root,
+            ["git", "check-ignore", "--no-index", "-q", str(path)], cwd=root,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:
