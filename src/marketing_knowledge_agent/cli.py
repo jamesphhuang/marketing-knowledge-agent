@@ -109,6 +109,12 @@ from .governance_decision_store_schema_v2_execution import (
     GovernanceDecisionStoreSchemaV2ExecutionError,
     execute_governance_decision_store_schema_v2_plan,
 )
+from .governance_decision_store_existing_validation import (
+    DEFAULT_FORMAL_TARGET as DEFAULT_EXISTING_DECISION_STORE_TARGET,
+    DEFAULT_REPORT_DIR as DEFAULT_EXISTING_DECISION_STORE_REPORTS,
+    ExistingGovernanceDecisionStoreValidationError,
+    validate_existing_governance_decision_store,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -562,6 +568,16 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "validate-existing-governance-decision-store":
+            summary = validate_existing_governance_decision_store(
+                repo_root=Path.cwd(),
+                database_path=args.database,
+                report_dir=args.output,
+                temporary_root=args.temporary_root,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "prepare-parent-authority-review":
             summary = prepare_parent_authority_review(
                 merchant_cases_path=args.merchant_cases,
@@ -738,6 +754,9 @@ def main(argv=None) -> int:
         return 2
     except GovernanceDecisionStoreSchemaV2ExecutionError as exc:
         print(f"governance decision store schema v2 execution error: {exc}", file=sys.stderr)
+        return 2
+    except ExistingGovernanceDecisionStoreValidationError as exc:
+        print(f"existing governance decision store validation error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1482,6 +1501,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     execute_schema_v2_parser.add_argument("--temporary-root", type=Path, default=None)
     execute_schema_v2_parser.add_argument("--executed-at", default=None)
+
+    existing_store_parser = subparsers.add_parser(
+        "validate-existing-governance-decision-store",
+        help="Independently validate the existing Governance Decision Store read-only",
+    )
+    existing_store_parser.add_argument(
+        "--database", type=Path, default=DEFAULT_EXISTING_DECISION_STORE_TARGET
+    )
+    existing_store_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_EXISTING_DECISION_STORE_REPORTS
+    )
+    existing_store_parser.add_argument("--temporary-root", type=Path, default=None)
 
     parent_authority_parser = subparsers.add_parser(
         "prepare-parent-authority-review",
