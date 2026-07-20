@@ -89,6 +89,19 @@ from .governance_decision_store_schema_v2_plan import (
     GovernanceDecisionStoreSchemaV2PlanError,
     generate_governance_decision_store_schema_v2_plan,
 )
+from .governance_decision_store_schema_v2_confirmation import (
+    DEFAULT_BUNDLE_PATH as DEFAULT_SCHEMA_V2_CONFIRMATION_BUNDLE,
+    DEFAULT_CANONICAL_SCHEMA as DEFAULT_SCHEMA_V2_CONFIRMATION_SCHEMA,
+    DEFAULT_CONFIRMATION_PATH as DEFAULT_SCHEMA_V2_CONFIRMATION_PATH,
+    DEFAULT_FORMAL_TARGET as DEFAULT_SCHEMA_V2_CONFIRMATION_TARGET,
+    DEFAULT_OLD_CONFIRMATION_PATH as DEFAULT_SCHEMA_V2_HISTORICAL_CONFIRMATION,
+    DEFAULT_PLAN_MANIFEST as DEFAULT_SCHEMA_V2_CONFIRMATION_PLAN,
+    DEFAULT_REPORT_DIR as DEFAULT_SCHEMA_V2_CONFIRMATION_REPORTS,
+    DEFAULT_SCHEMA_HASH as DEFAULT_SCHEMA_V2_CONFIRMATION_HASH_FILE,
+    GovernanceDecisionStoreSchemaV2ConfirmationError,
+    confirm_governance_decision_store_schema_v2_plan,
+    validate_governance_decision_store_schema_v2_plan,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -479,6 +492,51 @@ def main(argv=None) -> int:
             print(json.dumps(public_summary, ensure_ascii=False, indent=2))
             return 1 if summary["execution_blocked"] else 0
 
+        if args.command == "validate-governance-decision-store-schema-v2-plan":
+            summary = validate_governance_decision_store_schema_v2_plan(
+                repo_root=Path.cwd(),
+                plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash,
+                schema_hash=args.schema_hash,
+                canonical_sql_hash=args.canonical_sql_hash,
+                plan_manifest_path=args.plan_manifest,
+                canonical_schema_path=args.canonical_schema,
+                schema_hash_path=args.schema_hash_file,
+                bundle_path=args.bundle,
+                old_confirmation_path=args.old_confirmation,
+                formal_target_path=args.target,
+                temporary_root=args.temporary_root,
+                now=args.now,
+            )
+            public_summary = {
+                key: value for key, value in summary.items()
+                if key not in {"event_templates", "plan_manifest", "bundle_checksum_rows", "special_decision_rows"}
+            }
+            print(json.dumps(public_summary, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "confirm-governance-decision-store-schema-v2-plan":
+            summary = confirm_governance_decision_store_schema_v2_plan(
+                repo_root=Path.cwd(),
+                plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash,
+                schema_hash=args.schema_hash,
+                canonical_sql_hash=args.canonical_sql_hash,
+                reviewer=args.reviewer,
+                confirmed_at=args.confirmed_at,
+                plan_manifest_path=args.plan_manifest,
+                canonical_schema_path=args.canonical_schema,
+                schema_hash_path=args.schema_hash_file,
+                bundle_path=args.bundle,
+                old_confirmation_path=args.old_confirmation,
+                formal_target_path=args.target,
+                temporary_root=args.temporary_root,
+                confirmation_path=args.confirmation_path,
+                report_dir=args.output,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "prepare-parent-authority-review":
             summary = prepare_parent_authority_review(
                 merchant_cases_path=args.merchant_cases,
@@ -649,6 +707,9 @@ def main(argv=None) -> int:
         return 2
     except GovernanceDecisionStoreSchemaV2PlanError as exc:
         print(f"governance decision store schema v2 plan error: {exc}", file=sys.stderr)
+        return 2
+    except GovernanceDecisionStoreSchemaV2ConfirmationError as exc:
+        print(f"governance decision store schema v2 confirmation error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1349,6 +1410,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional timezone-aware ISO timestamp for deterministic dry-run output",
     )
 
+    validate_schema_v2_parser = subparsers.add_parser(
+        "validate-governance-decision-store-schema-v2-plan",
+        help="Independently validate the exact Governance Decision Store Schema V2 Plan",
+    )
+    _add_schema_v2_confirmation_authority_args(validate_schema_v2_parser)
+    validate_schema_v2_parser.add_argument("--now", default=None)
+
+    confirm_schema_v2_parser = subparsers.add_parser(
+        "confirm-governance-decision-store-schema-v2-plan",
+        help="Independently validate and immutably confirm the exact Schema V2 Plan",
+    )
+    _add_schema_v2_confirmation_authority_args(confirm_schema_v2_parser)
+    confirm_schema_v2_parser.add_argument("--reviewer", required=True, choices=("Admin",))
+    confirm_schema_v2_parser.add_argument("--confirmed-at", default=None)
+    confirm_schema_v2_parser.add_argument(
+        "--confirmation-path", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_PATH
+    )
+    confirm_schema_v2_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_REPORTS
+    )
+
     parent_authority_parser = subparsers.add_parser(
         "prepare-parent-authority-review",
         help="Prepare a read-only Admin review packet for Parent authority gaps",
@@ -1563,6 +1645,29 @@ def build_parser() -> argparse.ArgumentParser:
     slack_parser.add_argument("--config", type=Path, default=Path(".mka/slack_config.json"))
 
     return parser
+
+
+def _add_schema_v2_confirmation_authority_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--plan-id", required=True)
+    parser.add_argument("--manifest-hash", required=True)
+    parser.add_argument("--schema-hash", required=True)
+    parser.add_argument("--canonical-sql-hash", required=True)
+    parser.add_argument(
+        "--plan-manifest", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_PLAN
+    )
+    parser.add_argument(
+        "--canonical-schema", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_SCHEMA
+    )
+    parser.add_argument(
+        "--schema-hash-file", type=Path,
+        default=DEFAULT_SCHEMA_V2_CONFIRMATION_HASH_FILE,
+    )
+    parser.add_argument("--bundle", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_BUNDLE)
+    parser.add_argument(
+        "--old-confirmation", type=Path, default=DEFAULT_SCHEMA_V2_HISTORICAL_CONFIRMATION
+    )
+    parser.add_argument("--target", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_TARGET)
+    parser.add_argument("--temporary-root", type=Path, default=None)
 
 
 def _add_retrieval_args(parser: argparse.ArgumentParser) -> None:
