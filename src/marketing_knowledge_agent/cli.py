@@ -79,6 +79,16 @@ from .governance_decision_store_execution import (
     GovernanceDecisionStoreExecutionError,
     execute_governance_decision_store_plan,
 )
+from .governance_decision_store_schema_v2_plan import (
+    DEFAULT_BUNDLE_PATH as DEFAULT_SCHEMA_V2_BUNDLE_PATH,
+    DEFAULT_EXECUTE_REPORTS as DEFAULT_SCHEMA_V2_EXECUTE_REPORTS,
+    DEFAULT_OLD_CONFIRMATION as DEFAULT_SCHEMA_V2_OLD_CONFIRMATION,
+    DEFAULT_OLD_PLAN_MANIFEST as DEFAULT_SCHEMA_V2_OLD_PLAN_MANIFEST,
+    DEFAULT_OUTPUT_DIR as DEFAULT_SCHEMA_V2_OUTPUT,
+    DEFAULT_TARGET_PATH as DEFAULT_SCHEMA_V2_TARGET,
+    GovernanceDecisionStoreSchemaV2PlanError,
+    generate_governance_decision_store_schema_v2_plan,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -442,6 +452,33 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 1 if summary["execution_blocked"] else 0
 
+        if args.command == "plan-governance-decision-store-schema-v2":
+            summary = generate_governance_decision_store_schema_v2_plan(
+                repo_root=Path.cwd(),
+                bundle_path=args.bundle,
+                old_plan_manifest_path=args.old_plan_manifest,
+                old_confirmation_path=args.old_confirmation,
+                execute_reports_path=args.execute_reports,
+                legacy_decisions_path=args.legacy_decisions,
+                merchant_cases_path=args.merchant_cases,
+                asset_url_decisions_path=args.asset_url_decisions,
+                asset_url_validation_path=args.asset_url_validation,
+                asset_apply_preview_path=args.asset_apply_preview,
+                asset_blocked_preview_path=args.asset_blocked_preview,
+                formal_vault_path=args.vault,
+                formal_db_path=args.db,
+                production_renderer_path=args.production_slack_renderer,
+                target_path=args.target,
+                output_dir=args.output,
+                temporary_dir=args.temporary_dir,
+                created_at=args.created_at,
+            )
+            public_summary = {
+                key: value for key, value in summary.items() if key != "event_templates"
+            }
+            print(json.dumps(public_summary, ensure_ascii=False, indent=2))
+            return 1 if summary["execution_blocked"] else 0
+
         if args.command == "prepare-parent-authority-review":
             summary = prepare_parent_authority_review(
                 merchant_cases_path=args.merchant_cases,
@@ -609,6 +646,9 @@ def main(argv=None) -> int:
         return 2
     except GovernanceDecisionStoreExecutionError as exc:
         print(f"governance decision store execution error: {exc}", file=sys.stderr)
+        return 2
+    except GovernanceDecisionStoreSchemaV2PlanError as exc:
+        print(f"governance decision store schema v2 plan error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1256,6 +1296,57 @@ def build_parser() -> argparse.ArgumentParser:
         "--executed-at",
         default=None,
         help="Optional timezone-aware execution preflight timestamp",
+    )
+
+    schema_v2_parser = subparsers.add_parser(
+        "plan-governance-decision-store-schema-v2",
+        help="Build and validate a preview-only Governance Decision Store Schema V2 Plan",
+    )
+    schema_v2_parser.add_argument("--bundle", type=Path, default=DEFAULT_SCHEMA_V2_BUNDLE_PATH)
+    schema_v2_parser.add_argument(
+        "--old-plan-manifest", type=Path, default=DEFAULT_SCHEMA_V2_OLD_PLAN_MANIFEST
+    )
+    schema_v2_parser.add_argument(
+        "--old-confirmation", type=Path, default=DEFAULT_SCHEMA_V2_OLD_CONFIRMATION
+    )
+    schema_v2_parser.add_argument(
+        "--execute-reports", type=Path, default=DEFAULT_SCHEMA_V2_EXECUTE_REPORTS
+    )
+    schema_v2_parser.add_argument(
+        "--legacy-decisions", type=Path,
+        default=Path("reports/excel_preview/review_decisions_template.csv"),
+    )
+    schema_v2_parser.add_argument(
+        "--merchant-cases", type=Path, default=Path("reports/excel_preview/merchant_cases.json")
+    )
+    schema_v2_parser.add_argument(
+        "--asset-url-decisions", type=Path,
+        default=Path("reports/asset_metadata_preview/human_review_template.csv"),
+    )
+    schema_v2_parser.add_argument(
+        "--asset-url-validation", type=Path,
+        default=Path("reports/asset_metadata_review_validation/review_decision_status.csv"),
+    )
+    schema_v2_parser.add_argument(
+        "--asset-apply-preview", type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv"),
+    )
+    schema_v2_parser.add_argument(
+        "--asset-blocked-preview", type=Path,
+        default=Path("reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv"),
+    )
+    schema_v2_parser.add_argument("--vault", type=Path, default=DEFAULT_OBSIDIAN_VAULT)
+    schema_v2_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
+    schema_v2_parser.add_argument(
+        "--production-slack-renderer", type=Path,
+        default=Path("src/marketing_knowledge_agent/slack_interface.py"),
+    )
+    schema_v2_parser.add_argument("--target", type=Path, default=DEFAULT_SCHEMA_V2_TARGET)
+    schema_v2_parser.add_argument("--output", type=Path, default=DEFAULT_SCHEMA_V2_OUTPUT)
+    schema_v2_parser.add_argument("--temporary-dir", type=Path, default=None)
+    schema_v2_parser.add_argument(
+        "--created-at", default=None,
+        help="Optional timezone-aware ISO timestamp for deterministic dry-run output",
     )
 
     parent_authority_parser = subparsers.add_parser(
