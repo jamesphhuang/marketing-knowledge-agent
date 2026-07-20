@@ -102,6 +102,13 @@ from .governance_decision_store_schema_v2_confirmation import (
     confirm_governance_decision_store_schema_v2_plan,
     validate_governance_decision_store_schema_v2_plan,
 )
+from .governance_decision_store_schema_v2_execution import (
+    DEFAULT_EXECUTION_BUNDLE as DEFAULT_SCHEMA_V2_EXECUTION_BUNDLE,
+    DEFAULT_FORMAL_TARGET as DEFAULT_SCHEMA_V2_EXECUTION_TARGET,
+    DEFAULT_REPORT_DIR as DEFAULT_SCHEMA_V2_EXECUTION_REPORTS,
+    GovernanceDecisionStoreSchemaV2ExecutionError,
+    execute_governance_decision_store_schema_v2_plan,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -537,6 +544,24 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "execute-governance-decision-store-schema-v2-plan":
+            summary = execute_governance_decision_store_schema_v2_plan(
+                repo_root=Path.cwd(),
+                plan_id=args.plan_id,
+                manifest_hash=args.plan_manifest_hash,
+                schema_hash=args.schema_hash,
+                confirmation_id=args.confirmation_id,
+                confirmation_root_hash=args.confirmation_root_hash,
+                formal_target_path=args.target,
+                execution_bundle_path=args.execution_bundle,
+                confirmation_bundle_path=args.confirmation_bundle,
+                report_dir=args.output,
+                temporary_root=args.temporary_root,
+                executed_at=args.executed_at,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "prepare-parent-authority-review":
             summary = prepare_parent_authority_review(
                 merchant_cases_path=args.merchant_cases,
@@ -710,6 +735,9 @@ def main(argv=None) -> int:
         return 2
     except GovernanceDecisionStoreSchemaV2ConfirmationError as exc:
         print(f"governance decision store schema v2 confirmation error: {exc}", file=sys.stderr)
+        return 2
+    except GovernanceDecisionStoreSchemaV2ExecutionError as exc:
+        print(f"governance decision store schema v2 execution error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1430,6 +1458,30 @@ def build_parser() -> argparse.ArgumentParser:
     confirm_schema_v2_parser.add_argument(
         "--output", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_REPORTS
     )
+
+    execute_schema_v2_parser = subparsers.add_parser(
+        "execute-governance-decision-store-schema-v2-plan",
+        help="Execute only the exact independently confirmed Schema V2 Plan",
+    )
+    execute_schema_v2_parser.add_argument("--plan-id", required=True)
+    execute_schema_v2_parser.add_argument("--plan-manifest-hash", required=True)
+    execute_schema_v2_parser.add_argument("--schema-hash", required=True)
+    execute_schema_v2_parser.add_argument("--confirmation-id", required=True)
+    execute_schema_v2_parser.add_argument("--confirmation-root-hash", required=True)
+    execute_schema_v2_parser.add_argument(
+        "--confirmation-bundle", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_PATH
+    )
+    execute_schema_v2_parser.add_argument(
+        "--target", type=Path, default=DEFAULT_SCHEMA_V2_EXECUTION_TARGET
+    )
+    execute_schema_v2_parser.add_argument(
+        "--execution-bundle", type=Path, default=DEFAULT_SCHEMA_V2_EXECUTION_BUNDLE
+    )
+    execute_schema_v2_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_SCHEMA_V2_EXECUTION_REPORTS
+    )
+    execute_schema_v2_parser.add_argument("--temporary-root", type=Path, default=None)
+    execute_schema_v2_parser.add_argument("--executed-at", default=None)
 
     parent_authority_parser = subparsers.add_parser(
         "prepare-parent-authority-review",

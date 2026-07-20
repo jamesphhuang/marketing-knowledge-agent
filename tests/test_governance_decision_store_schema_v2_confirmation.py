@@ -229,6 +229,7 @@ def test_reviewer_timestamp_and_cli_contract(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
     confirmation = tmp_path / "cli-confirmation"
     reports = tmp_path / "cli-reports"
+    target = tmp_path / "cli-formal-target.sqlite"
     assert main([
         "confirm-governance-decision-store-schema-v2-plan",
         "--plan-id", EXPECTED_PLAN_ID,
@@ -238,11 +239,12 @@ def test_reviewer_timestamp_and_cli_contract(tmp_path, monkeypatch, capsys):
         "--reviewer", "Admin",
         "--confirmed-at", CONFIRMED_AT,
         "--confirmation-path", str(confirmation),
+        "--target", str(target),
         "--output", str(reports),
     ]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["confirmed"] is True
-    assert not (_root() / "data/governance/governance_decisions.sqlite").exists()
+    assert not target.exists()
 
 
 def test_confirmation_does_not_modify_protected_systems(tmp_path):
@@ -281,7 +283,7 @@ def _validation_args(tmp_path):
         "asset_url_validation_path": root / "reports/asset_metadata_review_validation/review_decision_status.csv",
         "asset_apply_preview_path": root / "reports/asset_metadata_apply_preview/asset_apply_preview.csv",
         "asset_blocked_preview_path": root / "reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv",
-        "formal_target_path": root / "data/governance/governance_decisions.sqlite",
+        "formal_target_path": tmp_path / "formal-target.sqlite",
         "temporary_root": tmp_path / "temporary",
         "now": CONFIRMED_AT,
     }

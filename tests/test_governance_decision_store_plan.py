@@ -331,6 +331,8 @@ def test_plan_rerun_is_deterministic_and_protected_inputs_unchanged(tmp_path):
 
 def test_plan_cli_is_preview_only(tmp_path, capsys):
     paths = _real_paths(tmp_path)
+    formal = Path("data/governance/governance_decisions.sqlite")
+    formal_before = formal.read_bytes() if formal.exists() else None
     args = [
         "governance-decision-store",
         "--plan",
@@ -345,7 +347,7 @@ def test_plan_cli_is_preview_only(tmp_path, capsys):
     assert exit_code == 1
     assert payload["execution_blocked"] is True
     assert payload["formal_data_modified"] is False
-    assert not Path("data/governance/governance_decisions.sqlite").exists()
+    assert (formal.read_bytes() if formal.exists() else None) == formal_before
 
 
 def _event(**overrides):

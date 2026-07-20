@@ -147,6 +147,7 @@ def test_asset_url_reference_preserves_410_without_copying_values(tmp_path):
 def test_manifest_plan_id_is_new_deterministic_and_not_executable(tmp_path):
     first_args = _real_args(tmp_path / "first")
     second_args = _real_args(tmp_path / "second")
+    second_args["target_path"] = first_args["target_path"]
     first = generate_regenerated_governance_decision_store_plan(**first_args)
     second = generate_regenerated_governance_decision_store_plan(**second_args)
     manifest = json.loads((first_args["output_dir"] / "regenerated_decision_store_manifest.json").read_text())
@@ -217,16 +218,18 @@ def test_cli_requires_no_slack_token_and_only_generates_plan(tmp_path, monkeypat
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
     output = tmp_path / "reports"
+    target = tmp_path / "planned-governance-decisions.sqlite"
 
     assert main([
         "regenerate-governance-decision-store-plan",
         "--output", str(output),
+        "--target", str(target),
         "--created-at", CREATED_AT,
     ]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["execution_blocked"] is False
     assert payload["formal_data_modified"] is False
-    assert not (_root() / "data/governance/governance_decisions.sqlite").exists()
+    assert not target.exists()
 
 
 def _real_args(tmp_path):
@@ -243,7 +246,7 @@ def _real_args(tmp_path):
         "formal_vault_path": root / "obsidian_vault",
         "formal_db_path": root / ".mka/content_index.sqlite",
         "production_renderer_path": root / "src/marketing_knowledge_agent/slack_interface.py",
-        "target_path": root / "data/governance/governance_decisions.sqlite",
+        "target_path": tmp_path / "planned-governance-decisions.sqlite",
         "output_dir": tmp_path / "regenerated-plan",
         "created_at": CREATED_AT,
         "source_branch": "test-branch",

@@ -198,6 +198,7 @@ def test_cli_confirms_without_slack_token_or_formal_store(tmp_path, monkeypatch,
     monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
     confirmation = tmp_path / "confirmation"
     reports = tmp_path / "reports"
+    target = tmp_path / "formal-target.sqlite"
 
     assert main([
         "confirm-governance-decision-store-plan",
@@ -206,11 +207,12 @@ def test_cli_confirms_without_slack_token_or_formal_store(tmp_path, monkeypatch,
         "--reviewer", "Admin",
         "--confirmed-at", CONFIRMED_AT,
         "--confirmation-path", str(confirmation),
+        "--target", str(target),
         "--output", str(reports),
     ]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["confirmed"] is True
-    assert not (_root() / "data/governance/governance_decisions.sqlite").exists()
+    assert not target.exists()
 
 
 def test_confirmation_does_not_modify_protected_systems(tmp_path):
@@ -244,7 +246,7 @@ def _validation_args(tmp_path):
         "asset_url_validation_path": root / "reports/asset_metadata_review_validation/review_decision_status.csv",
         "asset_apply_preview_path": root / "reports/asset_metadata_apply_preview/asset_apply_preview.csv",
         "asset_blocked_preview_path": root / "reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv",
-        "formal_target_path": root / "data/governance/governance_decisions.sqlite",
+        "formal_target_path": tmp_path / "formal-target.sqlite",
         "temporary_root": tmp_path / "temporary",
         "now": CONFIRMED_AT,
     }
