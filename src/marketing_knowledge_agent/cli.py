@@ -115,6 +115,12 @@ from .governance_decision_store_existing_validation import (
     ExistingGovernanceDecisionStoreValidationError,
     validate_existing_governance_decision_store,
 )
+from .parent_sync_plan import (
+    DEFAULT_DECISION_STORE as DEFAULT_PARENT_SYNC_DECISION_STORE,
+    DEFAULT_OUTPUT_DIR as DEFAULT_PARENT_SYNC_OUTPUT,
+    ParentSyncPlanError,
+    generate_parent_sync_plan,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -578,6 +584,25 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "plan-parent-sync":
+            summary = generate_parent_sync_plan(
+                repo_root=Path.cwd(),
+                decision_store_path=args.decision_store,
+                output_dir=args.output,
+                temporary_root=args.temporary_root,
+                created_at=args.created_at,
+            )
+            public_summary = {
+                key: value for key, value in summary.items()
+                if key not in {
+                    "authoritative_projection", "reconciliation_rows", "field_diff_rows",
+                    "path_plan_rows", "write_manifest_records",
+                    "formal_sqlite_projection_rows", "manifest",
+                }
+            }
+            print(json.dumps(public_summary, ensure_ascii=False, indent=2))
+            return 1 if summary["execution_blocked"] else 0
+
         if args.command == "prepare-parent-authority-review":
             summary = prepare_parent_authority_review(
                 merchant_cases_path=args.merchant_cases,
@@ -757,6 +782,9 @@ def main(argv=None) -> int:
         return 2
     except ExistingGovernanceDecisionStoreValidationError as exc:
         print(f"existing governance decision store validation error: {exc}", file=sys.stderr)
+        return 2
+    except ParentSyncPlanError as exc:
+        print(f"parent sync plan error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1513,6 +1541,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", type=Path, default=DEFAULT_EXISTING_DECISION_STORE_REPORTS
     )
     existing_store_parser.add_argument("--temporary-root", type=Path, default=None)
+
+    parent_sync_parser = subparsers.add_parser(
+        "plan-parent-sync",
+        help="Build a read-only full Parent projection and delta-only Sync Plan",
+    )
+    parent_sync_parser.add_argument(
+        "--decision-store", type=Path, default=DEFAULT_PARENT_SYNC_DECISION_STORE
+    )
+    parent_sync_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_PARENT_SYNC_OUTPUT
+    )
+    parent_sync_parser.add_argument("--temporary-root", type=Path, default=None)
+    parent_sync_parser.add_argument("--created-at", default=None)
 
     parent_authority_parser = subparsers.add_parser(
         "prepare-parent-authority-review",
