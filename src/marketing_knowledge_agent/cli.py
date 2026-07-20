@@ -72,6 +72,13 @@ from .governance_decision_store_confirmation import (
     confirm_governance_decision_store_plan,
     validate_governance_decision_store_plan,
 )
+from .governance_decision_store_execution import (
+    DEFAULT_EXECUTION_BUNDLE as DEFAULT_DECISION_STORE_EXECUTION_BUNDLE,
+    DEFAULT_FORMAL_TARGET as DEFAULT_DECISION_STORE_EXECUTION_TARGET,
+    DEFAULT_REPORT_DIR as DEFAULT_DECISION_STORE_EXECUTION_REPORTS,
+    GovernanceDecisionStoreExecutionError,
+    execute_governance_decision_store_plan,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -420,6 +427,21 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "execute-governance-decision-store-plan":
+            summary = execute_governance_decision_store_plan(
+                repo_root=Path.cwd(),
+                plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash,
+                confirmation_id=args.confirmation_id,
+                confirmation_root_hash=args.confirmation_root_hash,
+                formal_target_path=args.target,
+                execution_bundle_path=args.execution_bundle,
+                report_dir=args.output,
+                executed_at=args.executed_at,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 1 if summary["execution_blocked"] else 0
+
         if args.command == "prepare-parent-authority-review":
             summary = prepare_parent_authority_review(
                 merchant_cases_path=args.merchant_cases,
@@ -584,6 +606,9 @@ def main(argv=None) -> int:
         return 2
     except GovernanceDecisionStoreConfirmationError as exc:
         print(f"governance decision store confirmation error: {exc}", file=sys.stderr)
+        return 2
+    except GovernanceDecisionStoreExecutionError as exc:
+        print(f"governance decision store execution error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1208,6 +1233,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     confirm_store_plan_parser.add_argument(
         "--output", type=Path, default=DEFAULT_DECISION_STORE_CONFIRMATION_REPORTS
+    )
+
+    execute_store_plan_parser = subparsers.add_parser(
+        "execute-governance-decision-store-plan",
+        help="Fail-closed execution preflight for the exact confirmed Decision Store Plan",
+    )
+    execute_store_plan_parser.add_argument("--plan-id", required=True)
+    execute_store_plan_parser.add_argument("--manifest-hash", required=True)
+    execute_store_plan_parser.add_argument("--confirmation-id", required=True)
+    execute_store_plan_parser.add_argument("--confirmation-root-hash", required=True)
+    execute_store_plan_parser.add_argument(
+        "--target", type=Path, default=DEFAULT_DECISION_STORE_EXECUTION_TARGET
+    )
+    execute_store_plan_parser.add_argument(
+        "--execution-bundle", type=Path, default=DEFAULT_DECISION_STORE_EXECUTION_BUNDLE
+    )
+    execute_store_plan_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_DECISION_STORE_EXECUTION_REPORTS
+    )
+    execute_store_plan_parser.add_argument(
+        "--executed-at",
+        default=None,
+        help="Optional timezone-aware execution preflight timestamp",
     )
 
     parent_authority_parser = subparsers.add_parser(
