@@ -128,6 +128,11 @@ from .parent_sync_confirmation import (
     confirm_parent_sync_plan,
     validate_parent_sync_plan,
 )
+from .store_data_sync_plan_v2 import (
+    DEFAULT_OUTPUT_DIR as DEFAULT_STORE_DATA_SYNC_V2_OUTPUT,
+    StoreDataSyncPlanV2Error,
+    generate_store_data_sync_plan_v2,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -610,6 +615,26 @@ def main(argv=None) -> int:
             print(json.dumps(public_summary, ensure_ascii=False, indent=2))
             return 1 if summary["execution_blocked"] else 0
 
+        if args.command == "plan-store-data-sync-v2":
+            summary = generate_store_data_sync_plan_v2(
+                repo_root=Path.cwd(),
+                output_dir=args.output,
+                temporary_root=args.temporary_root,
+                created_at=args.created_at,
+            )
+            public_summary = {
+                key: value for key, value in summary.items()
+                if key not in {
+                    "field_materialization_matrix", "full_authoritative_desired_state",
+                    "managed_vault_projection", "formal_sqlite_projection", "reconciliation",
+                    "managed_vault_field_diffs", "formal_sqlite_field_diffs",
+                    "managed_vault_delta", "formal_sqlite_delta", "governance_only_records",
+                    "four_create_records", "special_record_validation", "offline_search", "manifest",
+                }
+            }
+            print(json.dumps(public_summary, ensure_ascii=False, indent=2))
+            return 1 if summary["execution_blocked"] else 0
+
         if args.command == "validate-parent-sync-plan":
             summary = validate_parent_sync_plan(
                 repo_root=Path.cwd(), plan_id=args.plan_id,
@@ -824,6 +849,9 @@ def main(argv=None) -> int:
         return 2
     except ParentSyncConfirmationError as exc:
         print(f"parent sync confirmation error: {exc}", file=sys.stderr)
+        return 2
+    except StoreDataSyncPlanV2Error as exc:
+        print(f"store data sync plan v2 error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1593,6 +1621,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parent_sync_parser.add_argument("--temporary-root", type=Path, default=None)
     parent_sync_parser.add_argument("--created-at", default=None)
+
+    store_data_sync_v2_parser = subparsers.add_parser(
+        "plan-store-data-sync-v2",
+        help="Regenerate the Store Data Sync Plan with target-specific materialization boundaries",
+    )
+    store_data_sync_v2_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_STORE_DATA_SYNC_V2_OUTPUT
+    )
+    store_data_sync_v2_parser.add_argument("--temporary-root", type=Path, default=None)
+    store_data_sync_v2_parser.add_argument("--created-at", default=None)
 
     validate_parent_sync_parser = subparsers.add_parser(
         "validate-parent-sync-plan",
