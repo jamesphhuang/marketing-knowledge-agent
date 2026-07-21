@@ -121,6 +121,13 @@ from .parent_sync_plan import (
     ParentSyncPlanError,
     generate_parent_sync_plan,
 )
+from .parent_sync_confirmation import (
+    DEFAULT_CONFIRMATION_PATH as DEFAULT_PARENT_SYNC_CONFIRMATION_PATH,
+    DEFAULT_REPORT_DIR as DEFAULT_PARENT_SYNC_CONFIRMATION_REPORTS,
+    ParentSyncConfirmationError,
+    confirm_parent_sync_plan,
+    validate_parent_sync_plan,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -603,6 +610,35 @@ def main(argv=None) -> int:
             print(json.dumps(public_summary, ensure_ascii=False, indent=2))
             return 1 if summary["execution_blocked"] else 0
 
+        if args.command == "validate-parent-sync-plan":
+            summary = validate_parent_sync_plan(
+                repo_root=Path.cwd(), plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash, temporary_root=args.temporary_root,
+                validated_at=args.validated_at,
+            )
+            public_summary = {
+                key: value for key, value in summary.items()
+                if key not in {
+                    "authoritative_projection", "reconciliation", "field_necessity_rows",
+                    "governance_only_rows", "not_projected_rows", "create_rows",
+                    "managed_vault_delta", "formal_sqlite_delta", "offline_search",
+                    "special_validation", "plan_manifest",
+                }
+            }
+            print(json.dumps(public_summary, ensure_ascii=False, indent=2))
+            return 0 if summary["confirmation_allowed"] else 1
+
+        if args.command == "confirm-parent-sync-plan":
+            summary = confirm_parent_sync_plan(
+                repo_root=Path.cwd(), plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash, reviewer=args.reviewer,
+                confirmed_at=args.confirmed_at,
+                confirmation_path=args.confirmation_path, report_dir=args.output,
+                temporary_root=args.temporary_root,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0 if summary["confirmation_created"] else 1
+
         if args.command == "prepare-parent-authority-review":
             summary = prepare_parent_authority_review(
                 merchant_cases_path=args.merchant_cases,
@@ -785,6 +821,9 @@ def main(argv=None) -> int:
         return 2
     except ParentSyncPlanError as exc:
         print(f"parent sync plan error: {exc}", file=sys.stderr)
+        return 2
+    except ParentSyncConfirmationError as exc:
+        print(f"parent sync confirmation error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1554,6 +1593,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parent_sync_parser.add_argument("--temporary-root", type=Path, default=None)
     parent_sync_parser.add_argument("--created-at", default=None)
+
+    validate_parent_sync_parser = subparsers.add_parser(
+        "validate-parent-sync-plan",
+        help="Independently validate the exact Parent Sync Plan without syncing",
+    )
+    validate_parent_sync_parser.add_argument("--plan-id", required=True)
+    validate_parent_sync_parser.add_argument("--manifest-hash", required=True)
+    validate_parent_sync_parser.add_argument("--temporary-root", type=Path, default=None)
+    validate_parent_sync_parser.add_argument("--validated-at", default=None)
+
+    confirm_parent_sync_parser = subparsers.add_parser(
+        "confirm-parent-sync-plan",
+        help="Validate and confirm only an exact eligible Parent Sync Plan without executing it",
+    )
+    confirm_parent_sync_parser.add_argument("--plan-id", required=True)
+    confirm_parent_sync_parser.add_argument("--manifest-hash", required=True)
+    confirm_parent_sync_parser.add_argument("--reviewer", required=True, choices=("Admin",))
+    confirm_parent_sync_parser.add_argument("--confirmed-at", default=None)
+    confirm_parent_sync_parser.add_argument(
+        "--confirmation-path", type=Path, default=DEFAULT_PARENT_SYNC_CONFIRMATION_PATH
+    )
+    confirm_parent_sync_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_PARENT_SYNC_CONFIRMATION_REPORTS
+    )
+    confirm_parent_sync_parser.add_argument("--temporary-root", type=Path, default=None)
 
     parent_authority_parser = subparsers.add_parser(
         "prepare-parent-authority-review",
