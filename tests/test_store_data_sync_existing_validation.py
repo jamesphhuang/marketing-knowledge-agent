@@ -132,6 +132,7 @@ def test_completed_execute_is_rejected_without_formal_changes(tmp_path):
     )
 
     assert result["execute_rerun"]["valid"] is True
+    assert result["execute_rerun"]["exit_code"] == 2
     assert "Execution Bundle already exists" in result["execute_rerun"]["reason"]
     assert {str(path): _hash_path(path) for path in protected} == before
 

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import shutil
 import sqlite3
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Optional
 
@@ -539,20 +541,28 @@ def _validate_rerun_rejection(root):
         "formal": _resolve(root, DEFAULT_FORMAL_SQLITE),
     }
     before = _protected_snapshot(protected)
-    message = ""
-    try:
-        execution.execute_store_data_sync_plan_v2(
-            repo_root=root,
-            plan_id=confirmation.EXPECTED_PLAN_ID,
-            manifest_hash=confirmation.EXPECTED_MANIFEST_HASH,
-            confirmation_id=execution.EXPECTED_CONFIRMATION_ID,
-            confirmation_root_hash=execution.EXPECTED_CONFIRMATION_ROOT_HASH,
-        )
-    except execution.StoreDataSyncPlanV2ExecutionError as exc:
-        message = str(exc)
+    from .cli import main
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        exit_code = main([
+            "execute-store-data-sync-plan-v2",
+            "--plan-id", confirmation.EXPECTED_PLAN_ID,
+            "--manifest-hash", confirmation.EXPECTED_MANIFEST_HASH,
+            "--confirmation-id", execution.EXPECTED_CONFIRMATION_ID,
+            "--confirmation-root-hash", execution.EXPECTED_CONFIRMATION_ROOT_HASH,
+        ])
+    message = stderr.getvalue().strip() or stdout.getvalue().strip()
     after = _protected_snapshot(protected)
-    valid = "Execution Bundle already exists" in message and before == after
-    return {"valid": valid, "rejected": bool(message), "reason": message, "formal_system_unchanged": before == after}
+    valid = exit_code != 0 and "Execution Bundle already exists" in message and before == after
+    return {
+        "valid": valid,
+        "rejected": exit_code != 0,
+        "exit_code": exit_code,
+        "reason": message,
+        "formal_system_unchanged": before == after,
+    }
 
 
 def _failure_classifications():
