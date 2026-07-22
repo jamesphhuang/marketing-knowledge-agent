@@ -1049,6 +1049,8 @@ def _hash_outside(parent, excluded):
         relative = child.relative_to(parent)
         if relative == Path(f"._{Path(excluded).name}"):
             continue
+        if any(part.startswith(f"._.{EXPECTED_PLAN_ID}.staging-") for part in relative.parts):
+            continue
         if any(part.startswith(f".{EXPECTED_PLAN_ID}.staging-") for part in relative.parts):
             continue
         try:

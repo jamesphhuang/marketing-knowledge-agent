@@ -327,6 +327,32 @@ def test_managed_namespace_appledouble_sidecar_is_not_outside_target_drift(tmp_p
     assert result["conclusion"].startswith("A.")
 
 
+def test_executor_staging_appledouble_sidecar_is_not_outside_target_drift(tmp_path, monkeypatch):
+    import marketing_knowledge_agent.store_data_sync_plan_v2_execution as module
+
+    arguments = _fixture(tmp_path)
+    sidecar = (
+        arguments["managed_vault_root"].parent
+        / f"._.{EXPECTED_PLAN_ID}.staging-filesystem-metadata"
+    )
+    original = module._apply_managed_delta
+
+    def apply_and_create_staging_sidecar(*args, **kwargs):
+        result = original(*args, **kwargs)
+        sidecar.write_bytes(b"executor-staging-directory-metadata")
+        return result
+
+    monkeypatch.setattr(module, "_apply_managed_delta", apply_and_create_staging_sidecar)
+    result = execute_store_data_sync_plan_v2(
+        repo_root=_root(), plan_id=EXPECTED_PLAN_ID,
+        manifest_hash=EXPECTED_MANIFEST_HASH,
+        confirmation_id=EXPECTED_CONFIRMATION_ID,
+        confirmation_root_hash=EXPECTED_CONFIRMATION_ROOT_HASH,
+        executed_at=EXECUTED_AT, **arguments,
+    )
+    assert result["conclusion"].startswith("A.")
+
+
 def _schema_hash(path: Path) -> str:
     with sqlite3.connect(path) as connection:
         rows = connection.execute(
