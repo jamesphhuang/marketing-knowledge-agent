@@ -162,6 +162,11 @@ from .production_search_alias_confirmation import (
     confirm_production_search_alias_plan,
     validate_production_search_alias_plan,
 )
+from .production_search_alias_plan_v2 import (
+    DEFAULT_REPORT_DIR as DEFAULT_PRODUCTION_SEARCH_ALIAS_PLAN_V2_REPORTS,
+    ProductionSearchAliasPlanV2Error,
+    generate_production_search_alias_plan_v2,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -744,6 +749,14 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "plan-production-search-aliases-v2":
+            summary = generate_production_search_alias_plan_v2(
+                repo_root=Path.cwd(), output_dir=args.output,
+                temporary_root=args.temporary_root, created_at=args.created_at,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0 if not summary["execution_blocked"] else 1
+
         if args.command == "validate-parent-sync-plan":
             summary = validate_parent_sync_plan(
                 repo_root=Path.cwd(), plan_id=args.plan_id,
@@ -976,6 +989,9 @@ def main(argv=None) -> int:
         return 2
     except ProductionSearchAliasConfirmationError as exc:
         print(f"production search alias confirmation error: {exc}", file=sys.stderr)
+        return 2
+    except ProductionSearchAliasPlanV2Error as exc:
+        print(f"production search alias plan v2 error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1847,6 +1863,16 @@ def build_parser() -> argparse.ArgumentParser:
     confirm_production_search_alias_parser.add_argument(
         "--allow-non-ignored-test-path", action="store_true", help=argparse.SUPPRESS
     )
+
+    production_search_alias_plan_v2_parser = subparsers.add_parser(
+        "plan-production-search-aliases-v2",
+        help="Build a contract-complete read-only Production Search Alias V2 Plan",
+    )
+    production_search_alias_plan_v2_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_PRODUCTION_SEARCH_ALIAS_PLAN_V2_REPORTS
+    )
+    production_search_alias_plan_v2_parser.add_argument("--temporary-root", type=Path, default=None)
+    production_search_alias_plan_v2_parser.add_argument("--created-at", default=None)
 
     validate_parent_sync_parser = subparsers.add_parser(
         "validate-parent-sync-plan",
