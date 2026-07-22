@@ -77,7 +77,25 @@ def _fixture(tmp_path: Path) -> dict:
     shutil.copytree(_root() / "obsidian_vault" / "MKA", managed)
     formal = tmp_path / ".mka" / "content_index.sqlite"
     formal.parent.mkdir(parents=True)
-    shutil.copy2(_root() / ".mka" / "content_index.sqlite", formal)
+    immutable_backup = (
+        _root() / "data" / "governance" / "backups" / EXPECTED_PLAN_ID
+    )
+    if immutable_backup.exists():
+        before_manifest = json.loads(
+            (immutable_backup / "managed_vault_before_manifest.json").read_text(encoding="utf-8")
+        )
+        for relative in before_manifest["create_paths_previously_absent"]:
+            path = managed / relative
+            path.unlink(missing_ok=True)
+            (path.parent / f"._{path.name}").unlink(missing_ok=True)
+        before_files = immutable_backup / "managed_vault_before_files"
+        for source in before_files.rglob("*.md"):
+            destination = managed / source.relative_to(before_files)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        shutil.copyfile(immutable_backup / "formal_sqlite_before.sqlite", formal)
+    else:
+        shutil.copy2(_root() / ".mka" / "content_index.sqlite", formal)
     return {
         "managed_vault_root": managed,
         "formal_sqlite_path": formal,
