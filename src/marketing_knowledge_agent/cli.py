@@ -140,6 +140,11 @@ from .store_data_sync_plan_v2_confirmation import (
     confirm_store_data_sync_plan_v2,
     validate_store_data_sync_plan_v2,
 )
+from .store_data_sync_plan_v2_execution import (
+    DEFAULT_REPORT_DIR as DEFAULT_STORE_DATA_SYNC_V2_EXECUTION_REPORTS,
+    StoreDataSyncPlanV2ExecutionError,
+    execute_store_data_sync_plan_v2,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -671,6 +676,18 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "execute-store-data-sync-plan-v2":
+            summary = execute_store_data_sync_plan_v2(
+                repo_root=Path.cwd(), plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash,
+                confirmation_id=args.confirmation_id,
+                confirmation_root_hash=args.confirmation_root_hash,
+                executed_at=args.executed_at, report_dir=args.output,
+                temporary_root=args.temporary_root,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "validate-parent-sync-plan":
             summary = validate_parent_sync_plan(
                 repo_root=Path.cwd(), plan_id=args.plan_id,
@@ -891,6 +908,9 @@ def main(argv=None) -> int:
         return 2
     except StoreDataSyncPlanV2ConfirmationError as exc:
         print(f"store data sync plan v2 confirmation error: {exc}", file=sys.stderr)
+        return 2
+    except StoreDataSyncPlanV2ExecutionError as exc:
+        print(f"store data sync plan v2 execution error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1698,6 +1718,20 @@ def build_parser() -> argparse.ArgumentParser:
     confirm_store_data_sync_v2_parser.add_argument(
         "--allow-non-ignored-test-path", action="store_true", help=argparse.SUPPRESS
     )
+
+    execute_store_data_sync_v2_parser = subparsers.add_parser(
+        "execute-store-data-sync-plan-v2",
+        help="Execute only the exact independently validated and Admin-confirmed Store Data Sync Plan V2",
+    )
+    execute_store_data_sync_v2_parser.add_argument("--plan-id", required=True)
+    execute_store_data_sync_v2_parser.add_argument("--manifest-hash", required=True)
+    execute_store_data_sync_v2_parser.add_argument("--confirmation-id", required=True)
+    execute_store_data_sync_v2_parser.add_argument("--confirmation-root-hash", required=True)
+    execute_store_data_sync_v2_parser.add_argument("--executed-at", default=None)
+    execute_store_data_sync_v2_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_STORE_DATA_SYNC_V2_EXECUTION_REPORTS
+    )
+    execute_store_data_sync_v2_parser.add_argument("--temporary-root", type=Path, default=None)
 
     validate_parent_sync_parser = subparsers.add_parser(
         "validate-parent-sync-plan",
