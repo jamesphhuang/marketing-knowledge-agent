@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import marketing_knowledge_agent.cli as cli
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.parent_sync_confirmation import (
     EXPECTED_MANIFEST_HASH,
@@ -12,6 +13,9 @@ from marketing_knowledge_agent.parent_sync_confirmation import (
     ParentSyncConfirmationError,
     confirm_parent_sync_plan,
     validate_parent_sync_plan,
+)
+from marketing_knowledge_agent.store_data_sync_existing_validation import (
+    reconstruct_pre_sync_fixture,
 )
 
 
@@ -33,12 +37,15 @@ def _hash_path(path: Path) -> str:
 
 
 def _validate(tmp_path: Path) -> dict:
+    fixture = reconstruct_pre_sync_fixture(_root(), tmp_path / "prestate")
     return validate_parent_sync_plan(
         repo_root=_root(),
         plan_id=EXPECTED_PLAN_ID,
         manifest_hash=EXPECTED_MANIFEST_HASH,
         temporary_root=tmp_path / "temporary",
         validated_at=VALIDATED_AT,
+        managed_vault_root=Path(fixture["managed_vault_root"]),
+        formal_sqlite_path=Path(fixture["formal_sqlite_path"]),
     )
 
 
@@ -173,11 +180,17 @@ def test_exact_identity_and_expiration_fail_closed(tmp_path):
 def test_confirmation_is_blocked_and_reports_are_complete(tmp_path):
     confirmation = tmp_path / "confirmation"
     reports = tmp_path / "reports"
+    fixture = reconstruct_pre_sync_fixture(_root(), tmp_path / "prestate")
+    target_kwargs = {
+        "managed_vault_root": Path(fixture["managed_vault_root"]),
+        "formal_sqlite_path": Path(fixture["formal_sqlite_path"]),
+    }
     result = confirm_parent_sync_plan(
         repo_root=_root(), plan_id=EXPECTED_PLAN_ID,
         manifest_hash=EXPECTED_MANIFEST_HASH, reviewer="Admin",
         confirmed_at=VALIDATED_AT, confirmation_path=confirmation,
         report_dir=reports, temporary_root=tmp_path / "temporary",
+        **target_kwargs,
     )
 
     assert result["conclusion"] == "C. Confirmation blocked"
@@ -192,6 +205,7 @@ def test_confirmation_is_blocked_and_reports_are_complete(tmp_path):
         manifest_hash=EXPECTED_MANIFEST_HASH, reviewer="Admin",
         confirmed_at=VALIDATED_AT, confirmation_path=confirmation,
         report_dir=reports, temporary_root=tmp_path / "temporary-rerun",
+        **target_kwargs,
     )
     assert second["confirmation_created"] is False
     assert _hash_path(reports) == first_hash
@@ -213,7 +227,25 @@ def test_formal_systems_remain_unchanged(tmp_path):
     assert result["decision_store_validation"]["database_unchanged"] is True
 
 
-def test_cli_validate_and_confirm_are_preview_only(tmp_path, capsys):
+def test_cli_validate_and_confirm_are_preview_only(tmp_path, monkeypatch, capsys):
+    fixture = reconstruct_pre_sync_fixture(_root(), tmp_path / "prestate")
+    target_kwargs = {
+        "managed_vault_root": Path(fixture["managed_vault_root"]),
+        "formal_sqlite_path": Path(fixture["formal_sqlite_path"]),
+    }
+    original_validate = cli.validate_parent_sync_plan
+    original_confirm = cli.confirm_parent_sync_plan
+
+    monkeypatch.setattr(
+        cli,
+        "validate_parent_sync_plan",
+        lambda **kwargs: original_validate(**kwargs, **target_kwargs),
+    )
+    monkeypatch.setattr(
+        cli,
+        "confirm_parent_sync_plan",
+        lambda **kwargs: original_confirm(**kwargs, **target_kwargs),
+    )
     assert main([
         "validate-parent-sync-plan",
         "--plan-id", EXPECTED_PLAN_ID,

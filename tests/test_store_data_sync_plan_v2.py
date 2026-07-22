@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 
 import pytest
 
+import marketing_knowledge_agent.cli as cli
 import marketing_knowledge_agent.store_data_sync_plan_v2 as sync_v2
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.store_data_sync_plan_v2 import (
@@ -12,6 +14,9 @@ from marketing_knowledge_agent.store_data_sync_plan_v2 import (
     OLD_PLAN_ID,
     REPORT_FILENAMES,
     generate_store_data_sync_plan_v2,
+)
+from marketing_knowledge_agent.store_data_sync_existing_validation import (
+    reconstruct_pre_sync_fixture,
 )
 
 
@@ -35,12 +40,29 @@ def _hash_path(path: Path) -> str:
 @pytest.fixture(scope="module")
 def result(tmp_path_factory):
     root = tmp_path_factory.mktemp("store-sync-v2")
-    return generate_store_data_sync_plan_v2(
-        repo_root=_root(),
-        output_dir=root / "reports",
-        temporary_root=root / "temporary",
-        created_at=CREATED_AT,
-    )
+    prestate = _root() / "reports" / ".test-fixtures" / root.name
+    fixture = reconstruct_pre_sync_fixture(_root(), prestate)
+    try:
+        yield generate_store_data_sync_plan_v2(
+            repo_root=_root(),
+            output_dir=root / "reports",
+            temporary_root=root / "temporary",
+            created_at=CREATED_AT,
+            managed_vault_root=Path(fixture["managed_vault_root"]),
+            formal_sqlite_path=Path(fixture["formal_sqlite_path"]),
+        )
+    finally:
+        shutil.rmtree(prestate, ignore_errors=True)
+
+
+@pytest.fixture
+def repo_prestate(tmp_path):
+    prestate = _root() / "reports" / ".test-fixtures" / tmp_path.name
+    fixture = reconstruct_pre_sync_fixture(_root(), prestate)
+    try:
+        yield fixture
+    finally:
+        shutil.rmtree(prestate, ignore_errors=True)
 
 
 def test_materialization_contract_excludes_decision_event_audit_fields(result):
@@ -153,7 +175,7 @@ def test_candidate_and_new_plan_identity_are_valid(result):
     assert result["asset_boundary"]["aliases_copied_to_assets"] == 0
 
 
-def test_unsupported_formal_sqlite_field_fails_closed(tmp_path, monkeypatch):
+def test_unsupported_formal_sqlite_field_fails_closed(tmp_path, repo_prestate, monkeypatch):
     original = sync_v2._field_materialization_matrix
 
     def matrix_with_unsupported_field():
@@ -177,19 +199,23 @@ def test_unsupported_formal_sqlite_field_fails_closed(tmp_path, monkeypatch):
     blocked = generate_store_data_sync_plan_v2(
         repo_root=_root(), output_dir=tmp_path / "reports",
         temporary_root=tmp_path / "temporary", created_at=CREATED_AT,
+        managed_vault_root=Path(repo_prestate["managed_vault_root"]),
+        formal_sqlite_path=Path(repo_prestate["formal_sqlite_path"]),
     )
 
     assert blocked["execution_blocked"] is True
     assert "formal_sqlite_schema_support_missing" in blocked["blocker_reasons"]
 
 
-def test_reports_and_rerun_are_deterministic(tmp_path):
+def test_reports_and_rerun_are_deterministic(tmp_path, repo_prestate):
     output = tmp_path / "reports"
     args = {
         "repo_root": _root(),
         "output_dir": output,
         "temporary_root": tmp_path / "temporary-a",
         "created_at": CREATED_AT,
+        "managed_vault_root": Path(repo_prestate["managed_vault_root"]),
+        "formal_sqlite_path": Path(repo_prestate["formal_sqlite_path"]),
     }
     first = generate_store_data_sync_plan_v2(**args)
     first_hash = _hash_path(output)
@@ -204,7 +230,15 @@ def test_reports_and_rerun_are_deterministic(tmp_path):
     assert {path.name for path in output.iterdir() if path.is_file()} == set(REPORT_FILENAMES)
 
 
-def test_cli_is_plan_only(tmp_path, capsys):
+def test_cli_is_plan_only(tmp_path, repo_prestate, monkeypatch, capsys):
+    original = cli.generate_store_data_sync_plan_v2
+
+    def generate_from_prestate(**kwargs):
+        kwargs["managed_vault_root"] = Path(repo_prestate["managed_vault_root"])
+        kwargs["formal_sqlite_path"] = Path(repo_prestate["formal_sqlite_path"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(cli, "generate_store_data_sync_plan_v2", generate_from_prestate)
     exit_code = main([
         "plan-store-data-sync-v2",
         "--output", str(tmp_path / "reports"),

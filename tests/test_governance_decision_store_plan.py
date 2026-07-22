@@ -378,6 +378,12 @@ def _event(**overrides):
 
 def _real_paths(tmp_path):
     root = Path(__file__).resolve().parents[1]
+    from marketing_knowledge_agent.store_data_sync_existing_validation import (
+        reconstruct_pre_sync_fixture,
+    )
+
+    fixture = reconstruct_pre_sync_fixture(root, tmp_path / "prestate")
+    managed_vault = Path(fixture["managed_vault_root"])
     return {
         "review_decisions_path": root / "reports/excel_preview/review_decisions_template.csv",
         "merchant_cases_path": root / "reports/excel_preview/merchant_cases.json",
@@ -392,8 +398,8 @@ def _real_paths(tmp_path):
         "asset_blocked_preview_path": root
         / "reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv",
         "resolution_dir": root / "reports/missing_parent_resolution_preview",
-        "formal_vault_path": root / "obsidian_vault",
-        "formal_db_path": root / ".mka/content_index.sqlite",
+        "formal_vault_path": managed_vault.parent,
+        "formal_db_path": Path(fixture["formal_sqlite_path"]),
         "production_renderer_path": root / "src/marketing_knowledge_agent/slack_interface.py",
         "output_dir": tmp_path / "governance_decision_store_plan",
     }

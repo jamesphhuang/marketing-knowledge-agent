@@ -145,6 +145,11 @@ from .store_data_sync_plan_v2_execution import (
     StoreDataSyncPlanV2ExecutionError,
     execute_store_data_sync_plan_v2,
 )
+from .store_data_sync_existing_validation import (
+    DEFAULT_REPORT_DIR as DEFAULT_EXISTING_STORE_DATA_SYNC_REPORTS,
+    ExistingStoreDataSyncValidationError,
+    validate_existing_store_data_sync,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -688,6 +693,14 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
 
+        if args.command == "validate-existing-store-data-sync":
+            summary = validate_existing_store_data_sync(
+                repo_root=Path.cwd(), report_dir=args.output,
+                temporary_root=args.temporary_root,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0 if summary["conclusion"].startswith("A.") else 1
+
         if args.command == "validate-parent-sync-plan":
             summary = validate_parent_sync_plan(
                 repo_root=Path.cwd(), plan_id=args.plan_id,
@@ -911,6 +924,9 @@ def main(argv=None) -> int:
         return 2
     except StoreDataSyncPlanV2ExecutionError as exc:
         print(f"store data sync plan v2 execution error: {exc}", file=sys.stderr)
+        return 2
+    except ExistingStoreDataSyncValidationError as exc:
+        print(f"existing store data sync validation error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1732,6 +1748,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", type=Path, default=DEFAULT_STORE_DATA_SYNC_V2_EXECUTION_REPORTS
     )
     execute_store_data_sync_v2_parser.add_argument("--temporary-root", type=Path, default=None)
+
+    existing_store_data_sync_parser = subparsers.add_parser(
+        "validate-existing-store-data-sync",
+        help="Independently validate the completed Store Data Sync without modifying formal targets",
+    )
+    existing_store_data_sync_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_EXISTING_STORE_DATA_SYNC_REPORTS
+    )
+    existing_store_data_sync_parser.add_argument("--temporary-root", type=Path, default=None)
 
     validate_parent_sync_parser = subparsers.add_parser(
         "validate-parent-sync-plan",

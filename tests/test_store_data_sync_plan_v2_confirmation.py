@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import marketing_knowledge_agent.cli as cli
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.store_data_sync_plan_v2_confirmation import (
     EXPECTED_MANAGED_DELTA_HASH,
@@ -16,6 +17,9 @@ from marketing_knowledge_agent.store_data_sync_plan_v2_confirmation import (
     confirm_store_data_sync_plan_v2,
     validate_store_data_sync_plan_v2,
     validate_store_data_sync_plan_v2_confirmation,
+)
+from marketing_knowledge_agent.store_data_sync_existing_validation import (
+    reconstruct_pre_sync_fixture,
 )
 
 
@@ -39,10 +43,13 @@ def _hash_path(path: Path) -> str:
 @pytest.fixture(scope="module")
 def validation(tmp_path_factory):
     root = tmp_path_factory.mktemp("store-sync-v2-confirmation")
+    fixture = reconstruct_pre_sync_fixture(_root(), root / "prestate")
     return validate_store_data_sync_plan_v2(
         repo_root=_root(), plan_id=EXPECTED_PLAN_ID,
         manifest_hash=EXPECTED_MANIFEST_HASH,
         temporary_root=root / "temporary", now=VALIDATED_AT,
+        managed_vault_root=Path(fixture["managed_vault_root"]),
+        formal_sqlite_path=Path(fixture["formal_sqlite_path"]),
     )
 
 
@@ -167,11 +174,17 @@ def test_exact_identity_expiration_and_reviewer_fail_closed(tmp_path):
 def test_confirmation_atomic_idempotent_and_conflict(tmp_path):
     confirmation = tmp_path / "confirmation"
     reports = tmp_path / "reports"
+    fixture = reconstruct_pre_sync_fixture(_root(), tmp_path / "prestate")
+    target_kwargs = {
+        "managed_vault_root": Path(fixture["managed_vault_root"]),
+        "formal_sqlite_path": Path(fixture["formal_sqlite_path"]),
+    }
     first = confirm_store_data_sync_plan_v2(
         repo_root=_root(), plan_id=EXPECTED_PLAN_ID, manifest_hash=EXPECTED_MANIFEST_HASH,
         reviewer="Admin", confirmed_at=VALIDATED_AT,
         confirmation_path=confirmation, report_dir=reports,
         temporary_root=tmp_path / "temporary-a", require_git_ignored=False,
+        **target_kwargs,
     )
     validated = validate_store_data_sync_plan_v2_confirmation(confirmation)
     before = _hash_path(confirmation)
@@ -180,6 +193,7 @@ def test_confirmation_atomic_idempotent_and_conflict(tmp_path):
         reviewer="Admin", confirmed_at=VALIDATED_AT,
         confirmation_path=confirmation, report_dir=reports,
         temporary_root=tmp_path / "temporary-b", require_git_ignored=False,
+        **target_kwargs,
     )
 
     assert first["confirmation_created"] is True
@@ -198,10 +212,11 @@ def test_confirmation_atomic_idempotent_and_conflict(tmp_path):
             reviewer="Admin", confirmed_at="2026-07-22T10:01:00+08:00",
             confirmation_path=confirmation, report_dir=reports,
             temporary_root=tmp_path / "temporary-c", require_git_ignored=False,
+            **target_kwargs,
         )
 
 
-def test_formal_systems_unchanged_and_cli_is_confirmation_only(tmp_path, capsys):
+def test_formal_systems_unchanged_and_cli_is_confirmation_only(tmp_path, monkeypatch, capsys):
     protected = [
         _root() / "data/governance/governance_decisions.sqlite",
         _root() / "obsidian_vault",
@@ -209,6 +224,23 @@ def test_formal_systems_unchanged_and_cli_is_confirmation_only(tmp_path, capsys)
         _root() / "src/marketing_knowledge_agent/slack_interface.py",
     ]
     before = {str(path): _hash_path(path) for path in protected}
+    fixture = reconstruct_pre_sync_fixture(_root(), tmp_path / "prestate")
+    target_kwargs = {
+        "managed_vault_root": Path(fixture["managed_vault_root"]),
+        "formal_sqlite_path": Path(fixture["formal_sqlite_path"]),
+    }
+    original_validate = cli.validate_store_data_sync_plan_v2
+    original_confirm = cli.confirm_store_data_sync_plan_v2
+    monkeypatch.setattr(
+        cli,
+        "validate_store_data_sync_plan_v2",
+        lambda **kwargs: original_validate(**kwargs, **target_kwargs),
+    )
+    monkeypatch.setattr(
+        cli,
+        "confirm_store_data_sync_plan_v2",
+        lambda **kwargs: original_confirm(**kwargs, **target_kwargs),
+    )
     assert main([
         "validate-store-data-sync-plan-v2",
         "--plan-id", EXPECTED_PLAN_ID,

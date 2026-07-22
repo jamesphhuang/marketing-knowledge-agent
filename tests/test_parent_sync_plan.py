@@ -4,12 +4,16 @@ from pathlib import Path
 
 import pytest
 
+import marketing_knowledge_agent.cli as cli
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.parent_sync_plan import (
     EXPECTED_DATABASE_SHA256,
     ParentSyncPlanError,
     _detect_path_collisions,
     generate_parent_sync_plan,
+)
+from marketing_knowledge_agent.store_data_sync_existing_validation import (
+    reconstruct_pre_sync_fixture,
 )
 
 
@@ -203,6 +207,15 @@ def test_wrong_decision_store_sha_fails_closed(tmp_path):
 def test_cli_is_preview_only_and_needs_no_slack_token(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+    fixture = reconstruct_pre_sync_fixture(_root(), tmp_path / "prestate")
+    original = cli.generate_parent_sync_plan
+
+    def generate_from_prestate(**kwargs):
+        kwargs["managed_vault_root"] = Path(fixture["managed_vault_root"])
+        kwargs["formal_sqlite_path"] = Path(fixture["formal_sqlite_path"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(cli, "generate_parent_sync_plan", generate_from_prestate)
 
     assert main([
         "plan-parent-sync",
@@ -217,11 +230,14 @@ def test_cli_is_preview_only_and_needs_no_slack_token(tmp_path, monkeypatch, cap
 
 
 def _args(tmp_path):
+    fixture = reconstruct_pre_sync_fixture(_root(), tmp_path / "prestate")
     return {
         "repo_root": _root(),
         "output_dir": tmp_path / "reports",
         "temporary_root": tmp_path / "temporary",
         "created_at": CREATED_AT,
+        "managed_vault_root": Path(fixture["managed_vault_root"]),
+        "formal_sqlite_path": Path(fixture["formal_sqlite_path"]),
     }
 
 
