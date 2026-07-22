@@ -133,6 +133,13 @@ from .store_data_sync_plan_v2 import (
     StoreDataSyncPlanV2Error,
     generate_store_data_sync_plan_v2,
 )
+from .store_data_sync_plan_v2_confirmation import (
+    DEFAULT_CONFIRMATION_PATH as DEFAULT_STORE_DATA_SYNC_V2_CONFIRMATION_PATH,
+    DEFAULT_REPORT_DIR as DEFAULT_STORE_DATA_SYNC_V2_CONFIRMATION_REPORTS,
+    StoreDataSyncPlanV2ConfirmationError,
+    confirm_store_data_sync_plan_v2,
+    validate_store_data_sync_plan_v2,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -635,6 +642,35 @@ def main(argv=None) -> int:
             print(json.dumps(public_summary, ensure_ascii=False, indent=2))
             return 1 if summary["execution_blocked"] else 0
 
+        if args.command == "validate-store-data-sync-plan-v2":
+            summary = validate_store_data_sync_plan_v2(
+                repo_root=Path.cwd(), plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash, temporary_root=args.temporary_root,
+                now=args.now,
+            )
+            public_summary = {
+                key: value for key, value in summary.items()
+                if key not in {
+                    "materialization_contract", "authoritative_records", "reconciliation",
+                    "managed_vault_delta", "formal_sqlite_delta", "not_projected",
+                    "governance_only_records", "four_create_records", "special_record_validation",
+                    "offline_search", "plan_manifest", "managed_projection", "formal_projection",
+                }
+            }
+            print(json.dumps(public_summary, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "confirm-store-data-sync-plan-v2":
+            summary = confirm_store_data_sync_plan_v2(
+                repo_root=Path.cwd(), plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash, reviewer=args.reviewer,
+                confirmed_at=args.confirmed_at, confirmation_path=args.confirmation_path,
+                report_dir=args.output, temporary_root=args.temporary_root,
+                require_git_ignored=not args.allow_non_ignored_test_path,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "validate-parent-sync-plan":
             summary = validate_parent_sync_plan(
                 repo_root=Path.cwd(), plan_id=args.plan_id,
@@ -852,6 +888,9 @@ def main(argv=None) -> int:
         return 2
     except StoreDataSyncPlanV2Error as exc:
         print(f"store data sync plan v2 error: {exc}", file=sys.stderr)
+        return 2
+    except StoreDataSyncPlanV2ConfirmationError as exc:
+        print(f"store data sync plan v2 confirmation error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1631,6 +1670,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     store_data_sync_v2_parser.add_argument("--temporary-root", type=Path, default=None)
     store_data_sync_v2_parser.add_argument("--created-at", default=None)
+
+    validate_store_data_sync_v2_parser = subparsers.add_parser(
+        "validate-store-data-sync-plan-v2",
+        help="Independently validate the exact Store Data Sync Plan V2 without generating it",
+    )
+    validate_store_data_sync_v2_parser.add_argument("--plan-id", required=True)
+    validate_store_data_sync_v2_parser.add_argument("--manifest-hash", required=True)
+    validate_store_data_sync_v2_parser.add_argument("--temporary-root", type=Path, default=None)
+    validate_store_data_sync_v2_parser.add_argument("--now", default=None)
+
+    confirm_store_data_sync_v2_parser = subparsers.add_parser(
+        "confirm-store-data-sync-plan-v2",
+        help="Independently validate and confirm the exact Store Data Sync Plan V2 without syncing",
+    )
+    confirm_store_data_sync_v2_parser.add_argument("--plan-id", required=True)
+    confirm_store_data_sync_v2_parser.add_argument("--manifest-hash", required=True)
+    confirm_store_data_sync_v2_parser.add_argument("--reviewer", required=True, choices=("Admin",))
+    confirm_store_data_sync_v2_parser.add_argument("--confirmed-at", default=None)
+    confirm_store_data_sync_v2_parser.add_argument(
+        "--confirmation-path", type=Path, default=DEFAULT_STORE_DATA_SYNC_V2_CONFIRMATION_PATH
+    )
+    confirm_store_data_sync_v2_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_STORE_DATA_SYNC_V2_CONFIRMATION_REPORTS
+    )
+    confirm_store_data_sync_v2_parser.add_argument("--temporary-root", type=Path, default=None)
+    confirm_store_data_sync_v2_parser.add_argument(
+        "--allow-non-ignored-test-path", action="store_true", help=argparse.SUPPRESS
+    )
 
     validate_parent_sync_parser = subparsers.add_parser(
         "validate-parent-sync-plan",
