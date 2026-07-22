@@ -272,6 +272,8 @@ def test_execution_bundle_failure_rolls_back_both_targets(tmp_path, monkeypatch)
     vault_before = _hash_tree(arguments["managed_vault_root"])
     sqlite_before = _sha256(arguments["formal_sqlite_path"])
 
+    original_bundle = module._create_execution_bundle
+
     def fail_bundle(*args, **kwargs):
         raise StoreDataSyncPlanV2ExecutionError("injected execution bundle failure")
 
@@ -287,6 +289,42 @@ def test_execution_bundle_failure_rolls_back_both_targets(tmp_path, monkeypatch)
     assert _hash_tree(arguments["managed_vault_root"]) == vault_before
     assert _sha256(arguments["formal_sqlite_path"]) == sqlite_before
     assert not arguments["execution_path"].exists()
+
+    backup_root = json.loads((arguments["backup_path"] / "backup_manifest.json").read_text(encoding="utf-8"))["root_backup_hash"]
+    monkeypatch.setattr(module, "_create_execution_bundle", original_bundle)
+    retried = execute_store_data_sync_plan_v2(
+        repo_root=_root(), plan_id=EXPECTED_PLAN_ID,
+        manifest_hash=EXPECTED_MANIFEST_HASH,
+        confirmation_id=EXPECTED_CONFIRMATION_ID,
+        confirmation_root_hash=EXPECTED_CONFIRMATION_ROOT_HASH,
+        executed_at=EXECUTED_AT, **arguments,
+    )
+    assert retried["conclusion"].startswith("A.")
+    assert retried["backup_root_hash"] == backup_root
+
+
+def test_managed_namespace_appledouble_sidecar_is_not_outside_target_drift(tmp_path, monkeypatch):
+    import marketing_knowledge_agent.store_data_sync_plan_v2_execution as module
+
+    arguments = _fixture(tmp_path)
+    sidecar = arguments["managed_vault_root"].parent / "._MKA"
+    sidecar.write_bytes(b"before-target-metadata")
+    original = module._apply_managed_delta
+
+    def apply_and_touch_sidecar(*args, **kwargs):
+        result = original(*args, **kwargs)
+        sidecar.write_bytes(b"after-target-metadata")
+        return result
+
+    monkeypatch.setattr(module, "_apply_managed_delta", apply_and_touch_sidecar)
+    result = execute_store_data_sync_plan_v2(
+        repo_root=_root(), plan_id=EXPECTED_PLAN_ID,
+        manifest_hash=EXPECTED_MANIFEST_HASH,
+        confirmation_id=EXPECTED_CONFIRMATION_ID,
+        confirmation_root_hash=EXPECTED_CONFIRMATION_ROOT_HASH,
+        executed_at=EXECUTED_AT, **arguments,
+    )
+    assert result["conclusion"].startswith("A.")
 
 
 def _schema_hash(path: Path) -> str:

@@ -123,8 +123,6 @@ def execute_store_data_sync_plan_v2(
         "plan": _resolve(root, confirmation.DEFAULT_PLAN_MANIFEST),
     }
     _validate_target_paths(root, paths, allow_noncanonical_test_targets)
-    if paths["backup"].exists():
-        raise StoreDataSyncPlanV2ExecutionError("Backup Bundle already exists; Execute cannot overwrite it")
     if paths["execution"].exists():
         raise StoreDataSyncPlanV2ExecutionError("Execution Bundle already exists; Execute cannot be rerun")
     if require_git_ignored:
@@ -408,6 +406,7 @@ def _build_formal_staging(source_db, directory, managed_staging, validation, sou
     os.close(fd)
     staging = Path(name)
     shutil.copy2(source_db, staging)
+    staging.chmod(staging.stat().st_mode | 0o600)
     before_schema = _schema_hash(staging)
     before_existing = _existing_parent_hashes(staging)
     before_non_parent = _non_parent_hash(staging)
@@ -497,6 +496,16 @@ def _create_backup_bundle(target, paths, validation, created_at, require_git_ign
     target.parent.mkdir(parents=True, exist_ok=True)
     if require_git_ignored and not confirmation._git_ignored(paths["plan"].parents[2], target):
         raise StoreDataSyncPlanV2ExecutionError("Backup Bundle path must be Git ignored")
+    if target.exists():
+        existing = _validate_backup_bundle(target)
+        inventory = _read_json(target / "target_inventory_before.json")
+        matches = (
+            inventory.get("managed_vault_hash") == confirmation._hash_path(paths["managed"])
+            and inventory.get("formal_sqlite_sha256") == _sha256(paths["formal"])
+        )
+        if not matches:
+            raise StoreDataSyncPlanV2ExecutionError("existing Backup Bundle conflicts with current before state")
+        return existing
     staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=str(target.parent)))
     try:
         before_files = staging / "managed_vault_before_files"
@@ -1038,6 +1047,8 @@ def _hash_outside(parent, excluded):
     digest = hashlib.sha256()
     for child in sorted(item for item in Path(parent).rglob("*") if item.is_file()):
         relative = child.relative_to(parent)
+        if relative == Path(f"._{Path(excluded).name}"):
+            continue
         if any(part.startswith(f".{EXPECTED_PLAN_ID}.staging-") for part in relative.parts):
             continue
         try:
