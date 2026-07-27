@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,12 @@ def production_search_alias_pre_activation_repo(tmp_path_factory):
     destination = root / "src/marketing_knowledge_agent"
     destination.mkdir(parents=True)
     for path in source.iterdir():
-        if path.name in {"__pycache__", "pipeline.py", "search_aliases.py"}:
+        if path.name in {
+            "__pycache__",
+            "pipeline.py",
+            "search_aliases.py",
+            "slack_interface.py",
+        }:
             continue
         (destination / path.name).symlink_to(path, target_is_directory=path.is_dir())
 
@@ -33,5 +39,16 @@ def production_search_alias_pre_activation_repo(tmp_path_factory):
         / "data/governance/backups/production-search-alias-plan-v2-668c2856f39124ae/pipeline.py"
     )
     shutil.copy2(backup_pipeline, destination / "pipeline.py")
+    historical_renderer = subprocess.run(
+        [
+            "git",
+            "show",
+            "470c914ff52e5820bfce6915eac93a55097b7d8d:src/marketing_knowledge_agent/slack_interface.py",
+        ],
+        cwd=formal_root,
+        check=True,
+        capture_output=True,
+    ).stdout
+    (destination / "slack_interface.py").write_bytes(historical_renderer)
     (root / "tests").mkdir()
     return root

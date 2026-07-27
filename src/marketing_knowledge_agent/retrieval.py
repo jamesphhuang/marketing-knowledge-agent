@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .embeddings import cosine_similarity, embed_text
+from .governance import metadata_allows_written_external_use
 from .indexing import SQLiteIndex
 from .models import Chunk, DocumentMetadata, NON_RETRIEVABLE_RECORD_TYPES, SearchFilters, SearchResult
 from .query_planning import TypedQueryPlan, metadata_matches_query_plan
@@ -64,6 +65,8 @@ class SQLiteRetriever:
 
 def matches_filters(metadata: DocumentMetadata, filters: SearchFilters) -> bool:
     if metadata.record_type in NON_RETRIEVABLE_RECORD_TYPES:
+        return False
+    if filters.intent == "external" and not metadata_allows_written_external_use(metadata):
         return False
     if filters.intent == "external" and metadata.record_type == "pending_metric":
         return False

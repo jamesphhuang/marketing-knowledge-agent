@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, List, Mapping, Optional
 
 from .content_index import DEFAULT_CONTENT_INDEX_DB
+from .governance import metadata_allows_written_external_use
 from .llm import DEFAULT_LLM_CONFIG_PATH, load_llm_config
 from .models import SearchFilters
 from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, agent_ask
@@ -140,9 +141,14 @@ def format_slack_reply(answer, max_answer_chars: int) -> str:
             )
             source_sheet = citation.source_sheet or "未知來源"
             source_row = citation.source_row if citation.source_row is not None else "?"
+            external_usage = (
+                "可對外引用"
+                if metadata_allows_written_external_use(citation)
+                else "不可對外引用"
+            )
             parts.append(
                 f"{citation.label} {citation.title} — {source_sheet} r{source_row} · "
-                f"{effective_date} · 可對外引用"
+                f"{effective_date} · {external_usage}"
             )
     if answer.warnings:
         parts.extend(["", "⚠️ 提醒:"])

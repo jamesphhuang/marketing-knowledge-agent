@@ -5,7 +5,11 @@ from datetime import date
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .generation import citation_for_result
-from .governance import GovernanceIndex, metadata_governance_warnings
+from .governance import (
+    GovernanceIndex,
+    metadata_allows_written_external_use,
+    metadata_governance_warnings,
+)
 from .models import (
     Citation,
     GeneratedAnswer,
@@ -280,11 +284,7 @@ def _asset_label(value: str) -> str:
 
 
 def _external_usage_label(metadata) -> str:
-    if (
-        metadata.can_quote_externally
-        and metadata.data_classification == "public"
-        and metadata.status == "published"
-    ):
+    if metadata_allows_written_external_use(metadata):
         return "可對外引用"
     return "不可直接對外引用"
 

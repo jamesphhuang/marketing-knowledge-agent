@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Optional
 
-from .governance import GovernanceIndex
+from .governance import GovernanceIndex, metadata_allows_written_external_use
 from .models import GeneratedAnswer, SearchFilters
 
 
@@ -56,7 +56,8 @@ def enforce_external_citations(answer: GeneratedAnswer, filters: SearchFilters) 
     kept = [
         citation
         for citation in answer.citations
-        if citation.can_quote_externally and citation.record_type != "pending_metric"
+        if citation.can_quote_externally
+        and metadata_allows_written_external_use(citation)
     ]
     removed_count = len(answer.citations) - len(kept)
     if removed_count:
