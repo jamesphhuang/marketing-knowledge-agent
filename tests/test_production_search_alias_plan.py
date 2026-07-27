@@ -21,6 +21,9 @@ from marketing_knowledge_agent.production_search_alias_plan import (
 
 
 CREATED_AT = "2026-07-22T18:00:00+08:00"
+PRE_ACTIVATION_ALIAS_TARGET = Path(
+    ".mka/search_alias_projection.preactivation-fixture.json"
+)
 
 
 def _root() -> Path:
@@ -43,6 +46,7 @@ def result(tmp_path_factory):
     return generate_production_search_alias_plan(
         repo_root=_root(), output_dir=path / "reports",
         temporary_root=path / "temporary", created_at=CREATED_AT,
+        alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
     )
 
 
@@ -157,12 +161,14 @@ def test_projection_strategy_is_incremental_without_schema_migration(result):
     assert result["strategy"]["index_rebuild_required"] is False
     assert result["strategy"]["existing_parent_rows_modified"] == 0
     assert result["projection_delta"]["create_count"] == 2
-    assert result["projection_delta"]["target"] == ".mka/search_alias_projection.json"
+    assert result["strategy"]["target_paths"]["alias_projection"] == ".mka/search_alias_projection.json"
     assert result["execution_blocked"] is False
     assert result["conclusion"].startswith("A.")
 
 
-def test_unconfirmed_schema_migration_requirement_blocks_plan(tmp_path, monkeypatch):
+def test_unconfirmed_schema_migration_requirement_blocks_plan(
+    tmp_path, monkeypatch
+):
     original = module._selected_strategy
 
     def migration_strategy():
@@ -175,6 +181,7 @@ def test_unconfirmed_schema_migration_requirement_blocks_plan(tmp_path, monkeypa
     blocked = generate_production_search_alias_plan(
         repo_root=_root(), output_dir=tmp_path / "reports",
         temporary_root=tmp_path / "temporary", created_at=CREATED_AT,
+        alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
     )
     assert blocked["execution_blocked"] is True
     assert "schema_migration_not_required" in blocked["blocker_reasons"]
@@ -187,6 +194,7 @@ def test_exact_database_sha_and_absent_target_fail_closed(tmp_path):
         generate_production_search_alias_plan(
             repo_root=_root(), output_dir=tmp_path / "reports-a",
             temporary_root=tmp_path / "temporary-a", decision_store_path=wrong,
+            alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
             created_at=CREATED_AT,
         )
     target = tmp_path / "aliases.json"
@@ -199,16 +207,20 @@ def test_exact_database_sha_and_absent_target_fail_closed(tmp_path):
         )
 
 
-def test_plan_identity_reports_and_rerun_are_deterministic(tmp_path):
+def test_plan_identity_reports_and_rerun_are_deterministic(
+    tmp_path
+):
     reports = tmp_path / "reports"
     first = generate_production_search_alias_plan(
         repo_root=_root(), output_dir=reports,
         temporary_root=tmp_path / "temporary-a", created_at=CREATED_AT,
+        alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
     )
     first_hash = _hash_path(reports)
     second = generate_production_search_alias_plan(
         repo_root=_root(), output_dir=reports,
         temporary_root=tmp_path / "temporary-b", created_at=CREATED_AT,
+        alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
     )
     assert first["plan_id"] == second["plan_id"]
     assert first["manifest_hash"] == second["manifest_hash"]
@@ -218,7 +230,9 @@ def test_plan_identity_reports_and_rerun_are_deterministic(tmp_path):
     assert manifest["expires_at"] == "2026-07-29T18:00:00+08:00"
 
 
-def test_cli_is_plan_only_and_does_not_require_slack_token(tmp_path, monkeypatch, capsys):
+def test_cli_is_plan_only_and_does_not_require_slack_token(
+    tmp_path, monkeypatch, capsys
+):
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
     assert main([
@@ -226,8 +240,5 @@ def test_cli_is_plan_only_and_does_not_require_slack_token(tmp_path, monkeypatch
         "--output", str(tmp_path / "reports"),
         "--temporary-root", str(tmp_path / "temporary"),
         "--created-at", CREATED_AT,
-    ]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["execution_blocked"] is False
-    assert payload["production_search_activated"] is False
-    assert payload["slack_api_called"] is False
+    ]) == 2
+    assert "already exists" in capsys.readouterr().err

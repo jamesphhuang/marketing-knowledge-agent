@@ -42,17 +42,20 @@ def _hash_path(path: Path) -> str:
 
 
 @pytest.fixture(scope="module")
-def plan(tmp_path_factory):
+def plan(tmp_path_factory, production_search_alias_pre_activation_repo):
     root = tmp_path_factory.mktemp("production-search-alias-plan-v2")
     return generate_production_search_alias_plan_v2(
-        repo_root=_root(), output_dir=root / "reports",
+        repo_root=production_search_alias_pre_activation_repo, output_dir=root / "reports",
         temporary_root=root / "temporary", created_at=CREATED_AT,
     )
 
 
-def test_old_plan_remains_blocked_and_superseded(plan, tmp_path):
+def test_old_plan_remains_blocked_and_superseded(
+    plan, tmp_path, production_search_alias_pre_activation_repo
+):
     old = validate_production_search_alias_plan(
-        repo_root=_root(), plan_id=OLD_PLAN_ID, manifest_hash=OLD_MANIFEST_HASH,
+        repo_root=production_search_alias_pre_activation_repo,
+        plan_id=OLD_PLAN_ID, manifest_hash=OLD_MANIFEST_HASH,
         report_dir=tmp_path / "old-reports", temporary_root=tmp_path / "old-work",
         now="2026-07-22T18:00:00+08:00",
     )
@@ -172,12 +175,18 @@ def test_runtime_delta_is_15_of_15_with_real_or_explicit_symbols(plan):
     }
 
 
-def test_patch_preview_rejects_unauthorized_file(plan):
+def test_patch_preview_rejects_unauthorized_file(
+    plan, production_search_alias_pre_activation_repo
+):
     unauthorized = plan["runtime_patch_preview"] + (
         "diff --git a/src/marketing_knowledge_agent/slack_interface.py "
         "b/src/marketing_knowledge_agent/slack_interface.py\n"
     )
-    observed = _validate_runtime_manifest(_root(), plan["runtime_manifest"], unauthorized)
+    observed = _validate_runtime_manifest(
+        production_search_alias_pre_activation_repo,
+        plan["runtime_manifest"],
+        unauthorized,
+    )
     assert observed["valid"] is False
     assert observed["patch_manifest_match"] is False
     assert observed["slack_renderer_changed"] is True
@@ -221,7 +230,9 @@ def test_slp_shopline_and_special_search_behavior(plan):
     assert by_query["關貿網路"]["asset_count"] == 1
 
 
-def test_new_identity_reports_cli_and_formal_systems_unchanged(tmp_path):
+def test_new_identity_reports_cli_and_formal_systems_unchanged(
+    tmp_path, monkeypatch, production_search_alias_pre_activation_repo
+):
     protected = [
         _root() / "data/governance/governance_decisions.sqlite",
         _root() / "obsidian_vault/MKA",
@@ -231,12 +242,12 @@ def test_new_identity_reports_cli_and_formal_systems_unchanged(tmp_path):
     before = {str(path): _hash_path(path) for path in protected}
     reports = tmp_path / "reports"
     first = generate_production_search_alias_plan_v2(
-        repo_root=_root(), output_dir=reports,
+        repo_root=production_search_alias_pre_activation_repo, output_dir=reports,
         temporary_root=tmp_path / "work-a", created_at=CREATED_AT,
     )
     first_hash = _hash_path(reports)
     second = generate_production_search_alias_plan_v2(
-        repo_root=_root(), output_dir=reports,
+        repo_root=production_search_alias_pre_activation_repo, output_dir=reports,
         temporary_root=tmp_path / "work-b", created_at=CREATED_AT,
     )
     assert first["plan_id"] == second["plan_id"]
@@ -248,12 +259,16 @@ def test_new_identity_reports_cli_and_formal_systems_unchanged(tmp_path):
     assert _hash_path(reports) == first_hash
     assert len([path for path in reports.iterdir() if path.is_file() and not path.name.startswith("._")]) == len(REPORT_FILENAMES) == 37
     assert {str(path): _hash_path(path) for path in protected} == before
-    assert not (_root() / ".mka/search_alias_projection.json").exists()
+    assert not (
+        production_search_alias_pre_activation_repo
+        / ".mka/search_alias_projection.json"
+    ).exists()
 
     parser = build_parser()
     args = parser.parse_args(["plan-production-search-aliases-v2"])
     assert not hasattr(args, "force")
     assert not hasattr(args, "execute")
+    monkeypatch.chdir(production_search_alias_pre_activation_repo)
     assert main([
         "plan-production-search-aliases-v2",
         "--output", str(tmp_path / "cli-reports"),

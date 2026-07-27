@@ -48,6 +48,12 @@ def test_exact_authority_is_required():
 
 def test_runtime_payload_scope_and_pipeline_before_checksum():
     paths = _paths()
+    paths["pipeline"] = (
+        _root()
+        / "data/governance/backups"
+        / EXPECTED_PLAN_ID
+        / "pipeline.py"
+    )
     assert hashlib.sha256(paths["pipeline"].read_bytes()).hexdigest() == "01ce71cddd9bb5ab0b4e1f9838e917796c3a13eee8c44389e8b8ceb5d6054fce"
     runtime = _render_runtime_files(paths)
     assert {str(path) for path in runtime} == {

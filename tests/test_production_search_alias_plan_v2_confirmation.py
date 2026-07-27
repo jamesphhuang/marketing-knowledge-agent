@@ -50,10 +50,10 @@ def _hash_path(path: Path) -> str:
 
 
 @pytest.fixture(scope="module")
-def validation(tmp_path_factory):
+def validation(tmp_path_factory, production_search_alias_pre_activation_repo):
     root = tmp_path_factory.mktemp("production-search-alias-v2-confirmation")
     return validate_production_search_alias_plan_v2(
-        repo_root=_root(), plan_id=EXPECTED_PLAN_ID,
+        repo_root=production_search_alias_pre_activation_repo, plan_id=EXPECTED_PLAN_ID,
         manifest_hash=EXPECTED_MANIFEST_HASH,
         report_dir=root / "reports", temporary_root=root / "temporary",
         now=VALIDATED_AT,
@@ -160,7 +160,9 @@ def test_exact_identity_expiration_reviewer_and_existing_target_fail_closed(tmp_
         )
 
 
-def test_tampered_runtime_manifest_blocks_validation(tmp_path):
+def test_tampered_runtime_manifest_blocks_validation(
+    tmp_path, production_search_alias_pre_activation_repo
+):
     copied = tmp_path / "plan"
     shutil.copytree(_root() / "reports/production_search_alias_plan_v2", copied)
     path = copied / "runtime_code_delta_manifest.json"
@@ -168,7 +170,8 @@ def test_tampered_runtime_manifest_blocks_validation(tmp_path):
     payload["files"][0]["file_path"] = "src/marketing_knowledge_agent/slack_interface.py"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     result = validate_production_search_alias_plan_v2(
-        repo_root=_root(), plan_id=EXPECTED_PLAN_ID, manifest_hash=EXPECTED_MANIFEST_HASH,
+        repo_root=production_search_alias_pre_activation_repo,
+        plan_id=EXPECTED_PLAN_ID, manifest_hash=EXPECTED_MANIFEST_HASH,
         plan_dir=copied, report_dir=tmp_path / "reports",
         temporary_root=tmp_path / "temporary", now=VALIDATED_AT,
     )
@@ -177,10 +180,13 @@ def test_tampered_runtime_manifest_blocks_validation(tmp_path):
     assert "plan_static_identity" in result["validation_errors"]
 
 
-def test_confirmation_atomic_idempotent_and_conflicting_content_rejected(tmp_path):
+def test_confirmation_atomic_idempotent_and_conflicting_content_rejected(
+    tmp_path, production_search_alias_pre_activation_repo
+):
     target = tmp_path / "confirmation"
     kwargs = dict(
-        repo_root=_root(), plan_id=EXPECTED_PLAN_ID, manifest_hash=EXPECTED_MANIFEST_HASH,
+        repo_root=production_search_alias_pre_activation_repo,
+        plan_id=EXPECTED_PLAN_ID, manifest_hash=EXPECTED_MANIFEST_HASH,
         reviewer="Admin", confirmed_at=VALIDATED_AT, confirmation_path=target,
         report_dir=tmp_path / "reports", temporary_root=tmp_path / "temporary",
         require_git_ignored=False, test_runner=lambda root: dict(TEST_RESULT),
@@ -202,7 +208,9 @@ def test_confirmation_atomic_idempotent_and_conflicting_content_rejected(tmp_pat
         confirm_production_search_alias_plan_v2(**kwargs)
 
 
-def test_validation_reports_are_deterministic_and_formal_systems_unchanged(tmp_path):
+def test_validation_reports_are_deterministic_and_formal_systems_unchanged(
+    tmp_path, production_search_alias_pre_activation_repo
+):
     protected = [
         _root() / "data/governance/governance_decisions.sqlite",
         _root() / "obsidian_vault/MKA",
@@ -214,22 +222,29 @@ def test_validation_reports_are_deterministic_and_formal_systems_unchanged(tmp_p
     before = {str(path): _hash_path(path) for path in protected}
     reports = tmp_path / "reports"
     first = validate_production_search_alias_plan_v2(
-        repo_root=_root(), plan_id=EXPECTED_PLAN_ID, manifest_hash=EXPECTED_MANIFEST_HASH,
+        repo_root=production_search_alias_pre_activation_repo,
+        plan_id=EXPECTED_PLAN_ID, manifest_hash=EXPECTED_MANIFEST_HASH,
         report_dir=reports, temporary_root=tmp_path / "temp-a", now=VALIDATED_AT,
     )
     report_hash = _hash_path(reports)
     second = validate_production_search_alias_plan_v2(
-        repo_root=_root(), plan_id=EXPECTED_PLAN_ID, manifest_hash=EXPECTED_MANIFEST_HASH,
+        repo_root=production_search_alias_pre_activation_repo,
+        plan_id=EXPECTED_PLAN_ID, manifest_hash=EXPECTED_MANIFEST_HASH,
         report_dir=reports, temporary_root=tmp_path / "temp-b", now=VALIDATED_AT,
     )
     assert _hash_path(reports) == report_hash
     assert first["independent_validation_hash"] == second["independent_validation_hash"]
     assert first["formal_systems_unchanged"] is True
     assert {str(path): _hash_path(path) for path in protected} == before
-    assert not (_root() / ".mka/search_alias_projection.json").exists()
+    assert not (
+        production_search_alias_pre_activation_repo
+        / ".mka/search_alias_projection.json"
+    ).exists()
 
 
-def test_v2_cli_is_validation_confirmation_only(tmp_path, capsys):
+def test_v2_cli_is_validation_confirmation_only(
+    tmp_path, capsys, monkeypatch, production_search_alias_pre_activation_repo
+):
     parser = build_parser()
     validate_args = parser.parse_args([
         "validate-production-search-alias-plan-v2", "--plan-id", EXPECTED_PLAN_ID,
@@ -243,6 +258,7 @@ def test_v2_cli_is_validation_confirmation_only(tmp_path, capsys):
         assert not hasattr(args, "force")
         assert not hasattr(args, "execute")
         assert not hasattr(args, "skip_validation")
+    monkeypatch.chdir(production_search_alias_pre_activation_repo)
     assert main([
         "validate-production-search-alias-plan-v2", "--plan-id", EXPECTED_PLAN_ID,
         "--manifest-hash", EXPECTED_MANIFEST_HASH,

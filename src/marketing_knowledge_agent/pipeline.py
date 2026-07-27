@@ -100,10 +100,9 @@ def search_index(
     ranked = rerank_results(query, initial_results, filters)
     if query_plan.query_mode == "structured_lookup" or query_plan.hard_constraints:
         ranked = _dedupe_document_results(ranked)
-    projection, _alias_diagnostic = load_alias_projection(
-        alias_projection_path, EXPECTED_ALIAS_AUTHORITY, EXPECTED_ALIAS_BINDING
+    alias_owner_ids = _exact_alias_owner_ids(
+        query, query_plan, alias_projection_path
     )
-    alias_owner_ids = resolve_exact_alias_parent_ids(query, query_plan, projection)
     if not alias_owner_ids:
         return ranked[:limit]
     alias_results = alias_results_for_parent_ids(
@@ -153,6 +152,9 @@ def ask_index(
         validate_provider_policy(resolved_llm_config, provider_name)
 
     query_plan = query_plan or build_index_query_plan(question, db_path, filters)
+    alias_owner_ids = _exact_alias_owner_ids(
+        question, query_plan, DEFAULT_ALIAS_PROJECTION_PATH
+    )
     retrieval_limit = (
         max(limit, SQLiteIndex(Path(db_path)).counts()["chunks"])
         if query_plan.query_mode == "structured_lookup"
@@ -170,7 +172,7 @@ def ask_index(
     internal_result_count = _internal_result_count(
         question, db_path, filters, limit, mode, query_plan=query_plan
     ) if not results else 0
-    if query_plan.query_mode == "structured_lookup":
+    if query_plan.query_mode == "structured_lookup" or alias_owner_ids:
         answer = generate_structured_answer(
             question,
             results,
@@ -458,6 +460,17 @@ def _dedupe_document_results(results: List[SearchResult]) -> List[SearchResult]:
         seen.add(result.chunk.document_id)
         deduped.append(result)
     return deduped
+
+
+def _exact_alias_owner_ids(
+    query: str,
+    query_plan: TypedQueryPlan,
+    alias_projection_path: Optional[Path],
+) -> List[str]:
+    projection, _alias_diagnostic = load_alias_projection(
+        alias_projection_path, EXPECTED_ALIAS_AUTHORITY, EXPECTED_ALIAS_BINDING
+    )
+    return resolve_exact_alias_parent_ids(query, query_plan, projection)
 
 
 def _refused_agentic_answer(generated: GeneratedAnswer) -> AgenticAnswer:
