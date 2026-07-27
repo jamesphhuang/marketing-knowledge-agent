@@ -35,6 +35,15 @@ from .query_planning import (
 from .reranking import rerank_results
 from .retrieval import SQLiteRetriever
 from .retrieval import matches_filters
+from .search_aliases import (
+    DEFAULT_ALIAS_PROJECTION_PATH,
+    EXPECTED_ALIAS_AUTHORITY,
+    EXPECTED_ALIAS_BINDING,
+    alias_results_for_parent_ids,
+    load_alias_projection,
+    merge_rank_and_cap_alias_results,
+    resolve_exact_alias_parent_ids,
+)
 from .structured_results import generate_structured_answer
 from .query_gating import (
     DEFAULT_QUERY_AUDIT_LOG,
@@ -73,6 +82,7 @@ def search_index(
     limit: int = 5,
     mode: str = "hybrid",
     query_plan: Optional[TypedQueryPlan] = None,
+    alias_projection_path: Optional[Path] = DEFAULT_ALIAS_PROJECTION_PATH,
 ) -> List[SearchResult]:
     requested_filters = filters or SearchFilters()
     filters = apply_intent_gating(requested_filters)
@@ -90,7 +100,18 @@ def search_index(
     ranked = rerank_results(query, initial_results, filters)
     if query_plan.query_mode == "structured_lookup" or query_plan.hard_constraints:
         ranked = _dedupe_document_results(ranked)
-    return ranked[:limit]
+    projection, _alias_diagnostic = load_alias_projection(
+        alias_projection_path, EXPECTED_ALIAS_AUTHORITY, EXPECTED_ALIAS_BINDING
+    )
+    alias_owner_ids = resolve_exact_alias_parent_ids(query, query_plan, projection)
+    if not alias_owner_ids:
+        return ranked[:limit]
+    alias_results = alias_results_for_parent_ids(
+        db_path, alias_owner_ids, filters, query_plan
+    )
+    return merge_rank_and_cap_alias_results(
+        alias_results, ranked, parent_cap=5, asset_cap=10
+    )
 
 
 def ask_index(
