@@ -14,6 +14,7 @@ from marketing_knowledge_agent.production_search_alias_plan_v2_execution import 
     ProductionSearchAliasPlanV2ExecutionError,
     _render_projection,
     _render_runtime_files,
+    _managed_parent_count,
     _require_exact_authority,
 )
 
@@ -72,3 +73,7 @@ def test_projection_is_self_excluding_canonical_and_plan_bound():
         ("SHOPLINE Payments", "商家夥伴案例資料庫:r32"),
         ("SLP", "商家夥伴案例資料庫:r32"),
     ]
+
+
+def test_managed_parent_inventory_uses_frontmatter_contract():
+    assert _managed_parent_count(_root() / "obsidian_vault/MKA") == 110

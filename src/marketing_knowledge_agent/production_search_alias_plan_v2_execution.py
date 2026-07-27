@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import production_search_alias_plan_v2_confirmation as confirmation
+from .frontmatter import FrontmatterError, parse_markdown_with_frontmatter
 
 
 EXPECTED_PLAN_ID = confirmation.EXPECTED_PLAN_ID
@@ -723,7 +724,7 @@ def _formal_snapshot(root, paths):
         chunk_hash = _hash_rows(db.execute("SELECT * FROM chunks ORDER BY id").fetchall())
         fts_hash = _hash_rows(db.execute("SELECT rowid,* FROM chunks_fts ORDER BY rowid").fetchall())
         schema_hash = _hash_rows(db.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").fetchall())
-    managed_count = len(list(paths["managed_vault"].rglob("record-r*-*.md")))
+    managed_count = _managed_parent_count(paths["managed_vault"])
     snapshot = {
         "decision_store_sha256": _sha256(paths["decision_store"]),
         "decision_store_size": paths["decision_store"].stat().st_size,
@@ -956,6 +957,20 @@ def _hash_path(path):
         digest.update(item.relative_to(path).as_posix().encode("utf-8"))
         digest.update(item.read_bytes())
     return digest.hexdigest()
+
+
+def _managed_parent_count(root):
+    count = 0
+    for path in Path(root).rglob("*.md"):
+        if path.name.startswith("._"):
+            continue
+        try:
+            metadata, _ = parse_markdown_with_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, FrontmatterError):
+            continue
+        if metadata.get("record_type") == "merchant_case":
+            count += 1
+    return count
 
 
 def _hash_rows(rows):
