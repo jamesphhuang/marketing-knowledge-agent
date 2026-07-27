@@ -167,6 +167,13 @@ from .production_search_alias_plan_v2 import (
     ProductionSearchAliasPlanV2Error,
     generate_production_search_alias_plan_v2,
 )
+from .production_search_alias_plan_v2_confirmation import (
+    DEFAULT_CONFIRMATION_PATH as DEFAULT_PRODUCTION_SEARCH_ALIAS_V2_CONFIRMATION_PATH,
+    DEFAULT_REPORT_DIR as DEFAULT_PRODUCTION_SEARCH_ALIAS_V2_CONFIRMATION_REPORTS,
+    ProductionSearchAliasPlanV2ConfirmationError,
+    confirm_production_search_alias_plan_v2,
+    validate_production_search_alias_plan_v2,
+)
 from .parent_authority_review import (
     ParentAuthorityReviewError,
     prepare_parent_authority_review,
@@ -757,6 +764,27 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0 if not summary["execution_blocked"] else 1
 
+        if args.command == "validate-production-search-alias-plan-v2":
+            summary = validate_production_search_alias_plan_v2(
+                repo_root=Path.cwd(), plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash, report_dir=args.output,
+                temporary_root=args.temporary_root, now=args.now,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0 if summary["valid"] else 1
+
+        if args.command == "confirm-production-search-alias-plan-v2":
+            summary = confirm_production_search_alias_plan_v2(
+                repo_root=Path.cwd(), plan_id=args.plan_id,
+                manifest_hash=args.manifest_hash, reviewer=args.reviewer,
+                confirmed_at=args.confirmed_at,
+                confirmation_path=args.confirmation_path, report_dir=args.output,
+                temporary_root=args.temporary_root,
+                require_git_ignored=not args.allow_non_ignored_test_path,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "validate-parent-sync-plan":
             summary = validate_parent_sync_plan(
                 repo_root=Path.cwd(), plan_id=args.plan_id,
@@ -992,6 +1020,9 @@ def main(argv=None) -> int:
         return 2
     except ProductionSearchAliasPlanV2Error as exc:
         print(f"production search alias plan v2 error: {exc}", file=sys.stderr)
+        return 2
+    except ProductionSearchAliasPlanV2ConfirmationError as exc:
+        print(f"production search alias plan v2 confirmation error: {exc}", file=sys.stderr)
         return 2
     except ParentAuthorityReviewError as exc:
         print(f"parent authority review error: {exc}", file=sys.stderr)
@@ -1873,6 +1904,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     production_search_alias_plan_v2_parser.add_argument("--temporary-root", type=Path, default=None)
     production_search_alias_plan_v2_parser.add_argument("--created-at", default=None)
+
+    validate_production_search_alias_v2_parser = subparsers.add_parser(
+        "validate-production-search-alias-plan-v2",
+        help="Independently validate the exact contract-complete Production Search Alias V2 Plan",
+    )
+    validate_production_search_alias_v2_parser.add_argument("--plan-id", required=True)
+    validate_production_search_alias_v2_parser.add_argument("--manifest-hash", required=True)
+    validate_production_search_alias_v2_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_PRODUCTION_SEARCH_ALIAS_V2_CONFIRMATION_REPORTS
+    )
+    validate_production_search_alias_v2_parser.add_argument("--temporary-root", type=Path, default=None)
+    validate_production_search_alias_v2_parser.add_argument("--now", default=None)
+
+    confirm_production_search_alias_v2_parser = subparsers.add_parser(
+        "confirm-production-search-alias-plan-v2",
+        help="Confirm only the independently valid Production Search Alias V2 Plan without activation",
+    )
+    confirm_production_search_alias_v2_parser.add_argument("--plan-id", required=True)
+    confirm_production_search_alias_v2_parser.add_argument("--manifest-hash", required=True)
+    confirm_production_search_alias_v2_parser.add_argument("--reviewer", required=True, choices=("Admin",))
+    confirm_production_search_alias_v2_parser.add_argument("--confirmed-at", default=None)
+    confirm_production_search_alias_v2_parser.add_argument(
+        "--confirmation-path", type=Path, default=DEFAULT_PRODUCTION_SEARCH_ALIAS_V2_CONFIRMATION_PATH
+    )
+    confirm_production_search_alias_v2_parser.add_argument(
+        "--output", type=Path, default=DEFAULT_PRODUCTION_SEARCH_ALIAS_V2_CONFIRMATION_REPORTS
+    )
+    confirm_production_search_alias_v2_parser.add_argument("--temporary-root", type=Path, default=None)
+    confirm_production_search_alias_v2_parser.add_argument(
+        "--allow-non-ignored-test-path", action="store_true", help=argparse.SUPPRESS
+    )
 
     validate_parent_sync_parser = subparsers.add_parser(
         "validate-parent-sync-plan",
