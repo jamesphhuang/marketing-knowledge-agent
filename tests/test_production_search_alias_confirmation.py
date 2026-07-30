@@ -36,10 +36,10 @@ def _hash_path(path: Path) -> str:
 
 
 @pytest.fixture(scope="module")
-def validation(tmp_path_factory, production_search_alias_pre_activation_repo):
+def validation(tmp_path_factory, production_search_alias_v1_pre_activation_repo):
     root = tmp_path_factory.mktemp("production-search-alias-confirmation")
     return validate_production_search_alias_plan(
-        repo_root=production_search_alias_pre_activation_repo, plan_id=EXPECTED_PLAN_ID,
+        repo_root=production_search_alias_v1_pre_activation_repo, plan_id=EXPECTED_PLAN_ID,
         manifest_hash=EXPECTED_MANIFEST_HASH,
         report_dir=root / "reports", temporary_root=root / "temporary",
         now=VALIDATED_AT,
@@ -178,9 +178,9 @@ def test_exact_identity_expiration_and_reviewer_fail_closed(tmp_path):
 
 
 def test_confirmation_cli_is_blocked_and_creates_no_bundle(
-    tmp_path, capsys, monkeypatch, production_search_alias_pre_activation_repo
+    tmp_path, capsys, monkeypatch, production_search_alias_v1_pre_activation_repo
 ):
-    monkeypatch.chdir(production_search_alias_pre_activation_repo)
+    monkeypatch.chdir(production_search_alias_v1_pre_activation_repo)
     confirmation_path = tmp_path / "confirmation"
     result = main([
         "validate-production-search-alias-plan",
@@ -210,7 +210,7 @@ def test_confirmation_cli_is_blocked_and_creates_no_bundle(
 
 
 def test_reports_are_complete_deterministic_and_formal_systems_unchanged(
-    tmp_path, production_search_alias_pre_activation_repo
+    tmp_path, production_search_alias_v1_pre_activation_repo
 ):
     protected = [
         _root() / "data/governance/governance_decisions.sqlite",
@@ -221,13 +221,13 @@ def test_reports_are_complete_deterministic_and_formal_systems_unchanged(
     before = {str(path): _hash_path(path) for path in protected}
     reports = tmp_path / "reports"
     first = validate_production_search_alias_plan(
-        repo_root=production_search_alias_pre_activation_repo, plan_id=EXPECTED_PLAN_ID,
+        repo_root=production_search_alias_v1_pre_activation_repo, plan_id=EXPECTED_PLAN_ID,
         manifest_hash=EXPECTED_MANIFEST_HASH,
         report_dir=reports, temporary_root=tmp_path / "temp-a", now=VALIDATED_AT,
     )
     first_hash = _hash_path(reports)
     second = validate_production_search_alias_plan(
-        repo_root=production_search_alias_pre_activation_repo, plan_id=EXPECTED_PLAN_ID,
+        repo_root=production_search_alias_v1_pre_activation_repo, plan_id=EXPECTED_PLAN_ID,
         manifest_hash=EXPECTED_MANIFEST_HASH,
         report_dir=reports, temporary_root=tmp_path / "temp-b", now=VALIDATED_AT,
     )
@@ -238,6 +238,6 @@ def test_reports_are_complete_deterministic_and_formal_systems_unchanged(
     assert second["formal_systems_unchanged"] is True
     assert {str(path): _hash_path(path) for path in protected} == before
     assert not (
-        production_search_alias_pre_activation_repo
+        production_search_alias_v1_pre_activation_repo
         / ".mka/search_alias_projection.json"
     ).exists()

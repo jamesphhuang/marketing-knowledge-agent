@@ -237,6 +237,86 @@ def test_target_drift_and_existing_execution_rejected(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "executed_at",
+    [EXECUTED_AT, "2036-07-30T12:00:00+08:00"],
+)
+def test_completed_execution_rejection_precedes_expiry_and_is_read_only(
+    tmp_path,
+    executed_at,
+):
+    arguments = _fixture(tmp_path)
+    source_execution = (
+        _root()
+        / "data/governance/executions"
+        / EXPECTED_PLAN_ID
+    )
+    shutil.copytree(source_execution, arguments["execution_path"])
+    protected = {
+        "managed": _hash_tree(arguments["managed_vault_root"]),
+        "formal": _sha256(arguments["formal_sqlite_path"]),
+        "decision_store": _sha256(
+            _root() / "data/governance/governance_decisions.sqlite"
+        ),
+        "execution": _hash_tree(arguments["execution_path"]),
+    }
+
+    with pytest.raises(
+        StoreDataSyncPlanV2ExecutionError,
+        match="Execution Bundle already exists|execution already completed",
+    ):
+        execute_store_data_sync_plan_v2(
+            repo_root=_root(),
+            plan_id=EXPECTED_PLAN_ID,
+            manifest_hash=EXPECTED_MANIFEST_HASH,
+            confirmation_id=EXPECTED_CONFIRMATION_ID,
+            confirmation_root_hash=EXPECTED_CONFIRMATION_ROOT_HASH,
+            executed_at=executed_at,
+            **arguments,
+        )
+
+    assert _hash_tree(arguments["managed_vault_root"]) == protected["managed"]
+    assert _sha256(arguments["formal_sqlite_path"]) == protected["formal"]
+    assert _sha256(
+        _root() / "data/governance/governance_decisions.sqlite"
+    ) == protected["decision_store"]
+    assert _hash_tree(arguments["execution_path"]) == protected["execution"]
+    assert not arguments["backup_path"].exists()
+    assert not arguments["report_dir"].exists()
+
+
+def test_tampered_completed_execution_blocks_before_expiry_or_write(tmp_path):
+    arguments = _fixture(tmp_path)
+    source_execution = (
+        _root()
+        / "data/governance/executions"
+        / EXPECTED_PLAN_ID
+    )
+    shutil.copytree(source_execution, arguments["execution_path"])
+    execution_payload = arguments["execution_path"] / "execution.json"
+    execution_payload.write_text(
+        execution_payload.read_text(encoding="utf-8") + " ",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        StoreDataSyncPlanV2ExecutionError,
+        match="Execution Bundle integrity",
+    ):
+        execute_store_data_sync_plan_v2(
+            repo_root=_root(),
+            plan_id=EXPECTED_PLAN_ID,
+            manifest_hash=EXPECTED_MANIFEST_HASH,
+            confirmation_id=EXPECTED_CONFIRMATION_ID,
+            confirmation_root_hash=EXPECTED_CONFIRMATION_ROOT_HASH,
+            executed_at="2036-07-30T12:00:00+08:00",
+            **arguments,
+        )
+
+    assert not arguments["backup_path"].exists()
+    assert not arguments["report_dir"].exists()
+
+
 def test_tampered_confirmation_and_decision_store_rejected(tmp_path):
     arguments = _fixture(tmp_path)
     copied_confirmation = tmp_path / "confirmation"

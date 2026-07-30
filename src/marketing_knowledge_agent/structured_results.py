@@ -28,6 +28,8 @@ ASSET_FIELDS = (
     ("podcast", "podcast_title", "Podcast"),
     ("news", "news_title", "新聞"),
 )
+DEFAULT_PARENT_CAP = 5
+DEFAULT_ASSET_CAP = 10
 
 
 def generate_structured_answer(
@@ -37,6 +39,8 @@ def generate_structured_answer(
     *,
     today: date = None,
     governance_index: Optional[GovernanceIndex] = None,
+    parent_cap: int = DEFAULT_PARENT_CAP,
+    asset_cap: int = DEFAULT_ASSET_CAP,
 ) -> GeneratedAnswer:
     unique_results = [] if query_plan.execution_blocked else _unique_document_results(results)
     entities, citations, warnings, removed_asset_count = _aggregate_entities(
@@ -44,6 +48,8 @@ def generate_structured_answer(
         query_plan,
         today=today,
         governance_index=governance_index,
+        parent_cap=parent_cap,
+        asset_cap=asset_cap,
     )
     if removed_asset_count:
         warnings.append(f"已依 restricted denylist 移除 {removed_asset_count} 筆結構化資產")
@@ -144,40 +150,59 @@ def _aggregate_entities(
     *,
     today: date = None,
     governance_index: Optional[GovernanceIndex] = None,
+    parent_cap: int = DEFAULT_PARENT_CAP,
+    asset_cap: int = DEFAULT_ASSET_CAP,
 ) -> Tuple[List[StructuredEntity], List[Citation], List[str], int]:
     grouped: "OrderedDict[Tuple[str, str], dict]" = OrderedDict()
     citations: List[Citation] = []
     warnings: List[str] = []
     citation_index = 1
     removed_asset_count = 0
+    asset_identities = set()
 
     for result in results:
+        if len(citations) >= asset_cap:
+            break
         metadata = result.chunk.metadata
         entity_type = "merchant" if metadata.record_type == "merchant_case" else "unknown"
         entity_name = metadata.brand_name or metadata.metric_name or metadata.title
-        key = (entity_type, entity_name)
-        state = grouped.setdefault(
-            key,
-            {
-                "entity_type": entity_type,
-                "entity_name": entity_name,
-                "merchant_handle": metadata.merchant_handle,
-                "sales_category_lv1": metadata.sales_category_lv1,
-                "sales_category_lv2": metadata.sales_category_lv2,
-                "interview_years": [],
-                "assets": [],
-            },
+        source_record_id = _source_record_id(
+            metadata.source_sheet,
+            metadata.source_row,
+            result.chunk.document_id,
         )
-        if metadata.interview_year is not None and metadata.interview_year not in state["interview_years"]:
-            state["interview_years"].append(metadata.interview_year)
+        key = (entity_type, source_record_id)
 
         for asset_type, title in _assets_for_result(result, query_plan):
+            if len(citations) >= asset_cap:
+                break
             if governance_index is not None and governance_index.check_text(title).blocked:
                 removed_asset_count += 1
                 continue
+            asset_identity = (source_record_id, asset_type)
+            if asset_identity in asset_identities:
+                continue
+            if key not in grouped and len(grouped) >= parent_cap:
+                break
+            state = grouped.setdefault(
+                key,
+                {
+                    "entity_type": entity_type,
+                    "entity_name": entity_name,
+                    "merchant_handle": metadata.merchant_handle,
+                    "sales_category_lv1": metadata.sales_category_lv1,
+                    "sales_category_lv2": metadata.sales_category_lv2,
+                    "interview_years": [],
+                    "assets": [],
+                },
+            )
+            if (
+                metadata.interview_year is not None
+                and metadata.interview_year not in state["interview_years"]
+            ):
+                state["interview_years"].append(metadata.interview_year)
             label = f"[{citation_index}]"
             citation_index += 1
-            source_record_id = _source_record_id(metadata.source_sheet, metadata.source_row, result.chunk.document_id)
             asset = StructuredAsset(
                 asset_type=asset_type,
                 title=title,
@@ -195,6 +220,7 @@ def _aggregate_entities(
                 citation_label=label,
             )
             state["assets"].append(asset)
+            asset_identities.add(asset_identity)
             citation = citation_for_result(
                 result,
                 label,

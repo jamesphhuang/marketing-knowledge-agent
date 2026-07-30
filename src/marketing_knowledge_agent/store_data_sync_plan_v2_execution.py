@@ -104,11 +104,6 @@ def execute_store_data_sync_plan_v2(
     allow_noncanonical_test_targets: bool = False,
 ) -> dict:
     _require_exact_authority(plan_id, manifest_hash, confirmation_id, confirmation_root_hash)
-    timestamp = executed_at or datetime.now().astimezone().isoformat(timespec="seconds")
-    executed = _timestamp(timestamp)
-    if executed > datetime.fromisoformat(PLAN_EXPIRES_AT):
-        raise StoreDataSyncPlanV2ExecutionError("Plan expired; Execute is forbidden")
-
     root = Path(repo_root).resolve()
     paths = {
         "confirmation": _resolve(root, confirmation_path),
@@ -124,7 +119,18 @@ def execute_store_data_sync_plan_v2(
     }
     _validate_target_paths(root, paths, allow_noncanonical_test_targets)
     if paths["execution"].exists():
+        try:
+            validate_store_data_sync_execution_bundle(paths["execution"])
+        except StoreDataSyncPlanV2ExecutionError as exc:
+            raise StoreDataSyncPlanV2ExecutionError(
+                f"Execution Bundle integrity failure: {exc}"
+            ) from exc
         raise StoreDataSyncPlanV2ExecutionError("Execution Bundle already exists; Execute cannot be rerun")
+
+    timestamp = executed_at or datetime.now().astimezone().isoformat(timespec="seconds")
+    executed = _timestamp(timestamp)
+    if executed > datetime.fromisoformat(PLAN_EXPIRES_AT):
+        raise StoreDataSyncPlanV2ExecutionError("Plan expired; Execute is forbidden")
     if require_git_ignored:
         for label in ("backup", "execution", "reports"):
             if not confirmation._git_ignored(root, paths[label]):

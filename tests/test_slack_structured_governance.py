@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import sqlite3
 from pathlib import Path
@@ -158,6 +159,55 @@ def test_shopline_payments_keeps_r32_and_legal_organic_results(
     assert first_reply["text"] == second_reply["text"]
 
 
+def test_formal_shopline_caps_apply_after_asset_expansion(
+    formal_slack_snapshot,
+):
+    _, answer = _slack_query(formal_slack_snapshot, "SHOPLINE Payments")
+    structured = answer.generated.structured_result
+
+    assert structured is not None
+    assert structured.total_entities == 5
+    assert structured.total_assets == 10
+    assert len(answer.citations) == 10
+    assert len({entity.entity_name for entity in structured.matched_entities}) == 5
+    assert all(entity.assets for entity in structured.matched_entities)
+    assert _structured_asset_identities(answer) == set(_citation_asset_identities(answer))
+    assert len(_citation_asset_identities(answer)) == len(
+        set(_citation_asset_identities(answer))
+    )
+
+
+@pytest.mark.parametrize(
+    "projection_state",
+    [
+        "missing",
+        "malformed",
+        "unsupported_schema",
+        "tampered",
+        "stale_decision_store",
+        "stale_store_sync",
+        "duplicate_alias",
+    ],
+)
+def test_alias_loader_failure_preserves_governed_structured_caps(
+    formal_slack_snapshot,
+    projection_state,
+):
+    _set_projection_state(formal_slack_snapshot["projection_path"], projection_state)
+
+    reply, answer = _slack_query(formal_slack_snapshot, "SHOPLINE Payments")
+    structured = answer.generated.structured_result
+
+    assert structured is not None
+    assert 0 < structured.total_entities <= 5
+    assert 0 < structured.total_assets <= 10
+    assert len(answer.citations) == structured.total_assets
+    assert len(answer.citations) <= 10
+    assert "累計總GMV" not in reply["text"]
+    assert not _has_source(answer, R15_SHEET, 15)
+    assert _structured_asset_identities(answer) == set(_citation_asset_identities(answer))
+
+
 @pytest.mark.parametrize("query", ["SL", "SLPP", "SLP123"])
 def test_negative_alias_queries_do_not_resolve_r32(
     formal_slack_snapshot,
@@ -312,6 +362,84 @@ def _merchant_parent_ids(answer):
         if citation.source_row not in rows:
             rows.append(citation.source_row)
     return rows
+
+
+def _structured_asset_identities(answer):
+    structured = answer.generated.structured_result
+    assert structured is not None
+    return {
+        (asset.source_sheet, asset.source_row, asset.asset_type, asset.title)
+        for entity in structured.matched_entities
+        for asset in entity.assets
+    }
+
+
+def _citation_asset_identities(answer):
+    return [
+        (
+            citation.source_sheet,
+            citation.source_row,
+            citation.chunk_id.rsplit(":", 1)[-1],
+            citation.title,
+        )
+        for citation in answer.citations
+    ]
+
+
+def _set_projection_state(path, state):
+    if state == "missing":
+        path.unlink()
+        return
+    if state == "malformed":
+        path.write_text("{", encoding="utf-8")
+        return
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if state == "unsupported_schema":
+        payload["schema_version"] = 2
+    elif state == "tampered":
+        payload["aliases"][0]["raw_alias"] = "tampered"
+        _write_projection(path, payload, refresh_hash=False)
+        return
+    elif state == "stale_decision_store":
+        payload["authority"]["decision_store_sha256"] = "0" * 64
+    elif state == "stale_store_sync":
+        payload["authority"]["store_sync_execution_root_hash"] = "0" * 64
+    elif state == "duplicate_alias":
+        payload["aliases"].append(dict(payload["aliases"][0]))
+        payload["aliases"].sort(
+            key=lambda row: (
+                row["normalized_alias"],
+                row["parent_record_id"],
+                row["raw_alias"],
+            )
+        )
+    else:
+        raise AssertionError(f"unsupported projection state: {state}")
+    _write_projection(path, payload, refresh_hash=True)
+
+
+def _write_projection(path, payload, *, refresh_hash):
+    if refresh_hash:
+        scope = {key: value for key, value in payload.items() if key != "projection_hash"}
+        payload["projection_hash"] = hashlib.sha256(
+            json.dumps(
+                scope,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    path.write_text(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _agentic_answer(citation):

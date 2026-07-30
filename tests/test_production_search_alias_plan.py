@@ -21,9 +21,6 @@ from marketing_knowledge_agent.production_search_alias_plan import (
 
 
 CREATED_AT = "2026-07-22T18:00:00+08:00"
-PRE_ACTIVATION_ALIAS_TARGET = Path(
-    ".mka/search_alias_projection.preactivation-fixture.json"
-)
 
 
 def _root() -> Path:
@@ -41,12 +38,12 @@ def _hash_path(path: Path) -> str:
 
 
 @pytest.fixture(scope="module")
-def result(tmp_path_factory):
+def result(tmp_path_factory, production_search_alias_v1_pre_activation_repo):
     path = tmp_path_factory.mktemp("production-search-alias-plan")
     return generate_production_search_alias_plan(
-        repo_root=_root(), output_dir=path / "reports",
+        repo_root=production_search_alias_v1_pre_activation_repo,
+        output_dir=path / "reports",
         temporary_root=path / "temporary", created_at=CREATED_AT,
-        alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
     )
 
 
@@ -167,7 +164,7 @@ def test_projection_strategy_is_incremental_without_schema_migration(result):
 
 
 def test_unconfirmed_schema_migration_requirement_blocks_plan(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, production_search_alias_v1_pre_activation_repo
 ):
     original = module._selected_strategy
 
@@ -179,48 +176,51 @@ def test_unconfirmed_schema_migration_requirement_blocks_plan(
 
     monkeypatch.setattr(module, "_selected_strategy", migration_strategy)
     blocked = generate_production_search_alias_plan(
-        repo_root=_root(), output_dir=tmp_path / "reports",
+        repo_root=production_search_alias_v1_pre_activation_repo,
+        output_dir=tmp_path / "reports",
         temporary_root=tmp_path / "temporary", created_at=CREATED_AT,
-        alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
     )
     assert blocked["execution_blocked"] is True
     assert "schema_migration_not_required" in blocked["blocker_reasons"]
 
 
-def test_exact_database_sha_and_absent_target_fail_closed(tmp_path):
+def test_exact_database_sha_and_absent_target_fail_closed(
+    tmp_path, production_search_alias_v1_pre_activation_repo
+):
     wrong = tmp_path / "wrong.sqlite"
     wrong.write_bytes(b"not the formal decision store")
     with pytest.raises(ProductionSearchAliasPlanError, match="SHA-256"):
         generate_production_search_alias_plan(
-            repo_root=_root(), output_dir=tmp_path / "reports-a",
+            repo_root=production_search_alias_v1_pre_activation_repo,
+            output_dir=tmp_path / "reports-a",
             temporary_root=tmp_path / "temporary-a", decision_store_path=wrong,
-            alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
             created_at=CREATED_AT,
         )
     target = tmp_path / "aliases.json"
     target.write_text("{}", encoding="utf-8")
     with pytest.raises(ProductionSearchAliasPlanError, match="already exists"):
         generate_production_search_alias_plan(
-            repo_root=_root(), output_dir=tmp_path / "reports-b",
+            repo_root=production_search_alias_v1_pre_activation_repo,
+            output_dir=tmp_path / "reports-b",
             temporary_root=tmp_path / "temporary-b", alias_target_path=target,
             created_at=CREATED_AT,
         )
 
 
 def test_plan_identity_reports_and_rerun_are_deterministic(
-    tmp_path
+    tmp_path, production_search_alias_v1_pre_activation_repo
 ):
     reports = tmp_path / "reports"
     first = generate_production_search_alias_plan(
-        repo_root=_root(), output_dir=reports,
+        repo_root=production_search_alias_v1_pre_activation_repo,
+        output_dir=reports,
         temporary_root=tmp_path / "temporary-a", created_at=CREATED_AT,
-        alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
     )
     first_hash = _hash_path(reports)
     second = generate_production_search_alias_plan(
-        repo_root=_root(), output_dir=reports,
+        repo_root=production_search_alias_v1_pre_activation_repo,
+        output_dir=reports,
         temporary_root=tmp_path / "temporary-b", created_at=CREATED_AT,
-        alias_target_path=PRE_ACTIVATION_ALIAS_TARGET,
     )
     assert first["plan_id"] == second["plan_id"]
     assert first["manifest_hash"] == second["manifest_hash"]
@@ -231,14 +231,21 @@ def test_plan_identity_reports_and_rerun_are_deterministic(
 
 
 def test_cli_is_plan_only_and_does_not_require_slack_token(
-    tmp_path, monkeypatch, capsys
+    tmp_path,
+    monkeypatch,
+    capsys,
+    production_search_alias_v1_pre_activation_repo,
 ):
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+    monkeypatch.chdir(production_search_alias_v1_pre_activation_repo)
     assert main([
         "plan-production-search-aliases",
         "--output", str(tmp_path / "reports"),
         "--temporary-root", str(tmp_path / "temporary"),
         "--created-at", CREATED_AT,
-    ]) == 2
-    assert "already exists" in capsys.readouterr().err
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["execution_blocked"] is False
+    assert payload["production_search_activated"] is False
+    assert payload["slack_api_called"] is False
