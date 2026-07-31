@@ -14,7 +14,13 @@ from marketing_knowledge_agent.chunking import chunk_documents
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.indexing import SQLiteIndex
 from marketing_knowledge_agent.llm_generation import append_llm_audit
-from marketing_knowledge_agent.models import Citation, Document, DocumentMetadata, GeneratedAnswer
+from marketing_knowledge_agent.models import (
+    Citation,
+    Document,
+    DocumentMetadata,
+    GeneratedAnswer,
+    StructuredRetrievalResult,
+)
 from marketing_knowledge_agent.query_gating import RESTRICTED_QUERY_REFUSAL
 from marketing_knowledge_agent.query_gating import append_denylist_query_audit
 from marketing_knowledge_agent.slack_interface import (
@@ -132,6 +138,89 @@ def test_long_answer_only_truncates_body_and_preserves_citations_and_warnings():
     assert "A" * 100 not in text
     assert "Source A" in text and "Source B" in text
     assert all(warning in text for warning in warnings)
+
+
+def test_slack_abstention_reply_is_single_line_without_titles():
+    answer = _agentic_answer(
+        body="相關度不足，未產生事實性回答。最接近的內容：\n- Unrelated Brand A\n- Unrelated Brand B",
+        citations=[],
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=2500)
+
+    assert text == "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
+    assert "Unrelated Brand" not in text
+    assert "\n" not in text
+
+
+def test_slack_denylist_refusal_unchanged():
+    answer = _agentic_answer(
+        body=RESTRICTED_QUERY_REFUSAL,
+        citations=[],
+        trace_mode="refused",
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=2500)
+
+    assert text == RESTRICTED_QUERY_REFUSAL
+
+
+def test_slack_unsupported_constraint_explains_condition_without_citations():
+    unsupported = {
+        "field": "publication_status",
+        "value": "published",
+        "operator": "exact",
+        "hard_filter": True,
+        "support_status": "unsupported",
+        "reason": "asset-level publication status is not available",
+    }
+    structured = StructuredRetrievalResult(
+        query_plan={
+            "hard_filters": [unsupported],
+            "unsupported_constraints": [unsupported],
+            "abstain_reason": "unsupported_hard_constraint",
+        },
+        unsupported_constraints=[unsupported],
+        execution_blocked=True,
+        abstained=True,
+        abstain_reason="unsupported_hard_constraint",
+    )
+    answer = _agentic_answer(
+        body=(
+            "目前資料尚不支援以下搜尋條件：\n"
+            "- 上線狀態\n\n"
+            "目前可使用品牌名稱、Handle、Sales Category、採訪年份、內容標籤與內容類型進行搜尋。"
+        ),
+        citations=[],
+        structured_result=structured,
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=2500)
+
+    assert "目前資料尚不支援以下搜尋條件" in text
+    assert "上線狀態" in text
+    assert "📚 來源" not in text
+
+
+def test_slack_body_strips_markdown_tables():
+    answer = _agentic_answer(
+        body=(
+            "[1] # Example heading ## Content Assets | Asset | Title | "
+            "| --- | --- | | Article | Example case study |"
+        ),
+        citations=[_citation("Public source")],
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=2500)
+
+    assert "Example heading" in text
+    assert "Content Assets" in text
+    assert "Article" in text
+    assert "Example case study" in text
+    assert "| --- |" not in text
+    assert "# Example" not in text
+    assert "## Content Assets" not in text
+    assert not any(line.lstrip().startswith("#") for line in text.splitlines())
 
 
 def test_startup_rejects_empty_channel_allowlist_before_slack_import(tmp_path):
@@ -264,18 +353,25 @@ class FakeSlackClient:
         self.messages.append(reply)
 
 
-def _agentic_answer(body="answer", citations=None, warnings=None):
+def _agentic_answer(
+    body="answer",
+    citations=None,
+    warnings=None,
+    trace_mode="fast_path",
+    structured_result=None,
+):
     generated = GeneratedAnswer(
         question="question",
         answer=body,
         citations=citations or [],
         warnings=warnings or [],
         governance_checked=True,
+        structured_result=structured_result,
     )
     return AgenticAnswer(
         generated=generated,
         trace=AgentTrace(
-            mode="fast_path",
+            mode=trace_mode,
             analysis=QueryAnalysis(question_type="simple_lookup", needs_agent=False, reasons=[]),
             plan=[],
             observations=[],

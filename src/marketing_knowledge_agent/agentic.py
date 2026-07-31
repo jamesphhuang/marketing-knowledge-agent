@@ -13,6 +13,7 @@ from .governance import (
 )
 from .indexing import SQLiteIndex
 from .models import GeneratedAnswer, SearchFilters, SearchResult
+from .query_planning import TypedQueryPlan
 
 
 SearchFn = Callable[[str, Path, Optional[SearchFilters], int, str], List[SearchResult]]
@@ -136,21 +137,28 @@ def agentic_ask(
     mode: str = "hybrid",
     governance_index: Optional[GovernanceIndex] = None,
     generation_fn: GenerationFn = generate_answer,
+    typed_query_plan: Optional[TypedQueryPlan] = None,
 ) -> AgenticAnswer:
     filters = filters or SearchFilters()
     analysis = analyze_question(question)
 
-    if not analysis.needs_agent:
+    if not analysis.needs_agent or (
+        typed_query_plan is not None and typed_query_plan.query_mode == "structured_lookup"
+    ):
         generated = ask_fn(question, db_path, filters, limit, mode)
         generated = apply_governance_to_answer(generated, governance_index)
         trace = AgentTrace(
-            mode="fast_path",
+            mode="structured_lookup" if typed_query_plan and typed_query_plan.query_mode == "structured_lookup" else "fast_path",
             analysis=analysis,
             plan=[],
             observations=[],
             reflection=AgentReflection(
                 sufficient=bool(generated.citations),
-                notes=["simple_lookup 使用既有單步 RAG 流程。"],
+                notes=[
+                    "structured lookup 使用 typed hard constraints。"
+                    if typed_query_plan and typed_query_plan.query_mode == "structured_lookup"
+                    else "simple_lookup 使用既有單步 RAG 流程。"
+                ],
             ),
         )
         return AgenticAnswer(generated=generated, trace=trace)

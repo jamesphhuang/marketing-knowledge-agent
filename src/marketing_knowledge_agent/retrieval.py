@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import List, Optional
 
 from .embeddings import cosine_similarity, embed_text
+from .governance import metadata_allows_written_external_use
 from .indexing import SQLiteIndex
 from .models import Chunk, DocumentMetadata, NON_RETRIEVABLE_RECORD_TYPES, SearchFilters, SearchResult
+from .query_planning import TypedQueryPlan, metadata_matches_query_plan
 
 
 class SQLiteRetriever:
@@ -18,12 +20,14 @@ class SQLiteRetriever:
         filters: Optional[SearchFilters] = None,
         limit: int = 5,
         mode: str = "hybrid",
+        query_plan: Optional[TypedQueryPlan] = None,
     ) -> List[SearchResult]:
         filters = filters or SearchFilters()
         indexed_chunks = [
             indexed_chunk
             for indexed_chunk in self.index.load_chunks()
             if matches_filters(indexed_chunk.chunk.metadata, filters)
+            and metadata_matches_query_plan(indexed_chunk.chunk.metadata, query_plan)
         ]
 
         keyword_scores = self.index.keyword_scores(query) if mode in {"keyword", "hybrid"} else {}
@@ -46,7 +50,7 @@ class SQLiteRetriever:
             else:
                 score = (0.45 * keyword_score) + (0.55 * vector_score)
 
-            if score > 0 or not filters.is_empty():
+            if score > 0 or not filters.is_empty() or (query_plan and query_plan.hard_constraints):
                 results.append(
                     SearchResult(
                         chunk=chunk,
@@ -61,6 +65,8 @@ class SQLiteRetriever:
 
 def matches_filters(metadata: DocumentMetadata, filters: SearchFilters) -> bool:
     if metadata.record_type in NON_RETRIEVABLE_RECORD_TYPES:
+        return False
+    if filters.intent == "external" and not metadata_allows_written_external_use(metadata):
         return False
     if filters.intent == "external" and metadata.record_type == "pending_metric":
         return False

@@ -25,8 +25,26 @@ from .llm import (
 )
 from .llm_generation import generate_answer_with_llm
 from .models import GeneratedAnswer, SearchFilters, SearchResult
+from .query_planning import (
+    QueryCatalog,
+    TypedQueryPlan,
+    allow_semantic_fallback,
+    build_query_plan,
+    metadata_matches_query_plan,
+)
 from .reranking import rerank_results
 from .retrieval import SQLiteRetriever
+from .retrieval import matches_filters
+from .search_aliases import (
+    DEFAULT_ALIAS_PROJECTION_PATH,
+    EXPECTED_ALIAS_AUTHORITY,
+    EXPECTED_ALIAS_BINDING,
+    alias_results_for_parent_ids,
+    load_alias_projection,
+    merge_rank_and_cap_alias_results,
+    resolve_exact_alias_parent_ids,
+)
+from .structured_results import generate_structured_answer
 from .query_gating import (
     DEFAULT_QUERY_AUDIT_LOG,
     apply_intent_gating,
@@ -63,11 +81,36 @@ def search_index(
     filters: Optional[SearchFilters] = None,
     limit: int = 5,
     mode: str = "hybrid",
+    query_plan: Optional[TypedQueryPlan] = None,
+    alias_projection_path: Optional[Path] = DEFAULT_ALIAS_PROJECTION_PATH,
 ) -> List[SearchResult]:
-    filters = apply_intent_gating(filters or SearchFilters())
+    requested_filters = filters or SearchFilters()
+    filters = apply_intent_gating(requested_filters)
+    query_plan = query_plan or build_index_query_plan(query, db_path, requested_filters)
+    if query_plan.execution_blocked:
+        return []
     retriever = SQLiteRetriever(Path(db_path))
-    initial_results = retriever.search(query=query, filters=filters, limit=max(limit * 3, limit), mode=mode)
-    return rerank_results(query, initial_results, filters)[:limit]
+    initial_results = retriever.search(
+        query=query,
+        filters=filters,
+        limit=max(limit * 3, limit),
+        mode=mode,
+        query_plan=query_plan,
+    )
+    ranked = rerank_results(query, initial_results, filters)
+    if query_plan.query_mode == "structured_lookup" or query_plan.hard_constraints:
+        ranked = _dedupe_document_results(ranked)
+    alias_owner_ids = _exact_alias_owner_ids(
+        query, query_plan, alias_projection_path
+    )
+    if not alias_owner_ids:
+        return ranked[:limit]
+    alias_results = alias_results_for_parent_ids(
+        db_path, alias_owner_ids, filters, query_plan
+    )
+    return merge_rank_and_cap_alias_results(
+        alias_results, ranked, parent_cap=5, asset_cap=10
+    )
 
 
 def ask_index(
@@ -85,6 +128,7 @@ def ask_index(
     llm_provider: Optional[LLMProvider] = None,
     dry_run_llm: bool = False,
     llm_audit_log_path: Path = Path("reports/audit_log.csv"),
+    query_plan: Optional[TypedQueryPlan] = None,
 ) -> GeneratedAnswer:
     filters = filters or SearchFilters()
     governance_index, load_warning = resolve_governance_index(governance_index, restricted_customers_path)
@@ -107,22 +151,49 @@ def ask_index(
     if provider_name != "mock" and not dry_run_llm:
         validate_provider_policy(resolved_llm_config, provider_name)
 
-    results = search_index(question, db_path=db_path, filters=filters, limit=limit, mode=mode)
-    results, removed_count = filter_restricted_results(results, governance_index)
-    internal_result_count = _internal_result_count(question, db_path, filters, limit, mode) if not results else 0
-    answer = generate_answer_with_llm(
-        question,
-        results,
-        filters=filters,
-        provider_name=provider_name,
-        config=resolved_llm_config,
-        provider=llm_provider,
-        dry_run=dry_run_llm,
-        citation_limit=min(3, limit),
-        internal_result_count=internal_result_count,
-        audit_log_path=llm_audit_log_path,
-        command="ask",
+    query_plan = query_plan or build_index_query_plan(question, db_path, filters)
+    alias_owner_ids = _exact_alias_owner_ids(
+        question, query_plan, DEFAULT_ALIAS_PROJECTION_PATH
     )
+    retrieval_limit = (
+        max(limit, SQLiteIndex(Path(db_path)).counts()["chunks"])
+        if query_plan.query_mode == "structured_lookup"
+        else limit
+    )
+    results = search_index(
+        question,
+        db_path=db_path,
+        filters=filters,
+        limit=retrieval_limit,
+        mode=mode,
+        query_plan=query_plan,
+    )
+    results, removed_count = filter_restricted_results(results, governance_index)
+    internal_result_count = _internal_result_count(
+        question, db_path, filters, limit, mode, query_plan=query_plan
+    ) if not results else 0
+    if query_plan.query_mode == "structured_lookup" or alias_owner_ids:
+        answer = generate_structured_answer(
+            question,
+            results,
+            query_plan,
+            governance_index=governance_index,
+        )
+    else:
+        answer = generate_answer_with_llm(
+            question,
+            results,
+            filters=filters,
+            provider_name=provider_name,
+            config=resolved_llm_config,
+            provider=llm_provider,
+            dry_run=dry_run_llm,
+            citation_limit=min(3, limit),
+            internal_result_count=internal_result_count,
+            audit_log_path=llm_audit_log_path,
+            command="ask",
+        )
+        answer.query_plan = query_plan.to_dict()
     answer = apply_governance_to_answer(answer, governance_index)
     _append_removal_warning(answer, removed_count)
     _append_warning(answer, load_warning)
@@ -169,6 +240,8 @@ def agent_ask(
     if provider_name != "mock" and not dry_run_llm:
         validate_provider_policy(resolved_llm_config, provider_name)
 
+    query_plan = build_index_query_plan(question, db_path, filters)
+
     def configured_ask(question, db_path, filters, limit, mode):
         return ask_index(
             question,
@@ -182,6 +255,17 @@ def agent_ask(
             llm_provider=llm_provider,
             dry_run_llm=dry_run_llm,
             llm_audit_log_path=llm_audit_log_path,
+            query_plan=query_plan,
+        )
+
+    def configured_search(question, db_path, filters, limit, mode):
+        return search_index(
+            question,
+            db_path,
+            filters=filters,
+            limit=limit,
+            mode=mode,
+            query_plan=query_plan,
         )
 
     def configured_generation(question, results, citation_limit, filters, internal_result_count):
@@ -202,13 +286,14 @@ def agent_ask(
     answer = agentic_ask(
         question=question,
         db_path=db_path,
-        search_fn=search_index,
+        search_fn=configured_search,
         ask_fn=configured_ask,
         filters=filters,
         limit=limit,
         mode=mode,
         governance_index=governance_index,
         generation_fn=configured_generation,
+        typed_query_plan=query_plan,
     )
     _append_warning(answer.generated, load_warning)
     enforce_external_citations(answer.generated, filters)
@@ -263,6 +348,7 @@ def _internal_result_count(
     filters: SearchFilters,
     limit: int,
     mode: str,
+    query_plan: Optional[TypedQueryPlan] = None,
 ) -> int:
     if filters.intent != "external":
         return 0
@@ -276,8 +362,115 @@ def _internal_result_count(
         filters=internal_filters,
         limit=chunk_limit,
         mode=mode,
+        query_plan=query_plan,
     )
     return len({result.chunk.document_id for result in results})
+
+
+def build_index_query_plan(
+    query: str,
+    db_path: Path,
+    filters: Optional[SearchFilters] = None,
+) -> TypedQueryPlan:
+    chunks = SQLiteIndex(Path(db_path)).load_chunks()
+    catalog = QueryCatalog.from_metadata(item.chunk.metadata for item in chunks)
+    plan = build_query_plan(query, catalog)
+    if filters is not None and not filters.is_empty():
+        plan = allow_semantic_fallback(plan)
+    return plan
+
+
+def explain_query(
+    query: str,
+    db_path: Path,
+    filters: Optional[SearchFilters] = None,
+    limit: int = 20,
+    mode: str = "hybrid",
+    governance_index: Optional[GovernanceIndex] = None,
+) -> dict:
+    if governance_index is not None and governance_index.check_text(query).blocked:
+        return {
+            "query_plan": {
+                "raw_query": "[restricted query]",
+                "normalized_query": "[restricted query]",
+                "query_mode": "refused",
+                "constraints": [],
+                "hard_filters": [],
+                "ambiguity_flags": [],
+                "parser_warnings": ["查詢在規劃前命中 restricted denylist。"],
+                "abstain_reason": "restricted_query",
+            },
+            "candidate_count_before_filtering": 0,
+            "candidate_count_after_filtering": 0,
+            "governance_removed_count": 0,
+            "final_entity_count": 0,
+            "final_asset_count": 0,
+            "abstain_reason": "restricted_query",
+        }
+    effective_filters = apply_intent_gating(filters or SearchFilters())
+    query_plan = build_index_query_plan(query, db_path, filters)
+    indexed_chunks = SQLiteIndex(Path(db_path)).load_chunks()
+    before_documents = {
+        item.chunk.document_id
+        for item in indexed_chunks
+        if matches_filters(item.chunk.metadata, effective_filters)
+    }
+    after_documents = {
+        item.chunk.document_id
+        for item in indexed_chunks
+        if matches_filters(item.chunk.metadata, effective_filters)
+        and metadata_matches_query_plan(item.chunk.metadata, query_plan)
+    }
+    results = search_index(
+        query,
+        db_path=db_path,
+        filters=effective_filters,
+        limit=limit,
+        mode=mode,
+        query_plan=query_plan,
+    )
+    filtered_results, governance_removed_count = filter_restricted_results(results, governance_index)
+    structured = generate_structured_answer(
+        query,
+        filtered_results,
+        query_plan,
+        governance_index=governance_index,
+    )
+    return {
+        "query_plan": query_plan.to_dict(),
+        "unsupported_constraints": [item.to_dict() for item in query_plan.unsupported_constraints],
+        "ambiguous_constraints": [item.to_dict() for item in query_plan.ambiguous_constraints],
+        "invalid_constraints": [item.to_dict() for item in query_plan.invalid_constraints],
+        "execution_blocked": query_plan.execution_blocked,
+        "candidate_count_before_filtering": len(before_documents),
+        "candidate_count_after_filtering": len(after_documents),
+        "governance_removed_count": governance_removed_count,
+        "final_entity_count": structured.structured_result.total_entities,
+        "final_asset_count": structured.structured_result.total_assets,
+        "abstain_reason": structured.structured_result.abstain_reason,
+    }
+
+
+def _dedupe_document_results(results: List[SearchResult]) -> List[SearchResult]:
+    deduped: List[SearchResult] = []
+    seen = set()
+    for result in results:
+        if result.chunk.document_id in seen:
+            continue
+        seen.add(result.chunk.document_id)
+        deduped.append(result)
+    return deduped
+
+
+def _exact_alias_owner_ids(
+    query: str,
+    query_plan: TypedQueryPlan,
+    alias_projection_path: Optional[Path],
+) -> List[str]:
+    projection, _alias_diagnostic = load_alias_projection(
+        alias_projection_path, EXPECTED_ALIAS_AUTHORITY, EXPECTED_ALIAS_BINDING
+    )
+    return resolve_exact_alias_parent_ids(query, query_plan, projection)
 
 
 def _refused_agentic_answer(generated: GeneratedAnswer) -> AgenticAnswer:

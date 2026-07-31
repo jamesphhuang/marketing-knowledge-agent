@@ -27,6 +27,37 @@ MERCHANT_CASE_RISK_TERMS = (
 )
 RESTRICTED_CUSTOMER_WARNING = "不可對外引用 / 不可公開提及：命中 restricted customer denylist，請人工確認。"
 RESTRICTED_RESULT_REMOVAL_WARNING = "已依 restricted denylist 移除 {count} 筆來源"
+WRITTEN_BLOCKING_NOTE_MARKERS = (
+    "不留文字紀錄",
+    "不可書面",
+    "禁止書面",
+    "僅用於口頭",
+    "只用於口頭",
+)
+
+
+def metadata_allows_written_external_use(metadata: object) -> bool:
+    fields_set = getattr(metadata, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(metadata, "__fields_set__", None)
+    if fields_set is not None and "can_quote_externally" not in fields_set:
+        return False
+    if getattr(metadata, "can_quote_externally", None) is not True:
+        return False
+    if getattr(metadata, "data_classification", None) != "public":
+        return False
+    if getattr(metadata, "status", None) != "published":
+        return False
+    if getattr(metadata, "record_type", None) == "pending_metric":
+        return False
+    if getattr(metadata, "can_enter_content_index", True) is not True:
+        return False
+
+    channels = set(getattr(metadata, "allowed_exposure_channels", None) or [])
+    if channels and channels <= {"verbal_briefing"}:
+        return False
+    restricted_note = str(getattr(metadata, "restricted_note", None) or "").casefold()
+    return not any(marker in restricted_note for marker in WRITTEN_BLOCKING_NOTE_MARKERS)
 
 
 @dataclass(frozen=True)

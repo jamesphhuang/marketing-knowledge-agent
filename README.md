@@ -20,6 +20,9 @@ Marketing Knowledge Agent 是一個預設離線的 Python RAG prototype，用來
 - Metadata schema v0.2 支援 Excel 來源的 merchant case、public metric、pending metric、restricted customer denylist 與 handle mapping。
 - Restricted customer 與 handle mapping 是治理/正規化資料，不進一般向量檢索 citation。
 - 內建 mock vault 與 evaluation cases。
+- 欄位感知 query planning：名稱、Handle、採訪年份、Category、Tag 與 asset type 可轉成 typed hard constraints。
+- Structured lookup 不會用其他品牌補滿 Top K；CLI、agentic 與 Slack 共用相同 candidate selection。
+- 不可執行的欄位或 operator 會 fail closed；AND 查詢不會只執行其中可支援的條件。
 
 ## 安裝
 
@@ -53,6 +56,44 @@ python3 -m venv .venv
 ```bash
 .venv/bin/mka agent-ask "比較 Product A 製造業 pricing case study 與 ROI blog" --product product-a --show-trace
 ```
+
+檢視安全的 Typed Query Plan 與候選數量（不輸出正文或 source path）：
+
+```bash
+.venv/bin/mka explain-query "2025 居家生活 已上線 影片" \
+  --db .mka/content_index.sqlite \
+  --intent external \
+  --restricted-customers reports/excel_preview/restricted_customers.json
+```
+
+欄位精確查找範例：
+
+```bash
+.venv/bin/mka ask "dachun" --db .mka/content_index.sqlite --intent external
+.venv/bin/mka ask "提供我三風製麵的內容" --db .mka/content_index.sqlite --intent external
+.venv/bin/mka ask "我們有什麼居家生活品牌相關內容？" \
+  --db .mka/content_index.sqlite --intent external
+```
+
+Query plan 的 hard constraints 預設使用 AND。找不到交集時不會自動改成 OR、移除年份／分類／資產類型，或加入低相關來源。
+
+### 欄位搜尋支援範圍
+
+Runtime 支援狀態以 `query_planning.RUNTIME_SUPPORT_MATRIX` 為準。Parser 能辨識或 Query Plan 能表達某欄位，不代表 formal data 已具備資料，也不代表 Slack 可正式使用。
+
+| 欄位 | Parser / Plan | Executor | Formal data | Slack |
+| --- | --- | --- | --- | --- |
+| 商家名稱、Handle | 支援 | 支援 | 有 | 可用 |
+| Sales Category LV1 / LV2 | 支援 | 支援 | 有 | 可用 |
+| 採訪年份與年份區間 | 支援 | 支援 | 有 | 可用 |
+| exact content tag、asset type | 支援 | 支援 | 有 | 可用 |
+| partner name | 可表達 | 不支援 | 無 | fail closed |
+| interview date / status | 可辨識、可表達 | 不支援 | 無 | fail closed |
+| review status | 可辨識、可表達 | 不支援 | 無 | fail closed |
+| asset URL / published date | 可辨識、可表達 | 不支援 | 無 | fail closed |
+| asset publication status | 可辨識、可表達 | 不支援 | 無 | fail closed |
+
+完整日期會先被辨識為 date constraint，不會降級成採訪年份。`status` 是 record-level 狀態，不會被當作每個 article/video/podcast/news 的上線狀態；缺少 asset-level 狀態時顯示「資料未提供」。後續需以 Asset-Level Metadata Enrichment Sprint 補齊各素材的 URL、published date 與 publication status，再開放這些條件。
 
 ### LLM 雙鑰政策閘門
 
@@ -102,6 +143,74 @@ python3 -m venv .venv
   --output reports/excel_preview \
   --captured-date 2026-07-01
 ```
+
+盤點 asset-level metadata 候選來源（唯讀，不修改 Vault 或 formal index）：
+
+```bash
+.venv/bin/mka asset-metadata-preview \
+  --preview-dir reports/excel_preview \
+  --workbook "reports/excel_preview/MKT 內容產出資料庫_店家_夥伴案例_對外數據-20260708.xlsx" \
+  --vault obsidian_vault \
+  --db .mka/content_index.sqlite \
+  --decisions reports/excel_preview/review_decisions_template.csv \
+  --output reports/asset_metadata_preview
+```
+
+此命令以 `source_sheet + source_row + asset_type` 建立穩定的 asset ID，抽取 Excel 儲存格 hyperlink 作為 URL evidence，並以 Vault、SQLite 與人工 decision 做交叉盤點。它只產出 inventory、enrichment、conflict、missing 與人工審核模板；不會套用 proposal，也不會因 URL 存在而推定已發布。`asset_url`、`published_at`、`publication_status`、`partner_name` 等查詢在人工核准、schema migration 與 formal index rebuild 前仍維持 fail closed。
+
+驗證人工填寫的 asset URL / canonical URL 決策（唯讀，不套用）：
+
+```bash
+.venv/bin/mka validate-asset-review-decisions \
+  --decisions reports/asset_metadata_preview/human_review_template.csv \
+  --inventory reports/asset_metadata_preview/asset_metadata_inventory.csv \
+  --enrichment reports/asset_metadata_preview/asset_metadata_enrichment_preview.csv \
+  --output reports/asset_metadata_review_validation
+```
+
+此命令以 `(asset_id, field)` 對回原始 enrichment proposal，驗證主鍵守恆、decision enum、reviewer、ISO reviewed_at、URL 格式、治理 blocker 與 CSV injection。合法 decision 為 `approve`、`reject`、`needs_update`、`exclude_asset`、`manual_review`；空白不是 approve。現有模板沒有 replacement value 欄位，因此不得直接改寫 `proposed_value`。輸出的 `ready_for_apply_preview` 只是驗證資格，不代表已套用，也不會啟用 published date/status、interview/review status 或 partner 查詢。
+
+預覽已核准 asset URL 決策未來可能造成的 schema／Vault／index 差異：
+
+```bash
+.venv/bin/mka apply-asset-review-decisions --dry-run \
+  --decisions reports/asset_metadata_preview/human_review_template.csv \
+  --inventory reports/asset_metadata_preview/asset_metadata_inventory.csv \
+  --enrichment reports/asset_metadata_preview/asset_metadata_enrichment_preview.csv \
+  --validation-dir reports/asset_metadata_review_validation \
+  --workbook "reports/excel_preview/MKT 內容產出資料庫_店家_夥伴案例_對外數據-20260708.xlsx" \
+  --output reports/asset_metadata_apply_preview
+```
+
+`apply-asset-review-decisions` 是獨立於 merchant `apply-review-decisions` 的 preview-only contract，沒有正式 Apply 模式。它會在暫存目錄重新驗證 decision，確認 persisted validation reports 未過期，只讓 `ready_for_apply_preview + approve` 的 `asset_url`／`canonical_url` 進 proposed diff；governance-blocked assets 只會出現在 blocked report。正式儲存建議為一個 asset 一筆的 flat managed record，再衍生 SQLite `content_assets` table；不可把多個 asset URL 塞入 parent record-level `canonical_url`。
+
+建立正式 Asset Metadata Apply Plan（本階段只有 plan 可用）：
+
+```bash
+.venv/bin/mka apply-asset-metadata --plan \
+  --apply-preview reports/asset_metadata_apply_preview/asset_apply_preview.csv \
+  --blocked-preview reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv \
+  --inventory reports/asset_metadata_preview/asset_metadata_inventory.csv \
+  --parent-records reports/excel_preview/merchant_cases.json \
+  --vault obsidian_vault \
+  --db .mka/content_index.sqlite \
+  --output reports/asset_metadata_apply_plan
+```
+
+Plan 會以 checksum 綁定 decisions、preview、managed Vault 與 formal SQLite，產生 deterministic `PLAN_ID`、`MKA/managed/assets/{sha256(asset_id)}.md` 路徑、`content_assets` migration、parent join、tags lookup、backup、atomic swap 與 rollback 設計。`content_tags` 不會複製到 asset record，只能由 `asset.record_id` 回查正式 parent；parent 缺失或 governance 不允許時 fail closed／省略 tags。`--confirm PLAN_ID` 與 `--execute PLAN_ID` 目前保留為 contract 並一律拒絕執行，不存在 skip-confirm。
+
+目前正式 plan 雖維持 206 eligible assets、412 approved URL fields 與 16 governance exclusions，但其中 9 個 assets（5 個 parents）尚無 managed Vault／formal SQLite parent，因此結論為 `C. Not ready for Apply`。必須先由人工決定補齊 parent review/sync/index，或排除這些 orphan assets，再重新產生 plan；不得自動建立 parent 或只套用其餘子集。完整 contract 見 `docs/specs/Y_ASSET_METADATA_APPLY_PLAN_SPEC.md`。
+
+離線比較 Slack 回覆格式，不套用 URL、不讀 Slack Token，也不呼叫 Slack API：
+
+```bash
+.venv/bin/mka preview-slack-output --query "三風製麵" --variant standard
+.venv/bin/mka preview-slack-output --sample-set \
+  --workbook "reports/excel_preview/MKT 內容產出資料庫_店家_夥伴案例_對外數據-20260708.xlsx" \
+  --output reports/slack_output_preview
+```
+
+`preview-slack-output` 會以正式 external-intent `StructuredRetrievalResult` 為唯一結果集合，再用 `(record_id, asset_id, field)` 將已核准 `asset_url`／`canonical_url` 疊加於記憶體。Concise、standard、detailed 三種格式共用同一 payload，只改資訊量；`canonical_url`、內部 ID、路徑、provenance 與 retrieval scores 不會進 user-facing payload。此命令不會修改 production `slack-bot` renderer，也不會啟用任何新 query constraint。
 
 執行內建 evaluation：
 
@@ -419,6 +528,18 @@ excel-preview
 - 不建立正式 content index。
 - 不套用任何人工審核決策。
 - `review_decision`、`reviewer`、`reviewed_at` 預設留空，必須由人工填寫。
+
+套用已簽核決策並納入通過安全條件的 clean merchant cases：
+
+```bash
+.venv/bin/mka apply-review-decisions \
+  --decisions reports/excel_preview/review_decisions_template.csv \
+  --preview-dir reports/excel_preview \
+  --output reports/excel_preview/apply_preview \
+  --include-clean-merchant-cases
+```
+
+`--include-clean-merchant-cases` 預設關閉，只會納入「published、現有商家、品牌與 handle 完整、至少一個有效素材、public、可對外引用、可進 index，且沒有治理或重複標記」的 `merchant_case`。它不會納入 clean `public_metric`；不符合條件的紀錄仍留在 `not_reviewed_records.md`。既有的 `--include-clean-records` 是範圍較廣的管理者操作，兩個旗標不可同時使用。
 
 ### Obsidian Sync Workflow
 

@@ -113,7 +113,8 @@ reports/excel_preview/apply_preview/
 
 - preview JSON 中存在、但 expected review rows 之外的紀錄（= 無 issue 的乾淨紀錄，目前約 96 筆 merchant_cases + 29 筆 public_metrics）→ 預設**全部進 `not_reviewed_records.md`**，不進 approved vault preview。
 - 提供 `--include-clean-records` 旗標：加上後，乾淨紀錄以「default 政策核准」進 approved_vault_preview，每筆 frontmatter 標 `reviewer: default_policy`、`review_decision: approve(default)`，summary 醒目統計。
-- **旗標預設關閉**。是否常態開啟屬使用者裁決（G 信第 6 節待決問題 b）。
+- 2026-07-13 使用者裁決新增較窄的 `--include-clean-merchant-cases`：只納入 `status=published`、`merchant_status=現有商家`、品牌與 handle 完整、至少一個有效素材、`data_classification=public`、`can_quote_externally=true`、`can_enter_content_index=true`，且無 governance / invalid asset / multi-record / duplicate 標記的 `merchant_case`。`public_metric` 不受此旗標影響，仍留在 `not_reviewed_records.md`。
+- 兩個旗標互斥且都**預設關閉**。每筆由窄政策納入的檔案仍標 `reviewer: default_policy`、`review_decision: approve(default)`，並在 review notes 與 summary 明示政策來源。
 
 ## 8. handle_mapping
 
