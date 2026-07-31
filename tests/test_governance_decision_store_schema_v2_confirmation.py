@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -38,9 +39,26 @@ def _isolate_confirmation_report_formal_checks(monkeypatch):
 
 
 def test_real_v2_plan_is_independently_validated(tmp_path):
-    result = validate_governance_decision_store_schema_v2_plan(**_validation_args(tmp_path))
+    args = _validation_args(tmp_path)
+    result = validate_governance_decision_store_schema_v2_plan(**args)
+    manifest = json.loads(args["plan_manifest_path"].read_text(encoding="utf-8"))
+    current_branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=_root(),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
     assert result["valid"] is True
+    assert result["source_branch"] == manifest["source_branch"]
+    assert result["source_commit"] == manifest["source_commit"]
+    assert result["source_branch"] != current_branch
+    assert subprocess.run(
+        ["git", "merge-base", "--is-ancestor", result["source_commit"], "HEAD"],
+        cwd=_root(),
+        check=False,
+    ).returncode == 0
     assert result["plan_id"] == EXPECTED_PLAN_ID
     assert result["manifest_hash"] == EXPECTED_MANIFEST_HASH
     assert result["schema_hash"] == EXPECTED_SCHEMA_HASH

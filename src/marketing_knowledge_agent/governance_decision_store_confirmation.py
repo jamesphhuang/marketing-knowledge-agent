@@ -12,6 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .git_provenance import (
+    GitProvenanceError,
+    validate_historical_git_provenance,
+)
 from .governance_decision_store_plan import (
     DECISION_STORE_SCHEMA,
     GovernanceDecisionEvent,
@@ -394,15 +398,16 @@ def _validate_plan_manifest(root, paths, plan_id, manifest_hash):
     expected_id = f"decision-store-plan-{hashlib.sha256(_canonical_json(plan_state)).hexdigest()[:16]}"
     if expected_id != plan_id:
         raise GovernanceDecisionStoreConfirmationError("deterministic PLAN_ID mismatch")
-    if manifest.get("source_branch") != _git_value(root, "branch", "--show-current"):
-        raise GovernanceDecisionStoreConfirmationError("Plan source branch mismatch")
     try:
-        subprocess.check_call(
-            ["git", "cat-file", "-e", f"{manifest.get('source_commit')}^{{commit}}"],
-            cwd=str(root), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        validate_historical_git_provenance(
+            root,
+            source_branch=manifest.get("source_branch"),
+            source_commit=manifest.get("source_commit"),
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise GovernanceDecisionStoreConfirmationError("Plan source commit is not traceable") from exc
+    except GitProvenanceError as exc:
+        raise GovernanceDecisionStoreConfirmationError(
+            f"Plan Git provenance invalid: {exc}"
+        ) from exc
     return manifest
 
 

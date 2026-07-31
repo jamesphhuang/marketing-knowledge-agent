@@ -100,6 +100,56 @@ def production_search_alias_v1_pre_activation_repo(tmp_path_factory):
         cleanup_fixture_path(root)
 
 
+@pytest.fixture(scope="module")
+def store_sync_plan_v2_prestate_repo(tmp_path_factory):
+    from marketing_knowledge_agent.store_data_sync_existing_validation import (
+        reconstruct_pre_sync_fixture,
+    )
+
+    root = _build_historical_repo(
+        tmp_path_factory,
+        V2_SOURCE_COMMIT,
+        "store-sync-plan-v2-prestate",
+    )
+    reconstruction = root / ".prestate-reconstruction"
+    try:
+        plan_v2 = json.loads(
+            (
+                root
+                / "reports/parent_sync_plan_v2/store_data_sync_plan_v2_manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        obsolete_source = (
+            Path(__file__).resolve().parents[1]
+            / "reports/parent_sync_plan/parent_sync_plan_manifest.json"
+        )
+        obsolete_target = (
+            root / "reports/parent_sync_plan/parent_sync_plan_manifest.json"
+        )
+        expected_obsolete_hash = plan_v2["input_checksums"]["obsolete_plan"]
+        if _sha256(obsolete_source) != expected_obsolete_hash:
+            raise AssertionError("immutable obsolete Plan manifest drifted")
+        obsolete_target.parent.mkdir(parents=True)
+        shutil.copy2(obsolete_source, obsolete_target)
+        if _sha256(obsolete_target) != expected_obsolete_hash:
+            raise AssertionError("obsolete Plan manifest copy mismatch")
+
+        fixture = reconstruct_pre_sync_fixture(root, reconstruction)
+        managed = root / "obsidian_vault" / "MKA"
+        formal = root / ".mka" / "content_index.sqlite"
+        cleanup_fixture_path(managed)
+        shutil.copytree(
+            Path(fixture["managed_vault_root"]),
+            managed,
+            copy_function=shutil.copy2,
+        )
+        shutil.copyfile(Path(fixture["formal_sqlite_path"]), formal)
+        cleanup_fixture_path(reconstruction)
+        yield root
+    finally:
+        cleanup_fixture_path(root)
+
+
 def _build_historical_repo(tmp_path_factory, source_commit, prefix):
     formal_root = Path(__file__).resolve().parents[1]
     immutable_inputs = _validate_immutable_input_manifest(formal_root)
@@ -232,7 +282,12 @@ def _extract_exact_source_commit(formal_root, destination, source_commit):
     if actual_tree != expected_tree:
         raise AssertionError("archived source tree does not match exact source commit")
 
-    for traceable_commit in (V1_SOURCE_COMMIT, V2_SOURCE_COMMIT):
+    traceable_commits = _run_git(
+        formal_root,
+        "rev-list",
+        source_commit,
+    ).splitlines()
+    for traceable_commit in traceable_commits:
         _import_commit_object(formal_root, destination, traceable_commit)
     _run_git(destination, "update-ref", f"refs/heads/{SOURCE_BRANCH}", source_commit)
     _run_git(destination, "symbolic-ref", "HEAD", f"refs/heads/{SOURCE_BRANCH}")

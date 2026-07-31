@@ -7,7 +7,6 @@ import pytest
 
 import marketing_knowledge_agent.cli as cli
 import marketing_knowledge_agent.store_data_sync_plan_v2 as sync_v2
-from conftest import managed_fixture_workspace
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.store_data_sync_plan_v2 import (
     AUDIT_ONLY_FIELDS,
@@ -15,11 +14,6 @@ from marketing_knowledge_agent.store_data_sync_plan_v2 import (
     REPORT_FILENAMES,
     generate_store_data_sync_plan_v2,
 )
-from marketing_knowledge_agent.store_data_sync_existing_validation import (
-    reconstruct_pre_sync_fixture,
-)
-
-
 CREATED_AT = "2026-07-21T12:00:00+08:00"
 
 
@@ -38,27 +32,36 @@ def _hash_path(path: Path) -> str:
 
 
 @pytest.fixture(scope="module")
-def result(tmp_path_factory):
+def result(tmp_path_factory, store_sync_plan_v2_prestate_repo):
     root = tmp_path_factory.mktemp("store-sync-v2")
-    prestate = _root() / "reports" / ".test-fixtures" / root.name
-    with managed_fixture_workspace(prestate):
-        fixture = reconstruct_pre_sync_fixture(_root(), prestate)
-        yield generate_store_data_sync_plan_v2(
-            repo_root=_root(),
-            output_dir=root / "reports",
-            temporary_root=root / "temporary",
-            created_at=CREATED_AT,
-            managed_vault_root=Path(fixture["managed_vault_root"]),
-            formal_sqlite_path=Path(fixture["formal_sqlite_path"]),
-        )
+    yield generate_store_data_sync_plan_v2(
+        repo_root=store_sync_plan_v2_prestate_repo,
+        output_dir=root / "reports",
+        temporary_root=root / "temporary",
+        created_at=CREATED_AT,
+    )
 
 
 @pytest.fixture
-def repo_prestate(tmp_path):
-    prestate = _root() / "reports" / ".test-fixtures" / tmp_path.name
-    with managed_fixture_workspace(prestate):
-        fixture = reconstruct_pre_sync_fixture(_root(), prestate)
-        yield fixture
+def repo_prestate(store_sync_plan_v2_prestate_repo):
+    root = store_sync_plan_v2_prestate_repo
+    yield {
+        "root": str(root),
+        "managed_vault_root": str(root / "obsidian_vault" / "MKA"),
+        "formal_sqlite_path": str(root / ".mka" / "content_index.sqlite"),
+    }
+
+
+def test_prestate_fixture_uses_system_temp_and_preserves_historical_hash(
+    repo_prestate,
+):
+    fixture_root = Path(repo_prestate["root"]).resolve()
+
+    assert not fixture_root.is_relative_to(_root())
+    assert ".test-fixtures" not in fixture_root.parts
+    assert _hash_path(Path(repo_prestate["managed_vault_root"])) == (
+        "41a4fd4a1d948390b1b5575a480e02a677a35904ffd043efc6f55e84830426f8"
+    )
 
 
 def test_materialization_contract_excludes_decision_event_audit_fields(result):
@@ -193,10 +196,8 @@ def test_unsupported_formal_sqlite_field_fails_closed(tmp_path, repo_prestate, m
 
     monkeypatch.setattr(sync_v2, "_field_materialization_matrix", matrix_with_unsupported_field)
     blocked = generate_store_data_sync_plan_v2(
-        repo_root=_root(), output_dir=tmp_path / "reports",
+        repo_root=Path(repo_prestate["root"]), output_dir=tmp_path / "reports",
         temporary_root=tmp_path / "temporary", created_at=CREATED_AT,
-        managed_vault_root=Path(repo_prestate["managed_vault_root"]),
-        formal_sqlite_path=Path(repo_prestate["formal_sqlite_path"]),
     )
 
     assert blocked["execution_blocked"] is True
@@ -206,12 +207,10 @@ def test_unsupported_formal_sqlite_field_fails_closed(tmp_path, repo_prestate, m
 def test_reports_and_rerun_are_deterministic(tmp_path, repo_prestate):
     output = tmp_path / "reports"
     args = {
-        "repo_root": _root(),
+        "repo_root": Path(repo_prestate["root"]),
         "output_dir": output,
         "temporary_root": tmp_path / "temporary-a",
         "created_at": CREATED_AT,
-        "managed_vault_root": Path(repo_prestate["managed_vault_root"]),
-        "formal_sqlite_path": Path(repo_prestate["formal_sqlite_path"]),
     }
     first = generate_store_data_sync_plan_v2(**args)
     first_hash = _hash_path(output)
@@ -230,8 +229,7 @@ def test_cli_is_plan_only(tmp_path, repo_prestate, monkeypatch, capsys):
     original = cli.generate_store_data_sync_plan_v2
 
     def generate_from_prestate(**kwargs):
-        kwargs["managed_vault_root"] = Path(repo_prestate["managed_vault_root"])
-        kwargs["formal_sqlite_path"] = Path(repo_prestate["formal_sqlite_path"])
+        kwargs["repo_root"] = Path(repo_prestate["root"])
         return original(**kwargs)
 
     monkeypatch.setattr(cli, "generate_store_data_sync_plan_v2", generate_from_prestate)

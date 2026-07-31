@@ -13,6 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .git_provenance import (
+    GitProvenanceError,
+    validate_historical_git_provenance,
+)
 from .governance_decision_store_confirmation import (
     GovernanceDecisionStoreConfirmationError,
     _build_independent_event_plan,
@@ -624,19 +628,15 @@ def _validate_plan_manifest(root, paths, schema_validation):
     if identity.get("schema_hash") != schema_validation["schema_hash"]:
         raise GovernanceDecisionStoreSchemaV2ConfirmationError("Plan identity Schema hash mismatch")
     try:
-        subprocess.check_call(
-            ["git", "cat-file", "-e", f"{EXPECTED_SOURCE_COMMIT}^{{commit}}"],
-            cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        validate_historical_git_provenance(
+            root,
+            source_branch=manifest.get("source_branch"),
+            source_commit=manifest.get("source_commit"),
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except GitProvenanceError as exc:
         raise GovernanceDecisionStoreSchemaV2ConfirmationError(
-            "Plan source commit is not traceable"
+            f"Plan Git provenance invalid: {exc}"
         ) from exc
-    current_branch = subprocess.check_output(
-        ["git", "branch", "--show-current"], cwd=root, text=True
-    ).strip()
-    if current_branch != EXPECTED_SOURCE_BRANCH:
-        raise GovernanceDecisionStoreSchemaV2ConfirmationError("Plan source branch mismatch")
     if manifest.get("confirmation_created") is not False:
         raise GovernanceDecisionStoreSchemaV2ConfirmationError(
             "Plan improperly claims a pre-existing Confirmation"
