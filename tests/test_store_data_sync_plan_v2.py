@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 from pathlib import Path
 
 import pytest
 
 import marketing_knowledge_agent.cli as cli
 import marketing_knowledge_agent.store_data_sync_plan_v2 as sync_v2
+from conftest import managed_fixture_workspace
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.store_data_sync_plan_v2 import (
     AUDIT_ONLY_FIELDS,
@@ -41,8 +41,8 @@ def _hash_path(path: Path) -> str:
 def result(tmp_path_factory):
     root = tmp_path_factory.mktemp("store-sync-v2")
     prestate = _root() / "reports" / ".test-fixtures" / root.name
-    fixture = reconstruct_pre_sync_fixture(_root(), prestate)
-    try:
+    with managed_fixture_workspace(prestate):
+        fixture = reconstruct_pre_sync_fixture(_root(), prestate)
         yield generate_store_data_sync_plan_v2(
             repo_root=_root(),
             output_dir=root / "reports",
@@ -51,18 +51,14 @@ def result(tmp_path_factory):
             managed_vault_root=Path(fixture["managed_vault_root"]),
             formal_sqlite_path=Path(fixture["formal_sqlite_path"]),
         )
-    finally:
-        shutil.rmtree(prestate, ignore_errors=True)
 
 
 @pytest.fixture
 def repo_prestate(tmp_path):
     prestate = _root() / "reports" / ".test-fixtures" / tmp_path.name
-    fixture = reconstruct_pre_sync_fixture(_root(), prestate)
-    try:
+    with managed_fixture_workspace(prestate):
+        fixture = reconstruct_pre_sync_fixture(_root(), prestate)
         yield fixture
-    finally:
-        shutil.rmtree(prestate, ignore_errors=True)
 
 
 def test_materialization_contract_excludes_decision_event_audit_fields(result):
