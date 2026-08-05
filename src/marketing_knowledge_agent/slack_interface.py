@@ -14,6 +14,7 @@ from .governance import metadata_allows_written_external_use
 from .llm import DEFAULT_LLM_CONFIG_PATH, load_llm_config
 from .models import SearchFilters
 from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, agent_ask
+from .slack_presentation import format_structured_slack_reply
 
 
 DEFAULT_SLACK_CONFIG_PATH = Path(".mka/slack_config.json")
@@ -126,6 +127,10 @@ def handle_slack_event(
 
 
 def format_slack_reply(answer, max_answer_chars: int) -> str:
+    structured_body = format_structured_slack_reply(answer)
+    if structured_body is not None:
+        # Structured search owns its complete one-message presentation; pagination is a separate sprint.
+        return structured_body
     body = SLACK_NO_RESULTS_MESSAGE if _is_slack_abstention(answer) else _slackify_markdown(answer.answer)
     if len(body) > max_answer_chars:
         body = f"{body[:max_answer_chars].rstrip()}\n{ANSWER_TRUNCATION_NOTICE}"
