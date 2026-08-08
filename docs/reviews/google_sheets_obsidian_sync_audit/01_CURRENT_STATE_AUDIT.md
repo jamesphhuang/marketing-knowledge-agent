@@ -1,6 +1,8 @@
 # Current State Audit
 
-## 1. Baseline
+## 1. 原始Audit Baseline（historical）
+
+本節記錄初次repository盤點時點，不是Final Consistency Review當下HEAD；後者另見`11_FINAL_CONSISTENCY_REVIEW.md`。
 
 - Repository: `jamesphhuang/marketing-knowledge-agent`
 - Branch: `codex/audit/google-sheets-obsidian-sync`
@@ -178,8 +180,8 @@ Slack Bot不是只有文件：`slack_interface.py`已實作Socket Mode啟動、c
 
 - 沒有Official／Enrichment index selection；只能讀單一`content_index.sqlite`。
 - 沒有 `include:enrichment` parser或提示。
-- Slack channel對G～M exposure permissions沒有明確mapping；目前只用「written external safe」總閘。
-- Public metric是否計入display cap未決。
+- 沒有Decision 2所需的generic internal research與requested usage-channel intent分流；目前只用「written external safe」總閘。
+- Renderer仍使用固定shared caps，尚未實作Decision 6已確認的獨立`metric_item_cap`與overall rendered budget。
 - Structured renderer不套`max_answer_chars`，程式註解把pagination留給後續。
 - 一般query原文會進audit log。
 
@@ -190,7 +192,7 @@ Slack Bot不是只有文件：`slack_interface.py`已實作Socket Mode啟動、c
 - `.gitignore`正確忽略env、credentials、reports、data、Vault、SQLite、`.mka`與Slack／LLM config。
 - 無Google API dependency或adapter。
 - 無tracked CI workflow；test setup只在`pyproject.toml`。
-- 本輪最終安全執行431個互不重疊的tests，全部通過；每批均顯示同一組6項Pydantic validator deprecation。
+- 原始Audit審查階段安全執行431個互不重疊的tests，全部通過；每批均顯示同一組6項Pydantic validator deprecation。Final Consistency Review未重跑正式測試。
 
 ## 11. 文件與程式不一致
 

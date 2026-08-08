@@ -21,7 +21,7 @@ git diff --name-only
 git diff --cached --name-only
 ```
 
-Baseline結果：
+Baseline結果（原始Audit盤點時點）：
 
 - root: `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent`
 - branch: `codex/audit/google-sheets-obsidian-sync`
@@ -29,7 +29,7 @@ Baseline結果：
 - remote repository: `origin` → `jamesphhuang/marketing-knowledge-agent`
 - tracked inventory: 171 files；67 source、59 tests、32 docs、8 `.claude`、5 root。
 
-最終驗證另執行 `find docs/reviews/google_sheets_obsidian_sync_audit -maxdepth 1 -type f -print`、`wc -l`、`rg`一致性搜尋及再次執行Git status/diff命令。外接磁碟曾自動為本輪10份文件建立`._*.md` AppleDouble sidecars；確認精確路徑後已移除這10個本輪伴生metadata檔，沒有操作任何原有未追蹤項目。
+原始Audit驗證另執行 `find docs/reviews/google_sheets_obsidian_sync_audit -maxdepth 1 -type f -print`、`wc -l`、`rg`一致性搜尋及再次執行Git status/diff命令。外接磁碟曾自動為當時10份文件建立`._*.md` AppleDouble sidecars；確認精確路徑後已移除該10個伴生metadata檔，沒有操作任何原有未追蹤項目。Final Consistency Review當下baseline與驗證另見`11_FINAL_CONSISTENCY_REVIEW.md`。
 
 ## 2. 讀取與搜尋方式
 
@@ -163,9 +163,12 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -p no:cacheprovider \
 | one-off atomic store executor | `store_data_sync_plan_v2_execution.py` | `test_store_data_sync_plan_v2_execution.py`（未在安全批次執行，僅讀取/搜尋） |
 | Slack Bot確已實作 | `slack_interface.py`, `slack_presentation.py` | 五個已執行Slack test modules |
 | 無Official/Enrichment分層 | `content_index.py`, `slack_interface.py` | 現有Slack/content-index tests無雙repository contract |
+| 無standalone Apps Script／ID writer實作 | tracked inventory無 `.gs`、`appsscript.json`或`clasp` project；`excel_preview.py`仍是local read path | 現有tests無MREC／MET allocator、BRD controlled backfill、write allowlist或concurrent allocation contract |
+| 無sync／release Ops notifier | tracked source只有user-query Slack handler與denylist owner flag；無Release coordinator、Private Slack Ops sender或`release_status`／`notification_status` operation record | 現有tests沒有Attempt 3 final-failure alert、target allowlist、payload sanitizer或notification/release state separation contract |
+| Slack renderer仍用固定shared caps | `slack_presentation.py`以`entities[:5]`及跨內容共用10筆asset slice截取presentation；沒有Public Metric獨立cap、rendered-size budget或eligible remaining metadata | 現有Slack tests未覆蓋Decision 6 post-governance metric cap、atomic claim／citation、rendered budget或corpus conservation |
 
 ## 7. 不確定事項
 
-- 認證已確認為專用read-only Service Account；scheduler已確認為Asia/Taipei 09:00、09:30、10:00共最多3次attempt。Slack channel mapping、approved_by whitelist、Apps Script部署、通知與metric cap仍是政策未知，不從code猜測；見`08_DECISIONS_REQUIRED.md`。
+- 認證已確認為專用read-only Service Account；scheduler已確認為Asia/Taipei 09:00、09:30、10:00共最多3次attempt。Decision 2已確認Slack／internal search是Official retrieval surface而非G-M exposure channel，第一版不新增Slack欄位；tracked code尚未實作generic與usage-specific intent分流。Decision 3已確認Manual Enrichment `approved_by`須exact-match外部受控authorized whitelist；tracked code尚無ENR parser或approver validator，且reviewer ID scheme、whitelist storage與historical revocation仍是open design／governance問題。Decision 4已確認permanent ID writer採external standalone Apps Script、固定canonical Spreadsheet ID與最小欄位白名單；tracked repository仍無Apps Script／allocator實作，且`clasp`、CI/CD、deployment identity／owner、secret供應與API deployment仍是open implementation details。Decision 5已確認Private Slack Ops為final sync／release operational failure的primary alert surface，且release結果須先durable並與notification狀態分離；tracked source仍無Ops notifier、target allowlist或payload sanitizer，notification retry／Email fallback／成功通知與實際Slack identity仍是open implementation details。Decision 6已確認Public Metric獨立`metric_item_cap`、Content cap與overall rendered budget；tracked renderer仍是固定shared caps，沒有atomic Public Metric budget或eligible remaining metadata。Decision 1–11現均已確認，沒有Remaining Decision；cap數值、budget計量與pagination UX等繼續作open implementation questions。見`08_DECISIONS_REQUIRED.md`。
 - mass-deletion數值threshold需先以不含正文的歷史counts/dry-run校準，本審查不猜定。
 - Google API回傳的實際merge/rich-text/formula組合尚未連線驗證；本輪只有使用者提供的schema事實與tracked local xlsx behavior可比對。

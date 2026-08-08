@@ -13,12 +13,45 @@
 
 | Entity | ID | Regex | Authority |
 | --- | --- | --- | --- |
-| Brand | BRD | `^BRD-[0-9]{4,}$` | 人工核准後的品牌主檔 |
-| Source Record | MREC | `^MREC-[0-9]{4,}$` | Apps Script配置後的案例來源列 |
-| Public Metric | MET | `^MET-[0-9]{4,}$` | Apps Script配置後的正式論述列 |
+| Brand | BRD | `^BRD-[0-9]{4,}$` | 人工核准後，由standalone governance writer受控回填的品牌主檔 |
+| Source Record | MREC | `^MREC-[0-9]{4,}$` | standalone Apps Script配置後的案例來源列 |
+| Public Metric | MET | `^MET-[0-9]{4,}$` | standalone Apps Script配置後的正式論述列 |
 | Manual Enrichment | ENR | `^ENR-[0-9]{4,}$` | 人工建立與核准的Obsidian筆記 |
 
 四位數是最低寬度，不應把最大值限制在9999；配置器需以整數sequence管理並輸出zero-padded純文字。
+
+### 1.1 Decision 4 — Permanent ID governance writer
+
+Decision 4已確認選擇B：MREC／MET permanent ID allocator與BRD governance writer採external standalone Apps Script project，不採Spreadsheet-bound script。Google Sheets是business metadata／reviewed governance authority；GitHub是source code／specification authority；standalone deployment只是受控execution target，Script editor drift不構成authority。
+
+Production writer的canonical target固定為Spreadsheet ID `15KVEGSpcdbMuFg1SO1aa099iQ_Kzo9my6pjWdP5O1BM`，且必須同時通過explicit configuration與allowlist。不得以 `SpreadsheetApp.getActiveSpreadsheet()`作identity、fallback或target discovery；設定缺失、ID無效／不符、target無法讀取或sheet contract不符時一律fail closed。
+
+Writer只負責：
+
+- MREC allocation與validation；
+- MET allocation與validation；
+- 已完成人工審核且mapping明確的BRD controlled backfill；
+- duplicate、malformed、missing、namespace與registry validation；
+- write guard、write verification及不含敏感正文的audit-safe result／status。
+
+寫入白名單固定為「商家／夥伴案例資料庫」M（MREC）、N（BRD）、O（ID Review Status），以及「可公開」對外數據N（MET）。其他business columns、G-M exposure channels與任何Slack欄位都不可寫；writer不得接受任意Spreadsheet ID、sheet、range或generic mutation指令。
+
+MREC／MET allocation contract：
+
+1. 既有合法ID永不覆寫；archived／retired ID永不回收或重配。
+2. 配置前掃描active、archived及reserved registry；duplicate時fail closed，不配置新ID掩蓋collision。
+3. Malformed、unknown namespace、mutation、registry conflict或無法證明safe next sequence時標記needs_review／blocking。
+4. ID只由deterministic namespace與受治理sequence產生，不用row、`ROW()`、名稱、URL或位置作identity；row reorder／insert／move後仍保留原ID。
+
+BRD backfill contract：
+
+1. 只回填already-approved mapping，並驗證format、duplicate與conflict。
+2. Blank BRD不得被writer解讀成「建立新品牌」；不得依名稱 alone自動merge／split，也不得自動歸屬ambiguous mapping。
+3. 不確定或互相衝突的evidence只產生needs_review／blocking結果，不寫BRD。
+
+每次allocation須使用exclusive lock或等價concurrency guard，在取得guard後重讀current values與registry，並在同一critical section內完成allocation、reservation／registry update與write。Concurrent executions不得配出duplicate；lock／readback／write verification失敗時fail closed。採用`LockService`與否屬實作選項，不是本次產品決策。
+
+此standalone writer不得負責Google metadata sync／extraction、linked capture、HTTP／HTML處理、CapturedContent、Markdown／Obsidian、FTS／vector、Slack／RAG、query answering、exposure決策或Manual Enrichment approval。Read-only Service Account path維持隔離，Marketing Knowledge Agent不得因此取得一般Google write能力。`clasp`、CI/CD、branch／tagging、secret manager、deployment owner、execute-as、service identity與API deployment仍是open implementation details，須後續另案確認與授權。
 
 ## 2. Canonical records
 
@@ -68,7 +101,9 @@ archived_reason: null
 
 ### 2.3 Content Asset
 
-第一版可採穩定composite identity：`<MREC>:<asset_type>`，其中asset type為 `article|video|podcast|news`。這適用於來源每個H-K cell最多代表一個邏輯asset的既定結構。
+Decision 8已確認選擇A：第一版一個H-K source cell最多代表一個logical Content Asset。H、I、J、K依序代表 `article`、`video`、`podcast`、`news`；每個MREC的每個asset type最多建立一個logical Content Asset。
+
+第一版穩定composite identity為 `<MREC>:<asset_type>`。不新增AST permanent ID，也不建立Asset ID allocator或registry。
 
 ```yaml
 asset_key: MREC-0001:article
@@ -83,9 +118,15 @@ source_lineage: {...}
 ```
 
 - 欄位空白表示沒有asset，不建立空record。
-- 有title無safe URL建立incomplete asset。
-- 同cell抽出多個互不相同URL時不得任選，標記needs_review。
-- 未來若一個cell確定要表達多個assets，需先新增獨立永久Asset ID；不得以陣列位置或URL作identity。
+- URL候選完成安全檢查、canonicalization與dedupe後，0個safe URL但有有效title時建立incomplete asset；`searchable=false`，不得進Official SQLite／FTS／vector／Slack，不猜測URL，也不得外部搜尋補URL。
+- 只有1個distinct safe canonical URL時，才可再依其他governance與identity條件判定active。
+- 2個以上distinct safe canonical URLs時標記needs_review；不得依priority任選，不得自動拆成多個Content Assets，人工整理前不得進Official publish set。
+- rich-text run、whole-cell hyperlink、`HYPERLINK` formula或cell text取得的候選，若canonicalization後為同一URL，先dedupe為一個，不構成multi-link conflict。
+- URL、Rich Text run position與array index只可作candidate provenance，不得作permanent identity。
+- 人工修正應在Google Sheets canonical source整理成一個cell對應一個logical asset；read-only sync不自動寫回。
+- 未來若業務確認同一cell需要多個正式Content Assets，必須另開architecture／migration decision後才能評估AST permanent ID；第一版不得預先實作AST。
+- 本決策不改變既有needs_review／whole-batch publish policy。
+- Decision 9下，Google metadata仍決定Content Asset identity／title／URL／governance；核准linked webpage只以`CapturedContent(authority_role=primary_content)`提供body，URL與captured hash均不改變`asset_key`。Canonical capture model與revision規則見`10_LINKED_CONTENT_CAPTURE_AND_RAG_SPEC.md`。
 
 ### 2.4 Public Metric
 
@@ -107,6 +148,7 @@ source_lineage: {...}
 - G-M checkbox映射須保存原始欄位與policy-normalized channels。
 - oral-only不是可持久化PublicMetric。normalize後轉成redacted exclusion reference；即使MET已配置也不得保存statement。
 - pending metric是governance-only record，不可偽裝成MET Official record。
+- F「參考新聞連結」只建立MET evidence relationship；其CapturedContent必須標示`authority_role=evidence`，正文不得自動升格為Public Metric claim，也不得擴張G-M核准渠道。
 
 ### 2.5 Taxonomy
 
@@ -122,11 +164,12 @@ aliases: []
 ### 2.6 Manual Enrichment
 
 ```yaml
+record_type: manual_enrichment
 enrichment_id: ENR-0001
 related_entity_id: BRD-0003
 review_status: approved
 searchable: true
-approved_by: james
+approved_by: REVIEWER-CANONICAL-ID
 approved_at: 2026-08-06
 allowed_channels:
   - internal_search
@@ -135,9 +178,14 @@ approval_content_hash: sha256:...
 
 - 只接受 `99_Manual_Notes/Approved_Enrichment/` 下的managed-boundary外人工筆記。
 - `related_entity_id`必須在當前或archived Official registry存在。
+- Approved eligibility要求`record_type=manual_enrichment`、`review_status=approved`、`searchable=true`、既有contract有效的`approved_at`，以及允許`internal_search`的`allowed_channels`；任一條件缺失均不得進Enrichment index。
+- `approved_by`是單一非空stable canonical reviewer ID，必須以deterministic exact membership命中authorized approver whitelist；不得接受任意非空字串、display name／暱稱／自由文字推定、substring／fuzzy match或大小寫／格式猜測。
+- Whitelist authority必須位於enrichment note之外的單一受控configuration／governance source；note frontmatter不得宣告、覆寫或增加authorized approver。Whitelist實體位置與canonical reviewer ID scheme仍是implementation/open design item。
+- `approved_by`缺失／空白／未授權／identity無法exact match，或whitelist無法載入／設定無效時fail closed；`searchable=true`不得繞過approval eligibility。Note可留在Vault，但不進Enrichment index。
 - approval hash由semantic-normalized body與會影響治理的frontmatter共同計算。
 - normalization忽略行尾空白、空白行數與無語義Markdown格式差異；標題、文字、link、relation或治理欄位改變即失效。
 - 失效筆記留在Vault，但不進Enrichment index，並產生needs_review。
+- Approver日後移出whitelist時，既有approval採retroactive revocation或approval-time authorization snapshot尚未裁決；不得在本決策中預設。
 
 ## 3. Source lineage
 
