@@ -1,0 +1,28 @@
+{
+  "cell_data_like": {
+    "cells": [
+      {
+        "coordinate": "A1",
+        "formatted_value": "Example Brand Alpha"
+      },
+      {
+        "coordinate": "B2",
+        "effective_value": 42,
+        "formatted_value": "Synthetic Metric"
+      }
+    ],
+    "sheet_title": "Synthetic Inputs",
+    "spreadsheet_id": "synthetic-spreadsheet-alpha"
+  },
+  "governance_case": {
+    "brand": "Example Brand Alpha",
+    "exposure": "internal-test-only",
+    "oral_only_sentinel": "FICTIONAL_ORAL_ONLY_SENTINEL_WP0",
+    "status": "synthetic-review-required"
+  },
+  "ids": {
+    "metric": "SYNTHETIC-MET-0001",
+    "record": "SYNTHETIC-MREC-0001",
+    "spreadsheet": "synthetic-spreadsheet-alpha"
+  }
+}
