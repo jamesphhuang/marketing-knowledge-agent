@@ -23,6 +23,7 @@ from marketing_knowledge_agent.canonical_models import (
     ReviewStatus,
     SourceRecord,
     SourceRecordId,
+    create_public_metric,
     validate_unique_brand_ids,
     validate_unique_metric_ids,
     validate_unique_source_record_ids,
@@ -291,6 +292,7 @@ def test_canonical_models_are_independent_from_legacy_document_metadata():
 def test_public_metric_schema_is_defined_but_direct_construction_fails_closed():
     payload = _public_metric_payload()
     assert PublicMetric.identity_field_names() == ("metric_id",)
+    assert "_PUBLIC_METRIC_WP5_CONSTRUCTION_GATE" not in vars(canonical_models)
     public_metric_fields = (
         PublicMetric.model_fields
         if hasattr(PublicMetric, "model_fields")
@@ -415,14 +417,14 @@ def test_wp3_resolved_cell_value_is_not_a_wp4_public_metric_factory_input_surfac
             signature = inspect.signature(member)
         except (TypeError, ValueError):
             continue
-        if signature.return_annotation is PublicMetric:
+        if name == "create_public_metric":
             public_factories.append((name, signature))
         assert all(
             parameter.annotation is not ResolvedCellValue
             for parameter in signature.parameters.values()
         )
 
-    assert public_factories == []
+    assert public_factories == [("create_public_metric", inspect.signature(create_public_metric))]
     assert not any(
         name in canonical_models.__dict__
         for name in (

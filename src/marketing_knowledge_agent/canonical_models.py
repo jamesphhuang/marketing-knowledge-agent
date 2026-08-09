@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
-from typing import ClassVar, Dict, Iterable, Optional, Tuple, Type, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Dict, Iterable, Optional, Tuple, Type, TypeVar
 
 from pydantic import BaseModel, Field, StrictBool, StrictStr
 
@@ -16,6 +16,9 @@ if _PYDANTIC_V2:
     from pydantic_core import core_schema
 else:  # pragma: no cover - exercised only with Pydantic 1.x
     from pydantic import root_validator, validator
+
+if TYPE_CHECKING:
+    from .google_normalization import PersistenceEligibleMetricInput
 
 
 class CanonicalModelError(ValueError):
@@ -311,8 +314,49 @@ class SourceRecord(_CanonicalModel):
         return self.brand_identity.brand_id
 
 
+def _build_public_metric_functions():
+    authorization = object()
+
+    def public_metric_init(self, _wp5_gate=None, **data):
+        if _wp5_gate is not authorization:
+            raise _public_metric_gate_error()
+        _CanonicalModel.__init__(self, **data)
+
+    def create_public_metric(eligible: PersistenceEligibleMetricInput) -> PublicMetric:
+        """Build a normally validated PublicMetric from the exact WP5 output type."""
+
+        from .google_normalization import PersistenceEligibleMetricInput
+
+        if type(eligible) is not PersistenceEligibleMetricInput:
+            raise _public_metric_gate_error()
+        return PublicMetric(
+            _wp5_gate=authorization,
+            metric_id=eligible.metric_id,
+            metric_type=eligible.metric_type,
+            indicator=eligible.indicator,
+            approved_statement=eligible.approved_statement,
+            maintenance_updated_at=eligible.maintenance_updated_at,
+            evidence_urls=eligible.evidence_urls,
+            allowed_exposure_channels=eligible.allowed_exposure_channels,
+            lifecycle_status=eligible.lifecycle_status,
+            review_status=eligible.review_status,
+            publish_eligibility=eligible.publish_eligibility,
+            can_quote_externally=eligible.can_quote_externally,
+            source_lineage=eligible.source_lineage,
+        )
+
+    public_metric_init.__name__ = "__init__"
+    public_metric_init.__qualname__ = "PublicMetric.__init__"
+    create_public_metric.__qualname__ = "create_public_metric"
+    return public_metric_init, create_public_metric
+
+
+_public_metric_init, create_public_metric = _build_public_metric_functions()
+del _build_public_metric_functions
+
+
 class PublicMetric(_CanonicalModel):
-    """Final MET schema whose validated construction remains closed until WP5."""
+    """Final MET schema whose construction requires exact WP5 output."""
 
     _identity_fields = ("metric_id",)
 
@@ -342,8 +386,7 @@ class PublicMetric(_CanonicalModel):
         def require_non_blank_payload_text(cls, value):
             return _require_non_blank_text(value, "PUBLIC_METRIC_TEXT_BLANK")
 
-    def __init__(self, **data):
-        raise _public_metric_gate_error()
+    __init__ = _public_metric_init
 
     @classmethod
     def model_validate(cls, *args, **kwargs):
@@ -398,6 +441,9 @@ class PublicMetric(_CanonicalModel):
             exclude=exclude,
         )
         return super().copy(deep=deep)
+
+
+del _public_metric_init
 
 
 _PermanentIdT = TypeVar("_PermanentIdT", bound=_PermanentId)
@@ -497,6 +543,7 @@ __all__ = [
     "ReviewStatus",
     "SourceRecord",
     "SourceRecordId",
+    "create_public_metric",
     "validate_unique_brand_ids",
     "validate_unique_metric_ids",
     "validate_unique_source_record_ids",
