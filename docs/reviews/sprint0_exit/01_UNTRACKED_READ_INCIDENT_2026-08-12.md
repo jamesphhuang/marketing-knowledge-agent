@@ -2,7 +2,7 @@
 
 ## Status
 
-OPEN — HUMAN DISPOSITION PENDING
+CLOSED — ACCEPTED WITH EXCEPTION
 
 ## Incident ID
 
@@ -86,33 +86,33 @@ No conclusion is made about file contents, sensitivity, business impact, or cred
 
 ## Repository Owner Disposition
 
-Status: PENDING
+Status: ACCEPTED_WITH_EXCEPTION
 
-Reviewer name: PENDING
+Reviewer name: Admin
 
-Review date: PENDING
+Review date: 2026-08-12
 
 Allowed final values:
 
 - `ACCEPTED_WITH_EXCEPTION`
 - `REMEDIATION_REQUIRED`
 
-Codex must not fill this disposition.
+This disposition records explicit human authorization; it was not independently determined by Codex.
 
 ## Security / Privacy Reviewer Disposition
 
-Status: PENDING
+Status: ACCEPTED_WITH_EXCEPTION
 
-Reviewer name: PENDING
+Reviewer name: Admin
 
-Review date: PENDING
+Review date: 2026-08-12
 
 Allowed final values:
 
 - `ACCEPTED_WITH_EXCEPTION`
 - `REMEDIATION_REQUIRED`
 
-Codex must not fill this disposition.
+This disposition records explicit human authorization; it was not independently determined by Codex.
 
 ## Closure Rule
 
@@ -124,10 +124,21 @@ If both dispositions are `ACCEPTED_WITH_EXCEPTION`, the incident may be formally
 
 Incident disposition does not replace the Product/Governance, Security, and Repository final human approvals required for Sprint 0.
 
+Final result:
+
+- Repository Owner disposition: `ACCEPTED_WITH_EXCEPTION`
+- Security / Privacy Reviewer disposition: `ACCEPTED_WITH_EXCEPTION`
+- `HUMAN_DISPOSITION_COMPLETE = YES`
+- `INCIDENT_CLOSED = YES`
+
+The incident is formally dispositioned. The original frozen checklist item remains `INCIDENT / EXCEPTION`, not `VERIFIED`.
+
 ## Current Gate
 
 - `INCIDENT_DOCUMENTED = YES`
-- `HUMAN_DISPOSITION_COMPLETE = NO`
-- `INCIDENT_CLOSED = NO`
-- `READY_FOR_SPRINT0_EXIT_REVIEW = NO`
+- `HUMAN_DISPOSITION_COMPLETE = YES`
+- `INCIDENT_CLOSED = YES`
+- `READY_FOR_SPRINT0_EXIT_REVIEW = YES`
 - `READY_FOR_SPRINT1 = NO`
+
+`READY_FOR_SPRINT0_EXIT_REVIEW = YES` means only that Final Sprint 0 Exit Review may restart. It does not mean `SPRINT0_EXIT_READY = YES` or that the final human authorization gate is complete.
