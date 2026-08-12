@@ -9,18 +9,21 @@ from typing import Callable
 
 import pytest
 
+import marketing_knowledge_agent.google_normalization as google_normalization
 from marketing_knowledge_agent.canonical_models import (
     AssetType,
     BrandId,
     BrandIdentityDecision,
     CanonicalSourceLineage,
     ContentAssetKey,
+    ExposureChannel,
     LifecycleStatus,
     MetricId,
     PublishEligibility,
     ReviewStatus,
     SourceRecord,
     SourceRecordId,
+    create_public_metric,
 )
 from marketing_knowledge_agent.canonical_serialization import (
     compute_source_fingerprint,
@@ -58,7 +61,11 @@ from marketing_knowledge_agent.captured_content import (
 from marketing_knowledge_agent.cell_normalization import (
     FieldContract,
     FieldValueKind,
+    InheritanceReason,
     ResolvedCellValue,
+    SourceFieldLineage,
+    SourceLineage,
+    ValueSource,
     normalize_source_cell,
 )
 from marketing_knowledge_agent.content_hashing import (
@@ -76,6 +83,7 @@ from marketing_knowledge_agent.content_hashing import (
 )
 from marketing_knowledge_agent.google_normalization import (
     ExcludedSourceRef,
+    MetricMinimizationError,
     MetricSourceCells,
     PersistenceEligibleMetricInput,
     minimize_public_metric_source,
@@ -112,6 +120,8 @@ from marketing_knowledge_agent.release_contracts import (
 )
 from marketing_knowledge_agent.sheets_contracts import (
     CellData,
+    DataValidation,
+    DataValidationCondition,
     GoogleValue,
     GridRange,
     SheetSnapshot,
@@ -178,6 +188,15 @@ SOURCE_RANGES_BY_ROW = {
     6: {"source_record_id": "A7", "article": "H7"},
     7: {"source_record_id": "A8", "article": "H8"},
 }
+METRIC_CHANNELS = (
+    ExposureChannel.PRESS_RELEASE,
+    ExposureChannel.OWNED_MEDIA,
+    ExposureChannel.SALESKITS,
+    ExposureChannel.VERBAL_BRIEFING,
+    ExposureChannel.SPEAKING_DECK,
+    ExposureChannel.WEBSITE_RECRUITING,
+    ExposureChannel.ADS,
+)
 
 
 class _InMemorySheetsReader:
@@ -372,6 +391,87 @@ def _canonical_lineage(
         source_ranges=source_ranges,
         source_fingerprint=lineage.source_fingerprint,
         sync_batch_id=lineage.sync_batch_id,
+    )
+
+
+def _metric_channel_cell(
+    lineage: CanonicalSourceLineage,
+    channel: ExposureChannel,
+    value: bool,
+) -> ResolvedCellValue:
+    row_index = lineage.source_row - 1
+    column_index = METRIC_CHANNELS.index(channel) + 6
+    source_cell = CellData(
+        row_index=row_index,
+        column_index=column_index,
+        formatted_value=str(value),
+        effective_value=GoogleValue(bool_value=value),
+        data_validation=DataValidation(
+            condition=DataValidationCondition(condition_type="BOOLEAN")
+        ),
+    )
+    return ResolvedCellValue(
+        normalized_value=value,
+        display_value=str(value),
+        value_source=ValueSource.EFFECTIVE_VALUE,
+        source_was_formula=False,
+        source_cell=source_cell,
+        value_cell=source_cell,
+        field_contract=FieldContract(
+            field_name=channel.value,
+            value_kind=FieldValueKind.BOOLEAN,
+            source_column_index=column_index,
+        ),
+        lineage=SourceLineage(
+            spreadsheet_id="synthetic-spreadsheet-wp16",
+            sheet_id=lineage.sheet_id,
+            sheet_title=lineage.sheet_title,
+            sheet_hidden=False,
+            source_row_index=row_index,
+            source_column_index=column_index,
+            source_fingerprint=lineage.source_fingerprint,
+            sync_batch_id=lineage.sync_batch_id,
+        ),
+        field_lineage=SourceFieldLineage(
+            field_name=channel.value,
+            target_row_index=row_index,
+            target_column_index=column_index,
+            value_row_index=row_index,
+            value_column_index=column_index,
+            merge_anchor_row_index=None,
+            merge_anchor_column_index=None,
+            merge_range=None,
+            inherited_from_merge=False,
+            inheritance_reason=InheritanceReason.LOCAL,
+        ),
+    )
+
+
+def _written_metric_source(
+    lineage: CanonicalSourceLineage,
+    evidence_urls: tuple[str, ...],
+) -> MetricSourceCells:
+    channel_values = {
+        channel: channel is ExposureChannel.PRESS_RELEASE
+        for channel in METRIC_CHANNELS
+    }
+    return MetricSourceCells(
+        metric_id=MetricId("MET-0016"),
+        metric_type="Synthetic metric",
+        indicator="Synthetic indicator",
+        approved_statement="Synthetic approved statement",
+        note=None,
+        maintenance_updated_at=date(2026, 8, 11),
+        evidence_urls=evidence_urls,
+        channel_cells=tuple(
+            _metric_channel_cell(lineage, channel, channel_values[channel])
+            for channel in METRIC_CHANNELS
+        ),
+        lifecycle_status=LifecycleStatus.ACTIVE,
+        review_status=ReviewStatus.APPROVED,
+        publish_eligibility=PublishEligibility.ELIGIBLE,
+        can_quote_externally=True,
+        source_lineage=lineage,
     )
 
 
@@ -1310,6 +1410,107 @@ def test_oral_exclusion_is_irreversible_across_asset_capture_chunk_and_release()
     with pytest.raises(ReleaseContractError):
         CanonicalReleaseInputs(**release_values)
     _assert_no_forbidden_sentinels(exclusion, composition.preview)
+
+
+def test_metric_evidence_validation_dedupe_and_capture_boundaries_are_composed(
+    monkeypatch,
+):
+    composition = _assemble_happy()
+    validator = getattr(
+        google_normalization,
+        "validate_and_canonicalize_evidence_url",
+        None,
+    )
+    assert callable(validator)
+    validator_calls = []
+
+    def tracking_validator(*args, **kwargs):
+        validator_calls.append((args, kwargs))
+        return validator(*args, **kwargs)
+
+    monkeypatch.setattr(
+        google_normalization,
+        "validate_and_canonicalize_evidence_url",
+        tracking_validator,
+    )
+    oral_source = MetricSourceCells(
+        metric_id=MetricId("MET-0016"),
+        metric_type="Synthetic metric",
+        indicator="Synthetic indicator",
+        approved_statement=ORAL_SENTINEL,
+        note="不留文字紀錄",
+        maintenance_updated_at=date(2026, 8, 11),
+        evidence_urls=(
+            f"https://evidence.example/item?access_token={TOKEN_SENTINEL}",
+        ),
+        channel_cells=(),
+        lifecycle_status=LifecycleStatus.ACTIVE,
+        review_status=ReviewStatus.APPROVED,
+        publish_eligibility=PublishEligibility.ELIGIBLE,
+        can_quote_externally=False,
+        source_lineage=composition.canonical_lineage,
+    )
+
+    exclusion = minimize_public_metric_source(oral_source)
+
+    assert type(exclusion) is ExcludedSourceRef
+    assert validator_calls == []
+
+    safe_raw_urls = (
+        f"https://evidence.example/item?utm_source={RAW_URL_SENTINEL}",
+        "https://evidence.example/item",
+        "https://evidence.example/second",
+    )
+    eligible = minimize_public_metric_source(
+        _written_metric_source(composition.canonical_lineage, safe_raw_urls)
+    )
+    metric = create_public_metric(eligible)
+    expected_evidence = (
+        "https://evidence.example/item",
+        "https://evidence.example/second",
+    )
+    assert [call[0][0] for call in validator_calls] == list(safe_raw_urls)
+    assert eligible.evidence_urls == expected_evidence
+    assert metric.evidence_urls == expected_evidence
+
+    asset_urls = tuple(
+        candidate.canonical_url.value
+        for candidate in composition.asset_resolution.candidates
+    )
+    captured_ids = tuple(
+        item.captured_content_id for item in composition.release_inputs.captured_contents
+    )
+    assert all(url not in asset_urls for url in expected_evidence)
+    assert captured_ids == (composition.captured_content.captured_content_id,)
+
+    unsafe_url = (
+        "https://evidence.example/item?access_token="
+        f"{TOKEN_SENTINEL}"
+    )
+    with pytest.raises(MetricMinimizationError) as caught:
+        minimize_public_metric_source(
+            _written_metric_source(
+                composition.canonical_lineage,
+                ("https://evidence.example/item", unsafe_url),
+            )
+        )
+
+    assert str(caught.value) == "EVIDENCE_URL_UNSAFE"
+    _assert_no_forbidden_sentinels(
+        exclusion,
+        eligible,
+        metric,
+        caught.value,
+        composition.asset_resolution,
+        composition.capture_request,
+        composition.captured_content,
+        composition.chunks,
+        composition.preview,
+        composition.preview_json,
+        composition.preview_markdown,
+        composition.manifest,
+        composition.manifest_bytes,
+    )
 
 
 def test_same_canonical_url_dedupes_four_wp6_sources_before_capture():

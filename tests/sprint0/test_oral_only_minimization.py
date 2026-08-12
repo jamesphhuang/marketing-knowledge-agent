@@ -220,6 +220,35 @@ def test_oral_only_is_excluded_before_any_persistence_eligible_or_public_metric_
     }
 
 
+def test_oral_only_hostile_evidence_is_excluded_before_url_validation(monkeypatch):
+    validator_calls = []
+
+    def unexpected_validator(*args, **kwargs):
+        validator_calls.append((args, kwargs))
+        raise AssertionError("EVIDENCE_VALIDATOR_MUST_NOT_RUN_FOR_ORAL_ONLY")
+
+    monkeypatch.setattr(
+        google_normalization,
+        "validate_and_canonicalize_evidence_url",
+        unexpected_validator,
+        raising=False,
+    )
+    source = _source(
+        note="不留文字紀錄",
+        evidence_urls=(
+            f"https://example.test/evidence?access_token={SENTINEL}",
+            f"https://example.test/evidence?access_token={SENTINEL}",
+        ),
+        channel_cells=(),
+        can_quote_externally=False,
+    )
+
+    result = minimize_public_metric_source(source)
+
+    assert type(result) is ExcludedSourceRef
+    assert validator_calls == []
+
+
 def test_oral_only_sentinel_has_zero_supported_downstream_leakage(caplog):
     source = _source(
         approved_statement=SENTINEL,
@@ -617,6 +646,150 @@ def test_only_minimizer_can_create_immutable_persistence_eligible_input():
         result.model_copy(update={"approved_statement": SENTINEL})
     with pytest.raises(TypeError, match="PERSISTENCE_ELIGIBLE_INPUT_REQUIRES_WP5_GATE"):
         result.copy(update={"approved_statement": SENTINEL})
+
+
+def test_quoteable_source_without_written_channel_fails_before_evidence_validation(
+    monkeypatch,
+):
+    validator_calls = []
+
+    def unexpected_validator(*args, **kwargs):
+        validator_calls.append((args, kwargs))
+        raise AssertionError("EVIDENCE_VALIDATOR_MUST_NOT_RUN_FOR_INVALID_QUOTE_POLICY")
+
+    monkeypatch.setattr(
+        google_normalization,
+        "validate_and_canonicalize_evidence_url",
+        unexpected_validator,
+    )
+    source = _source(
+        channel_cells=_channels(verbal=False),
+        evidence_urls=("https://example.com/synthetic-evidence",),
+        can_quote_externally=True,
+    )
+
+    with pytest.raises(MetricMinimizationError) as caught:
+        minimize_public_metric_source(source)
+
+    assert caught.value.code == "METRIC_QUOTE_POLICY_UNCERTAIN"
+    assert validator_calls == []
+
+
+def test_quoteable_source_with_written_channel_reaches_evidence_validation(monkeypatch):
+    validator = google_normalization.validate_and_canonicalize_evidence_url
+    validator_calls = []
+
+    def tracking_validator(*args, **kwargs):
+        validator_calls.append((args, kwargs))
+        return validator(*args, **kwargs)
+
+    monkeypatch.setattr(
+        google_normalization,
+        "validate_and_canonicalize_evidence_url",
+        tracking_validator,
+    )
+    raw_url = "https://example.com/synthetic-evidence"
+
+    eligible = minimize_public_metric_source(
+        _source(
+            channel_cells=_channels(
+                verbal=False,
+                written=ExposureChannel.PRESS_RELEASE,
+            ),
+            evidence_urls=(raw_url,),
+            can_quote_externally=True,
+        )
+    )
+
+    assert type(eligible) is PersistenceEligibleMetricInput
+    assert eligible.evidence_urls == (raw_url,)
+    assert [call[0][0] for call in validator_calls] == [raw_url]
+
+
+def test_written_safe_evidence_is_canonicalized_and_stably_deduped_before_persistence():
+    tracking_url = f"https://example.com/evidence?utm_source={SENTINEL}"
+    source = _source(
+        evidence_urls=(
+            tracking_url,
+            "https://example.com/evidence",
+            "https://example.com/second",
+        )
+    )
+
+    eligible = minimize_public_metric_source(source)
+    metric = create_public_metric(eligible)
+
+    expected = (
+        "https://example.com/evidence",
+        "https://example.com/second",
+    )
+    assert type(eligible) is PersistenceEligibleMetricInput
+    assert eligible.evidence_urls == expected
+    assert metric.evidence_urls == expected
+    surfaces = (
+        repr(eligible),
+        json.dumps(eligible.model_dump(mode="json"), sort_keys=True),
+        repr(metric),
+        json.dumps(metric.model_dump(mode="json"), sort_keys=True),
+    )
+    assert all(tracking_url not in surface for surface in surfaces)
+    assert all(SENTINEL not in surface for surface in surfaces)
+
+
+def test_duplicate_raw_evidence_urls_are_each_validated_before_canonical_dedupe(
+    monkeypatch,
+):
+    validator = getattr(
+        google_normalization,
+        "validate_and_canonicalize_evidence_url",
+        None,
+    )
+    assert callable(validator)
+    validator_calls = []
+
+    def tracking_validator(*args, **kwargs):
+        validator_calls.append((args, kwargs))
+        return validator(*args, **kwargs)
+
+    monkeypatch.setattr(
+        google_normalization,
+        "validate_and_canonicalize_evidence_url",
+        tracking_validator,
+    )
+    raw_url = "https://example.com/evidence"
+
+    eligible = minimize_public_metric_source(
+        _source(evidence_urls=(raw_url, raw_url))
+    )
+
+    assert [call[0][0] for call in validator_calls] == [raw_url, raw_url]
+    assert eligible.evidence_urls == (raw_url,)
+
+
+@pytest.mark.parametrize(
+    "evidence_urls",
+    [
+        (
+            "https://example.com/evidence",
+            f"https://example.com/evidence?access_token={SENTINEL}",
+        ),
+        (
+            "https://example.com/evidence",
+            "https://example.com/evidence",
+            f"https://other.example/evidence?session_id={SENTINEL}",
+        ),
+    ],
+)
+def test_any_unsafe_written_evidence_fails_the_whole_metric_without_payload(
+    evidence_urls,
+):
+    with pytest.raises(MetricMinimizationError) as caught:
+        minimize_public_metric_source(_source(evidence_urls=evidence_urls))
+
+    assert caught.value.code == "EVIDENCE_URL_UNSAFE"
+    assert str(caught.value) == "EVIDENCE_URL_UNSAFE"
+    assert repr(caught.value) == "MetricMinimizationError('EVIDENCE_URL_UNSAFE')"
+    assert SENTINEL not in repr(caught.value)
 
 
 def test_exact_eligible_factory_builds_normally_validated_public_metric_without_source_retention():

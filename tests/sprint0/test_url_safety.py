@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from copy import copy, deepcopy
 from dataclasses import asdict, replace
 
 import pytest
 
+import marketing_knowledge_agent.url_safety as url_safety
 from marketing_knowledge_agent.cell_normalization import (
     InheritanceReason,
     SourceFieldLineage,
@@ -379,14 +381,59 @@ def test_sensitive_duplicate_rejects_the_entire_raw_url():
     [
         "access_token",
         "oauth_token",
+        "refresh_token",
+        "id_token",
+        "auth_token",
+        "bearer_token",
         "sig",
         "session_id",
         "authorization",
         "credential_id",
-        "api%255Fkey",
     ],
 )
-def test_unapproved_sensitive_aliases_are_not_fuzzily_matched(key):
+def test_compound_sensitive_aliases_and_case_variants_are_rejected(key):
+    for variant in (key, key.upper()):
+        result = _assert_rejected(
+            f"https://example.test/path?{variant}={SYNTHETIC_SECRET}",
+            URLRejectionCode.SENSITIVE_QUERY,
+        )
+        assert variant not in repr(result)
+        assert SYNTHETIC_SECRET not in repr(result)
+        assert SYNTHETIC_SECRET not in json.dumps(result.to_dict(), sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    "key_parts",
+    [
+        ("access", "token"),
+        ("oauth", "token"),
+        ("refresh", "token"),
+        ("id", "token"),
+        ("auth", "token"),
+        ("bearer", "token"),
+        ("session", "id"),
+        ("credential", "id"),
+    ],
+)
+@pytest.mark.parametrize("separator", ["_", "-", ".", " ", "%5F"])
+def test_sensitive_alias_separator_variants_are_rejected(key_parts, separator):
+    key = separator.join(key_parts)
+    _assert_rejected(
+        f"https://example.test/path?{key}={SYNTHETIC_SECRET}",
+        URLRejectionCode.SENSITIVE_QUERY,
+    )
+
+
+@pytest.mark.parametrize("key", ["api%255Fkey", "access%255Ftoken"])
+def test_nested_percent_encoded_query_keys_are_rejected_as_ambiguous(key):
+    _assert_rejected(
+        f"https://example.test/path?{key}={SYNTHETIC_SECRET}",
+        URLRejectionCode.AMBIGUOUS_URL,
+    )
+
+
+@pytest.mark.parametrize("key", ["tokenizer", "sessional", "signature_version"])
+def test_non_sensitive_names_are_not_fuzzily_rejected(key):
     result = _validate(f"https://example.test/path?{key}=synthetic-value")
     assert result.is_accepted is True
 
@@ -537,6 +584,58 @@ def test_canonical_url_cannot_be_constructed_directly_from_unsafe_input():
     ) as caught:
         CanonicalURL(raw_url)
 
+    assert raw_url not in repr(caught.value)
+    assert SYNTHETIC_SECRET not in repr(caught.value)
+
+
+def test_canonical_url_authorization_is_not_available_through_normal_import():
+    assert "_CANONICAL_URL_VALIDATION_TOKEN" not in vars(url_safety)
+
+    with pytest.raises(
+        URLValidationError,
+        match="CANONICAL_URL_VALIDATION_REQUIRED",
+    ):
+        CanonicalURL(
+            "https://example.test/synthetic",
+            _validation_token=object(),
+        )
+
+
+def test_canonical_url_replace_cannot_change_validated_value_but_copy_is_safe():
+    result = _assert_accepted(
+        "https://example.test/original",
+        "https://example.test/original",
+    )
+    assert result.canonical_url is not None
+    canonical_url = result.canonical_url
+
+    with pytest.raises(
+        URLValidationError,
+        match="CANONICAL_URL_VALIDATION_REQUIRED",
+    ):
+        replace(canonical_url, value="https://example.test/changed")
+
+    assert copy(canonical_url) == canonical_url
+    assert deepcopy(canonical_url) == canonical_url
+
+
+def test_evidence_validator_returns_only_a_validated_canonical_url():
+    canonical_url = url_safety.validate_and_canonicalize_evidence_url(
+        "HTTPS://Example.Test:443/evidence?utm_source=synthetic#fragment"
+    )
+
+    assert type(canonical_url) is CanonicalURL
+    assert canonical_url.value == "https://example.test/evidence"
+
+
+def test_evidence_validator_rejection_is_payload_free():
+    raw_url = f"https://example.test/evidence?access_token={SYNTHETIC_SECRET}"
+
+    with pytest.raises(URLValidationError) as caught:
+        url_safety.validate_and_canonicalize_evidence_url(raw_url)
+
+    assert caught.value.code == URLRejectionCode.SENSITIVE_QUERY.value
+    assert str(caught.value) == URLRejectionCode.SENSITIVE_QUERY.value
     assert raw_url not in repr(caught.value)
     assert SYNTHETIC_SECRET not in repr(caught.value)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import InitVar, dataclass
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple, Union
 from urllib.parse import SplitResult, unquote, urlsplit
@@ -17,7 +17,24 @@ _POLICY_VERSION = "wp7-v1-2026-08-09"
 _MAX_RAW_URL_LENGTH = 4096
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _SENSITIVE_QUERY_KEYS = frozenset(
-    {"token", "apikey", "auth", "signature", "session", "credential"}
+    {
+        "token",
+        "apikey",
+        "auth",
+        "signature",
+        "session",
+        "credential",
+        "accesstoken",
+        "oauthtoken",
+        "refreshtoken",
+        "idtoken",
+        "authtoken",
+        "bearertoken",
+        "sig",
+        "sessionid",
+        "authorization",
+        "credentialid",
+    }
 )
 _TRACKING_QUERY_KEYS = frozenset(
     {"fbclid", "gclid", "mc_cid", "mc_eid", "ref", "source"}
@@ -84,22 +101,13 @@ class URLPolicy:
 
 
 DEFAULT_URL_POLICY = URLPolicy()
-_CANONICAL_URL_VALIDATION_TOKEN = object()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class CanonicalURL:
     """An immutable HTTP(S) URL created only after WP7 validation."""
 
     value: str
-    _validation_token: InitVar[object] = None
-
-    def __post_init__(self, _validation_token: object) -> None:
-        if (
-            _validation_token is not _CANONICAL_URL_VALIDATION_TOKEN
-            or type(self.value) is not str
-        ):
-            raise URLValidationError("CANONICAL_URL_VALIDATION_REQUIRED")
 
     def __str__(self) -> str:
         return self.value
@@ -164,83 +172,76 @@ class URLValidationResult:
         }
 
 
-def validate_and_canonicalize_url(
-    candidate: LinkCandidate,
-    policy: URLPolicy = DEFAULT_URL_POLICY,
-) -> URLValidationResult:
-    """Validate one WP6 candidate's raw URL before canonicalizing safe input."""
-
-    if type(candidate) is not LinkCandidate:
-        raise URLValidationError("LINK_CANDIDATE_REQUIRED")
-    if type(policy) is not URLPolicy:
-        raise URLValidationError("URL_POLICY_REQUIRED")
-
-    raw_url = candidate.raw_url
+def _validate_and_canonicalize_raw_url(
+    raw_url: str,
+    policy: URLPolicy,
+) -> Union[str, URLRejectionCode]:
+    """Return a canonical value or typed rejection without retaining raw input."""
 
     # User-approved WP7 Decision 1: measure the untouched WP6 raw URL first.
     if len(raw_url) > policy.max_url_length:
-        return _rejected(candidate, URLRejectionCode.OVERLONG_URL)
+        return URLRejectionCode.OVERLONG_URL
     if _contains_ascii_control(raw_url):
-        return _rejected(candidate, URLRejectionCode.CONTROL_CHARACTER)
+        return URLRejectionCode.CONTROL_CHARACTER
     if _has_edge_whitespace(raw_url) or "\\" in raw_url:
-        return _rejected(candidate, URLRejectionCode.AMBIGUOUS_URL)
+        return URLRejectionCode.AMBIGUOUS_URL
     if not _has_valid_percent_escapes(raw_url):
-        return _rejected(candidate, URLRejectionCode.AMBIGUOUS_URL)
+        return URLRejectionCode.AMBIGUOUS_URL
 
     try:
         parsed = urlsplit(raw_url)
     except (UnicodeError, ValueError):
-        return _rejected(candidate, URLRejectionCode.AMBIGUOUS_URL)
+        return URLRejectionCode.AMBIGUOUS_URL
 
     scheme = parsed.scheme.casefold()
     if scheme not in _ALLOWED_SCHEMES:
-        return _rejected(candidate, URLRejectionCode.UNSUPPORTED_SCHEME)
+        return URLRejectionCode.UNSUPPORTED_SCHEME
     if not parsed.netloc or parsed.hostname is None or not parsed.hostname:
-        return _rejected(candidate, URLRejectionCode.MISSING_HOST)
+        return URLRejectionCode.MISSING_HOST
     if parsed.username is not None or parsed.password is not None:
-        return _rejected(candidate, URLRejectionCode.USERINFO_NOT_ALLOWED)
+        return URLRejectionCode.USERINFO_NOT_ALLOWED
     if parsed.netloc.endswith(":"):
-        return _rejected(candidate, URLRejectionCode.INVALID_PORT)
+        return URLRejectionCode.INVALID_PORT
 
     try:
         port = parsed.port
     except ValueError:
-        return _rejected(candidate, URLRejectionCode.INVALID_PORT)
+        return URLRejectionCode.INVALID_PORT
 
     hostname = parsed.hostname
     if hostname.endswith(".") or "%" in hostname:
-        return _rejected(candidate, URLRejectionCode.AMBIGUOUS_URL)
+        return URLRejectionCode.AMBIGUOUS_URL
 
     host_result = _validate_host(hostname)
     if isinstance(host_result, URLRejectionCode):
-        return _rejected(candidate, host_result)
+        return host_result
     canonical_host, literal_ip = host_result
 
     if canonical_host == "localhost" or canonical_host.endswith(".local"):
-        return _rejected(candidate, URLRejectionCode.LOCAL_HOST_NOT_ALLOWED)
+        return URLRejectionCode.LOCAL_HOST_NOT_ALLOWED
     if any(label in _INTERNAL_LABELS for label in canonical_host.split(".")):
-        return _rejected(candidate, URLRejectionCode.UNSAFE_INTERNAL_TARGET)
+        return URLRejectionCode.UNSAFE_INTERNAL_TARGET
     if literal_ip is not None and _is_non_public_ip(literal_ip):
-        return _rejected(candidate, URLRejectionCode.NON_PUBLIC_IP_NOT_ALLOWED)
+        return URLRejectionCode.NON_PUBLIC_IP_NOT_ALLOWED
     if _has_internal_path_segment(parsed.path):
-        return _rejected(candidate, URLRejectionCode.UNSAFE_INTERNAL_TARGET)
+        return URLRejectionCode.UNSAFE_INTERNAL_TARGET
 
     try:
         sensitive_query = _has_sensitive_query_key(parsed.query)
     except (UnicodeError, ValueError):
-        return _rejected(candidate, URLRejectionCode.AMBIGUOUS_URL)
+        return URLRejectionCode.AMBIGUOUS_URL
     if sensitive_query:
-        return _rejected(candidate, URLRejectionCode.SENSITIVE_QUERY)
+        return URLRejectionCode.SENSITIVE_QUERY
 
     if _contains_unencoded_whitespace(parsed):
-        return _rejected(candidate, URLRejectionCode.AMBIGUOUS_URL)
+        return URLRejectionCode.AMBIGUOUS_URL
     if canonical_host in _SHORTENER_HOSTS or (
         canonical_host,
         _normalize_path_percent_encoding(parsed.path).casefold(),
     ) in _REDIRECT_HOST_PATHS:
-        return _rejected(candidate, URLRejectionCode.REDIRECTOR_NOT_ALLOWED)
+        return URLRejectionCode.REDIRECTOR_NOT_ALLOWED
 
-    canonical_value = _canonicalize_safe_url(
+    return _canonicalize_safe_url(
         raw_url=raw_url,
         parsed=parsed,
         scheme=scheme,
@@ -248,11 +249,72 @@ def validate_and_canonicalize_url(
         literal_ip=literal_ip,
         port=port,
     )
-    canonical_url = CanonicalURL(
-        canonical_value,
-        _validation_token=_CANONICAL_URL_VALIDATION_TOKEN,
+
+
+def _build_canonical_url_authority():
+    authorization = object()
+
+    def canonical_url_init(self, value, _validation_token=None):
+        if _validation_token is not authorization or type(value) is not str:
+            raise URLValidationError("CANONICAL_URL_VALIDATION_REQUIRED")
+        object.__setattr__(self, "value", value)
+
+    def validate_and_canonicalize_url(
+        candidate: LinkCandidate,
+        policy: URLPolicy = DEFAULT_URL_POLICY,
+    ) -> URLValidationResult:
+        """Validate one WP6 candidate's raw URL before canonicalizing safe input."""
+
+        if type(candidate) is not LinkCandidate:
+            raise URLValidationError("LINK_CANDIDATE_REQUIRED")
+        if type(policy) is not URLPolicy:
+            raise URLValidationError("URL_POLICY_REQUIRED")
+
+        result = _validate_and_canonicalize_raw_url(candidate.raw_url, policy)
+        if isinstance(result, URLRejectionCode):
+            return _rejected(candidate, result)
+        return _accepted(
+            candidate,
+            CanonicalURL(result, _validation_token=authorization),
+        )
+
+    def validate_and_canonicalize_evidence_url(
+        raw_url: str,
+        policy: URLPolicy = DEFAULT_URL_POLICY,
+    ) -> CanonicalURL:
+        """Validate raw metric evidence and return only a safe canonical URL."""
+
+        if type(raw_url) is not str:
+            raise URLValidationError("RAW_URL_REQUIRED")
+        if type(policy) is not URLPolicy:
+            raise URLValidationError("URL_POLICY_REQUIRED")
+
+        result = _validate_and_canonicalize_raw_url(raw_url, policy)
+        if isinstance(result, URLRejectionCode):
+            raise URLValidationError(result.value)
+        return CanonicalURL(result, _validation_token=authorization)
+
+    canonical_url_init.__name__ = "__init__"
+    canonical_url_init.__qualname__ = "CanonicalURL.__init__"
+    validate_and_canonicalize_url.__qualname__ = "validate_and_canonicalize_url"
+    validate_and_canonicalize_evidence_url.__qualname__ = (
+        "validate_and_canonicalize_evidence_url"
     )
-    return _accepted(candidate, canonical_url)
+    return (
+        canonical_url_init,
+        validate_and_canonicalize_url,
+        validate_and_canonicalize_evidence_url,
+    )
+
+
+(
+    _canonical_url_init,
+    validate_and_canonicalize_url,
+    validate_and_canonicalize_evidence_url,
+) = _build_canonical_url_authority()
+CanonicalURL.__init__ = _canonical_url_init
+del _canonical_url_init
+del _build_canonical_url_authority
 
 
 def _accepted(
@@ -383,6 +445,8 @@ def _has_sensitive_query_key(query: str) -> bool:
     for occurrence in query.split("&"):
         raw_key = occurrence.partition("=")[0]
         decoded_key = unquote(raw_key, encoding="utf-8", errors="strict")
+        if "%" in decoded_key:
+            raise ValueError("ambiguous query key")
         normalized_key = "".join(
             character
             for character in decoded_key.casefold()
@@ -474,5 +538,6 @@ __all__ = [
     "URLRejectionCode",
     "URLValidationError",
     "URLValidationResult",
+    "validate_and_canonicalize_evidence_url",
     "validate_and_canonicalize_url",
 ]

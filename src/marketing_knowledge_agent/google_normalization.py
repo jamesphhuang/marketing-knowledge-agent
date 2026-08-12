@@ -18,6 +18,7 @@ from .canonical_models import (
     ReviewStatus,
 )
 from .cell_normalization import FieldValueKind, InheritanceReason, ResolvedCellValue
+from .url_safety import URLValidationError, validate_and_canonicalize_evidence_url
 
 _PYDANTIC_V2 = hasattr(BaseModel, "model_validate")
 if _PYDANTIC_V2:
@@ -218,6 +219,7 @@ def _build_persistence_eligible_functions():
             return _excluded_source_ref(source)
 
         _validate_eligible_source(source, channel_values)
+        canonical_evidence_urls = _canonicalize_evidence_urls(source._evidence_urls)
         allowed_channels = tuple(
             channel for channel in _ALL_SOURCE_CHANNELS if channel_values[channel]
         )
@@ -228,7 +230,7 @@ def _build_persistence_eligible_functions():
             indicator=source._indicator,
             approved_statement=source._approved_statement,
             maintenance_updated_at=source._maintenance_updated_at,
-            evidence_urls=source._evidence_urls,
+            evidence_urls=canonical_evidence_urls,
             allowed_exposure_channels=allowed_channels,
             lifecycle_status=source._lifecycle_status,
             review_status=source._review_status,
@@ -454,6 +456,25 @@ def _validate_eligible_source(source: MetricSourceCells, channel_values: dict) -
         channel_values[channel] for channel in _WRITTEN_CHANNELS
     ):
         raise MetricMinimizationError("METRIC_QUOTE_POLICY_UNCERTAIN")
+
+
+def _canonicalize_evidence_urls(raw_urls: tuple) -> Tuple[str, ...]:
+    canonical_values = []
+    for raw_url in raw_urls:
+        try:
+            canonical_url = validate_and_canonicalize_evidence_url(raw_url)
+        except URLValidationError:
+            raise MetricMinimizationError("EVIDENCE_URL_UNSAFE") from None
+        canonical_values.append(canonical_url.value)
+
+    deduplicated_values = []
+    seen = set()
+    for canonical_value in canonical_values:
+        if canonical_value in seen:
+            continue
+        seen.add(canonical_value)
+        deduplicated_values.append(canonical_value)
+    return tuple(deduplicated_values)
 
 
 def _safe_lineage(lineage: object) -> CanonicalSourceLineage:
