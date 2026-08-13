@@ -147,7 +147,10 @@ class GoogleSheetsTransport:
                 _fail("GOOGLE_SHEETS_HTTP_STATUS_INVALID")
             if status == 200:
                 payload = _response_json(response)
-                return _map_result(payload, self._config)
+                self._require_before_deadline(deadline)
+                result = _map_result(payload, self._config)
+                self._require_before_deadline(deadline)
+                return result
             if status in policy.retry.retry_statuses:
                 retry_after = response.headers.get("Retry-After")
                 _close_response(response)
@@ -157,6 +160,7 @@ class GoogleSheetsTransport:
                     retry_after,
                     now=self._clock.utcnow(),
                     fallback=policy.retry.fallback_delay_seconds,
+                    maximum_delay=max(0.0, deadline - self._clock.monotonic()),
                 )
                 self._sleep_before_retry(delay, deadline)
                 continue
@@ -196,6 +200,10 @@ class GoogleSheetsTransport:
             sleep_failed = True
         if sleep_failed:
             _fail("GOOGLE_SHEETS_RETRY_SLEEP_FAILED")
+        if self._clock.monotonic() >= deadline:
+            _fail("GOOGLE_SHEETS_OVERALL_DEADLINE_EXCEEDED")
+
+    def _require_before_deadline(self, deadline: float) -> None:
         if self._clock.monotonic() >= deadline:
             _fail("GOOGLE_SHEETS_OVERALL_DEADLINE_EXCEEDED")
 
@@ -267,6 +275,9 @@ def _create_transport(
             max_refresh_attempts=0,
             auth_request=_BlockedAuthRequest(),
         )
+        session.trust_env = config.transport_policy.trust_env
+        if session.trust_env is not False:
+            _fail("GOOGLE_SHEETS_ENVIRONMENT_AUTHORITY_ENABLED")
         session.mount("https://", adapter)
     except Exception:
         session_failed = True
@@ -343,16 +354,25 @@ def _map_result(
     return result
 
 
-def _retry_delay(value: object, *, now: datetime, fallback: float) -> float:
+def _retry_delay(
+    value: object,
+    *,
+    now: datetime,
+    fallback: float,
+    maximum_delay: float,
+) -> float:
     if not isinstance(value, str):
         return fallback
     stripped = value.strip()
-    if stripped.isdigit():
-        try:
-            seconds = float(int(stripped))
-        except (ValueError, OverflowError):
-            return fallback
-        return seconds if math.isfinite(seconds) else fallback
+    if stripped and all("0" <= character <= "9" for character in stripped):
+        significant = stripped.lstrip("0")
+        if not significant:
+            return 0.0
+        maximum_digits = len(str(max(1, math.ceil(maximum_delay))))
+        if len(significant) > maximum_digits:
+            return maximum_delay
+        seconds = float(significant)
+        return min(seconds, maximum_delay)
     try:
         parsed = parsedate_to_datetime(stripped)
     except (TypeError, ValueError, OverflowError):

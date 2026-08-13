@@ -191,6 +191,7 @@ def test_zero_argument_runtime_config_binds_exact_frozen_selection_and_policy():
     assert policy.retry.retry_after_enabled is True
     assert policy.retry.jitter_enabled is False
     assert policy.retry.redirects_allowed is False
+    assert policy.trust_env is False
     assert config.transport_policy_version == "s1-wp1-google-sheets-transport-v1"
     assert config.transport_policy_identity.startswith("sha256:")
     assert config.transport_policy_identity != config.expected_selection_identity
@@ -244,6 +245,7 @@ def test_exact_rest_fields_selector_independently_covers_row_data_values():
             policy,
             retry=replace(policy.retry, redirects_allowed=True),
         ),
+        lambda policy: replace(policy, trust_env=True),
     ],
 )
 def test_transport_policy_mutations_change_identity_expectation(mutate):
@@ -283,6 +285,77 @@ def test_caller_cannot_override_request_or_runtime_authority():
             clock="caller-clock",
             sleeper="caller-sleeper",
         )
+    with pytest.raises(TypeError):
+        transport_module.create_google_sheets_transport(
+            FakeProvider(), trust_env=True
+        )
+
+
+def test_production_factory_ignores_hostile_proxy_environment(monkeypatch):
+    hostile_proxy = "http://proxy.invalid:65534"
+    for variable in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(variable, hostile_proxy)
+    monkeypatch.setenv("NO_PROXY", "")
+
+    transport = transport_module.create_google_sheets_transport(FakeProvider())
+    endpoint = production_google_sheets_runtime_config().transport_policy.endpoint
+    settings = transport._session.merge_environment_settings(
+        endpoint, {}, None, True, None
+    )
+
+    assert transport._session.trust_env is False
+    assert settings["proxies"] == {}
+    assert settings["verify"] is True
+
+
+def test_transport_construction_fails_closed_if_trust_env_cannot_be_set(
+    monkeypatch,
+):
+    class TrustEnvRefusingSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __setattr__(self, name, value):
+            if name == "trust_env":
+                raise RuntimeError(SECRET)
+            object.__setattr__(self, name, value)
+
+    monkeypatch.setattr(
+        transport_module, "AuthorizedSession", TrustEnvRefusingSession
+    )
+
+    with pytest.raises(GoogleSheetsTransportError) as caught:
+        transport_module.create_google_sheets_transport(FakeProvider())
+
+    assert caught.value.code == "GOOGLE_SHEETS_SESSION_CONSTRUCTION_FAILED"
+    assert SECRET not in str(caught.value)
+    assert caught.value.__context__ is None
+
+
+def test_transport_construction_fails_closed_if_trust_env_is_not_false(
+    monkeypatch,
+):
+    class TrustEnvIgnoringSession:
+        def __init__(self, *args, **kwargs):
+            self._trust_env = True
+
+        @property
+        def trust_env(self):
+            return self._trust_env
+
+        @trust_env.setter
+        def trust_env(self, value):
+            pass
+
+    monkeypatch.setattr(
+        transport_module, "AuthorizedSession", TrustEnvIgnoringSession
+    )
+
+    with pytest.raises(GoogleSheetsTransportError) as caught:
+        transport_module.create_google_sheets_transport(FakeProvider())
+
+    assert caught.value.code == "GOOGLE_SHEETS_SESSION_CONSTRUCTION_FAILED"
+    assert caught.value.__context__ is None
 
 
 def test_credential_scope_session_retry_and_adapter_boundaries_are_mechanical():
@@ -299,6 +372,7 @@ def test_credential_scope_session_retry_and_adapter_boundaries_are_mechanical():
     ]
     assert transport._session._refresh_status_codes == ()
     assert transport._session._max_refresh_attempts == 0
+    assert transport._session.trust_env is False
     assert transport._session.get_adapter(
         production_google_sheets_runtime_config().transport_policy.endpoint
     ).max_retries.total == 0

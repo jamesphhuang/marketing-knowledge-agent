@@ -326,6 +326,49 @@ def test_retry_delay_exceeding_deadline_does_not_sleep_or_retry():
     assert clock.sleeps == []
 
 
+@pytest.mark.parametrize("digits", [400, 5000])
+def test_huge_valid_retry_after_delta_never_falls_back_or_retries(digits):
+    transport, adapter, _, clock = _transport(
+        [
+            (429, {}, {"Retry-After": "9" * digits}),
+            (200, _production_response(), {}),
+        ]
+    )
+
+    with pytest.raises(GoogleSheetsTransportError) as caught:
+        transport.read()
+
+    assert caught.value.code == "GOOGLE_SHEETS_OVERALL_DEADLINE_EXCEEDED"
+    assert len(adapter.requests) == 1
+    assert clock.sleeps == []
+
+
+def test_zero_retry_after_is_deterministic_and_retries_once():
+    transport, adapter, _, clock = _transport(
+        [(429, {}, {"Retry-After": "0"}), (200, _production_response(), {})]
+    )
+
+    assert isinstance(transport.read(), ConfiguredReadResult)
+    assert len(adapter.requests) == 2
+    assert clock.sleeps == [0.0]
+
+
+def test_future_retry_after_date_beyond_deadline_does_not_retry():
+    clock = FakeClock()
+    future = format_datetime(clock.utcnow() + timedelta(seconds=120), usegmt=True)
+    transport, adapter, _, clock = _transport(
+        [(503, {}, {"Retry-After": future}), (200, _production_response(), {})],
+        clock=clock,
+    )
+
+    with pytest.raises(GoogleSheetsTransportError) as caught:
+        transport.read()
+
+    assert caught.value.code == "GOOGLE_SHEETS_OVERALL_DEADLINE_EXCEEDED"
+    assert len(adapter.requests) == 1
+    assert clock.sleeps == []
+
+
 def test_response_arriving_at_logical_deadline_is_rejected():
     clock = FakeClock()
 
@@ -334,6 +377,51 @@ def test_response_arriving_at_logical_deadline_is_rejected():
         return (200, _production_response(), {})
 
     transport, adapter, _, _ = _transport([expire_deadline], clock=clock)
+
+    with pytest.raises(GoogleSheetsTransportError) as caught:
+        transport.read()
+
+    assert caught.value.code == "GOOGLE_SHEETS_OVERALL_DEADLINE_EXCEEDED"
+    assert len(adapter.requests) == 1
+
+
+def test_json_decode_crossing_deadline_discards_payload(monkeypatch):
+    clock = FakeClock()
+    transport, adapter, _, _ = _transport(
+        [(200, _production_response(), {})], clock=clock
+    )
+    original_json = Response.json
+
+    def late_json(response, **kwargs):
+        payload = original_json(response, **kwargs)
+        clock.elapsed = 90.1
+        return payload
+
+    monkeypatch.setattr(Response, "json", late_json)
+
+    with pytest.raises(GoogleSheetsTransportError) as caught:
+        transport.read()
+
+    assert caught.value.code == "GOOGLE_SHEETS_OVERALL_DEADLINE_EXCEEDED"
+    assert len(adapter.requests) == 1
+
+
+@pytest.mark.parametrize("elapsed", [90.0, 90.1])
+def test_mapper_reaching_or_crossing_deadline_discards_result(monkeypatch, elapsed):
+    clock = FakeClock()
+    transport, adapter, _, _ = _transport(
+        [(200, _production_response(), {})], clock=clock
+    )
+    original_mapper = transport_module.map_google_sheets_response
+
+    def late_mapper(payload, plan):
+        result = original_mapper(payload, plan)
+        clock.elapsed = elapsed
+        return result
+
+    monkeypatch.setattr(
+        transport_module, "map_google_sheets_response", late_mapper
+    )
 
     with pytest.raises(GoogleSheetsTransportError) as caught:
         transport.read()

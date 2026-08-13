@@ -87,6 +87,7 @@ class TransportPolicy:
     semantic_method: str
     include_grid_data: bool
     oauth_scopes: Tuple[str, ...]
+    trust_env: bool
     timeout: TimeoutPolicy
     retry: RetryPolicy
 
@@ -100,6 +101,7 @@ class TransportPolicy:
             "include_grid_data": self.include_grid_data,
             "oauth_scopes": self.oauth_scopes,
             "request_ranges": self.request_ranges,
+            "trust_env": self.trust_env,
             "retry": {
                 "fallback_delay_seconds": self.retry.fallback_delay_seconds,
                 "jitter_enabled": self.retry.jitter_enabled,
@@ -190,6 +192,7 @@ def production_google_sheets_runtime_config() -> GoogleSheetsRuntimeConfig:
         semantic_method=_SEMANTIC_METHOD,
         include_grid_data=True,
         oauth_scopes=(_READONLY_SCOPE,),
+        trust_env=False,
         timeout=TimeoutPolicy(
             connect_seconds=5.0,
             read_seconds=30.0,
@@ -230,6 +233,8 @@ def _validate_transport_policy(
         _fail("RUNTIME_METHOD_BINDING_MISMATCH")
     if policy.oauth_scopes != (_READONLY_SCOPE,):
         _fail("RUNTIME_SCOPE_MISMATCH")
+    if policy.trust_env is not False:
+        _fail("RUNTIME_ENVIRONMENT_AUTHORITY_ENABLED")
     if policy.timeout != TimeoutPolicy(5.0, 30.0, 90.0):
         _fail("RUNTIME_TIMEOUT_POLICY_MISMATCH")
     if policy.retry != RetryPolicy(
