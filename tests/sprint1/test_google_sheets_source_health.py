@@ -9,6 +9,7 @@ import pytest
 from marketing_knowledge_agent.google_sheets_dry_run_contracts import (
     CoverageProvenBatchContext,
     DryRunContractError,
+    RunMode,
     SourceHealthDisposition,
     create_first_live_baseline_evidence,
     _context_envelope,
@@ -29,6 +30,8 @@ from sprint1.test_google_sheets_dry_run_contracts import (
     FIXED_UUID4,
     configured_result,
     context,
+    context_provenance,
+    forged_exact_context,
     production_response,
     synthetic_context,
 )
@@ -223,8 +226,8 @@ def test_fingerprint_comparison_reports_each_mismatch_in_order(
     first = context()
     second = context()
     changed_envelope = replace(_context_envelope(second), **{field_name: value})
-    changed_context = _create_coverage_proven_batch_context(
-        _context_result(second), changed_envelope
+    changed_context = forged_exact_context(
+        _context_result(second), changed_envelope, context_provenance(second)
     )
 
     result = compare_coverage_proven_fingerprints(first, changed_context)
@@ -249,8 +252,8 @@ def test_fingerprint_comparison_checks_identity_before_f1():
     changed_envelope = replace(
         _context_envelope(second), target_identity_hash="sha256:" + "4" * 64
     )
-    changed_context = _create_coverage_proven_batch_context(
-        _context_result(second), changed_envelope
+    changed_context = forged_exact_context(
+        _context_result(second), changed_envelope, context_provenance(second)
     )
 
     result = compare_coverage_proven_fingerprints(first, changed_context)
@@ -328,6 +331,9 @@ def test_context_subclass_and_altered_envelope_are_rejected():
             pass
 
     forged = ForgedContext(result, altered)
+    object.__setattr__(
+        forged, "_run_provenance", context_provenance(genuine)
+    )
     assert _validated_context_envelope(forged) is None
     with pytest.raises(
         DryRunContractError, match="COVERAGE_PROVEN_CONTEXT_BINDING_INVALID"
@@ -345,13 +351,15 @@ def test_semantic_context_validation_rejects_swap_and_every_altered_fact():
     second_envelope = _context_envelope(second)
 
     with pytest.raises(DryRunContractError, match="BINDING_MISMATCH"):
-        _create_coverage_proven_batch_context(first_result, second_envelope)
+        _create_coverage_proven_batch_context(
+            first_result, second_envelope, context_provenance(first)
+        )
 
     rebound_other_snapshot = replace(
         second_envelope, _result_object_identity=id(first_result)
     )
-    rebound_context = _create_coverage_proven_batch_context(
-        first_result, rebound_other_snapshot
+    rebound_context = forged_exact_context(
+        first_result, rebound_other_snapshot, context_provenance(first)
     )
     assert _validated_context_envelope(rebound_context) is None
 
@@ -365,9 +373,31 @@ def test_semantic_context_validation_rejects_swap_and_every_altered_fact():
         ("source_fingerprint", "sha256:" + "4" * 64),
     ):
         altered = replace(_context_envelope(first), **{field_name: value})
-        altered_context = _create_coverage_proven_batch_context(
-            first_result, altered
+        altered_context = forged_exact_context(
+            first_result, altered, context_provenance(first)
         )
         assert _validated_context_envelope(altered_context) is None
         result = compare_coverage_proven_fingerprints(first, altered_context)
         assert result.mismatch_code == "F1_COMPARE_SECOND_COVERAGE_INVALID"
+
+
+def test_fingerprint_comparator_rejects_run_provenance_mismatch():
+    genuine = synthetic_context()
+    upgraded_envelope = replace(
+        _context_envelope(genuine),
+        run_mode=RunMode.FIRST_LIVE,
+        disposition=SourceHealthDisposition.HUMAN_REVIEW_REQUIRED,
+    )
+    forged = forged_exact_context(
+        _context_result(genuine),
+        upgraded_envelope,
+        context_provenance(genuine),
+    )
+
+    invalid_first = compare_coverage_proven_fingerprints(forged, context())
+    invalid_second = compare_coverage_proven_fingerprints(context(), forged)
+
+    assert invalid_first.outcome is FingerprintComparisonOutcome.NOT_COMPARABLE
+    assert invalid_first.mismatch_code == "F1_COMPARE_FIRST_COVERAGE_INVALID"
+    assert invalid_second.outcome is FingerprintComparisonOutcome.NOT_COMPARABLE
+    assert invalid_second.mismatch_code == "F1_COMPARE_SECOND_COVERAGE_INVALID"

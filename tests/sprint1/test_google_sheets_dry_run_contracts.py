@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from copy import deepcopy
+from copy import copy, deepcopy
 import inspect
 import json
 import pickle
@@ -16,13 +16,16 @@ from marketing_knowledge_agent.google_sheets_dry_run_contracts import (
     CoverageProvenBatchContext,
     DryRunContractError,
     FirstLiveBaselineEvidence,
+    RunMode,
     SourceHealthDisposition,
     SafeStructuralCounts,
+    _RunModeProvenance,
     _canonical_deferred_check_codes,
     _canonical_structural_reason_codes,
     compute_evidence_hash,
     create_first_live_baseline_evidence,
     _context_envelope,
+    _context_result,
     _create_coverage_proven_batch_context,
 )
 from marketing_knowledge_agent.google_sheets_read_contracts import (
@@ -44,6 +47,7 @@ from marketing_knowledge_agent.google_sheets_source_health import (
     SOURCE_HEALTH_ENVELOPE_SCHEMA_VERSION,
     SensitiveOccupiedRowCounts,
     SourceHealthError,
+    _validated_context_envelope,
     build_first_live_coverage_proven_batch_context,
     build_synthetic_coverage_proven_batch_context,
 )
@@ -170,6 +174,20 @@ def synthetic_context(*, change: str = ""):
     )
 
 
+def context_provenance(value):
+    return object.__getattribute__(value, "_run_provenance")
+
+
+def forged_exact_context(result, envelope, provenance=None, *, omit=False):
+    value = object.__new__(CoverageProvenBatchContext)
+    object.__setattr__(value, "_configured_read_result", result)
+    object.__setattr__(value, "_envelope", envelope)
+    object.__setattr__(value, "_result_object_identity", id(result))
+    if not omit:
+        object.__setattr__(value, "_run_provenance", provenance)
+    return value
+
+
 def test_only_frozen_configured_read_result_is_accepted(monkeypatch):
     result = configured_result()
     called = False
@@ -283,7 +301,11 @@ def test_context_is_exactly_bound_opaque_immutable_and_nonserializable():
     with pytest.raises(TypeError, match="CONSTRUCTION_FORBIDDEN"):
         CoverageProvenBatchContext()
     with pytest.raises(DryRunContractError, match="BINDING_MISMATCH"):
-        _create_coverage_proven_batch_context(first_result, _context_envelope(second))
+        _create_coverage_proven_batch_context(
+            first_result,
+            _context_envelope(second),
+            context_provenance(first),
+        )
     with pytest.raises(AttributeError, match="IMMUTABLE"):
         first.envelope = _context_envelope(first)
     with pytest.raises(TypeError, match="PICKLE_FORBIDDEN"):
@@ -583,6 +605,109 @@ def test_synthetic_context_cannot_form_authoritative_first_live_evidence():
         FirstLiveBaselineEvidence(**create_first_live_baseline_evidence(context()).canonical_mapping())
 
 
+def test_run_mode_provenance_rejects_every_rebind_and_upgrade_path():
+    first_live = context()
+    synthetic = synthetic_context()
+    first_result = _context_result(first_live)
+    synthetic_result = _context_result(synthetic)
+    first_envelope = _context_envelope(first_live)
+    synthetic_envelope = _context_envelope(synthetic)
+    first_provenance = context_provenance(first_live)
+    synthetic_provenance = context_provenance(synthetic)
+
+    assert create_first_live_baseline_evidence(first_live).disposition is (
+        SourceHealthDisposition.HUMAN_REVIEW_REQUIRED
+    )
+    with pytest.raises(
+        DryRunContractError,
+        match="FIRST_LIVE_EVIDENCE_FIRST_LIVE_CONTEXT_REQUIRED",
+    ):
+        create_first_live_baseline_evidence(synthetic)
+
+    upgrade = replace(
+        synthetic_envelope,
+        run_mode=RunMode.FIRST_LIVE,
+        disposition=SourceHealthDisposition.HUMAN_REVIEW_REQUIRED,
+    )
+    altered_cases = (
+        (synthetic, replace(synthetic_envelope, run_mode=RunMode.FIRST_LIVE)),
+        (synthetic, upgrade),
+        (first_live, replace(first_envelope, run_mode=RunMode.SYNTHETIC)),
+        (
+            first_live,
+            replace(
+                first_envelope,
+                disposition=SourceHealthDisposition.STRUCTURAL_BLOCK,
+            ),
+        ),
+        (
+            synthetic,
+            replace(
+                synthetic_envelope,
+                disposition=SourceHealthDisposition.HUMAN_REVIEW_REQUIRED,
+            ),
+        ),
+    )
+    for source_context, altered in altered_cases:
+        source_result = _context_result(source_context)
+        provenance = context_provenance(source_context)
+        with pytest.raises(
+            DryRunContractError,
+            match="COVERAGE_PROVEN_CONTEXT_PROVENANCE_INVALID",
+        ):
+            _create_coverage_proven_batch_context(
+                source_result, altered, provenance
+            )
+        forged = forged_exact_context(source_result, altered, provenance)
+        assert _validated_context_envelope(forged) is None
+        with pytest.raises(
+            DryRunContractError, match="COVERAGE_PROVEN_CONTEXT_BINDING_INVALID"
+        ):
+            create_first_live_baseline_evidence(forged)
+
+    for provenance in (None, object(), synthetic_provenance, first_provenance):
+        with pytest.raises(
+            DryRunContractError,
+            match="COVERAGE_PROVEN_CONTEXT_PROVENANCE_INVALID",
+        ):
+            _create_coverage_proven_batch_context(
+                synthetic_result, upgrade, provenance
+            )
+
+    missing = forged_exact_context(
+        synthetic_result, synthetic_envelope, omit=True
+    )
+    wrong = forged_exact_context(
+        synthetic_result, synthetic_envelope, object()
+    )
+    cross_context = forged_exact_context(
+        synthetic_result, synthetic_envelope, context_provenance(synthetic_context())
+    )
+    cross_result = forged_exact_context(
+        first_result, first_envelope, context_provenance(context())
+    )
+    for forged in (missing, wrong, cross_context, cross_result):
+        assert _validated_context_envelope(forged) is None
+
+
+def test_run_mode_provenance_is_opaque_immutable_and_nonserializable():
+    built = context()
+    provenance = context_provenance(built)
+
+    assert type(provenance) is _RunModeProvenance
+    assert repr(provenance) == "_RunModeProvenance(<opaque>)"
+    assert not hasattr(provenance, "__dict__")
+    with pytest.raises(TypeError, match="CONSTRUCTION_FORBIDDEN"):
+        _RunModeProvenance()
+    with pytest.raises(AttributeError, match="IMMUTABLE"):
+        provenance.mode = RunMode.SYNTHETIC
+    for operation in (copy, deepcopy, pickle.dumps):
+        with pytest.raises(TypeError, match="PICKLE_FORBIDDEN"):
+            operation(provenance)
+    assert "provenance" not in repr(built).lower()
+    assert "FIRST_LIVE" not in repr(built)
+
+
 def test_code_allowlists_reject_cross_category_payload_duplicates_and_unknowns():
     envelope = _context_envelope(context(change="header"))
     assert _canonical_structural_reason_codes(
@@ -721,7 +846,7 @@ def test_envelope_defensively_canonicalizes_nested_collections_and_mappings():
         sensitive_occupied_row_counts=sensitive_mapping,
     )
     baseline_hash = create_first_live_baseline_evidence(
-        _create_coverage_proven_batch_context(result, copied)
+        original_context
     ).evidence_hash
     reason_input.clear()
     deferred_input.clear()
@@ -734,9 +859,15 @@ def test_envelope_defensively_canonicalizes_nested_collections_and_mappings():
     assert type(copied.sensitive_occupied_row_counts) is SensitiveOccupiedRowCounts
     assert copied.structural_reason_codes == original.structural_reason_codes
     assert copied.deferred_check_codes == original.deferred_check_codes
-    assert create_first_live_baseline_evidence(
-        _create_coverage_proven_batch_context(result, copied)
-    ).evidence_hash == baseline_hash
+    with pytest.raises(
+        DryRunContractError, match="COVERAGE_PROVEN_CONTEXT_PROVENANCE_INVALID"
+    ):
+        _create_coverage_proven_batch_context(
+            result, copied, context_provenance(original_context)
+        )
+    assert create_first_live_baseline_evidence(original_context).evidence_hash == (
+        baseline_hash
+    )
 
     with pytest.raises(AttributeError):
         copied.safe_counts.configured_range_count = 4

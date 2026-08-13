@@ -20,7 +20,10 @@ from .google_sheets_dry_run_contracts import (
     _context_binding_is_valid,
     _context_envelope,
     _context_result,
+    _context_run_provenance_mode,
     _create_coverage_proven_batch_context,
+    _issue_first_live_run_provenance,
+    _issue_synthetic_run_provenance,
 )
 from .google_sheets_read_contracts import (
     ConfiguredRange,
@@ -307,8 +310,8 @@ def build_first_live_coverage_proven_batch_context(
 
     return _build_coverage_proven_batch_context(
         configured_read_result,
-        RunMode.FIRST_LIVE,
         _correlation_id_factory,
+        _issue_first_live_run_provenance,
     )
 
 
@@ -321,18 +324,24 @@ def build_synthetic_coverage_proven_batch_context(
 
     return _build_coverage_proven_batch_context(
         configured_read_result,
-        RunMode.SYNTHETIC,
         _correlation_id_factory,
+        _issue_synthetic_run_provenance,
     )
 
 
 def _build_coverage_proven_batch_context(
     configured_read_result: ConfiguredReadResult,
-    run_mode: RunMode,
     correlation_id_factory: Optional[Callable[[], object]],
+    provenance_issuer: Callable[[ConfiguredReadResult, object], object],
 ) -> CoverageProvenBatchContext:
     """Validate one frozen configured result and build its in-memory WP2 context."""
 
+    if provenance_issuer is _issue_first_live_run_provenance:
+        run_mode = RunMode.FIRST_LIVE
+    elif provenance_issuer is _issue_synthetic_run_provenance:
+        run_mode = RunMode.SYNTHETIC
+    else:
+        _fail("SOURCE_HEALTH_PROVENANCE_ISSUER_INVALID")
     plan = _validate_configured_result(configured_read_result)
     correlation_id = _new_correlation_id(correlation_id_factory)
 
@@ -386,7 +395,10 @@ def _build_coverage_proven_batch_context(
         disposition=disposition,
         _result_object_identity=id(configured_read_result),
     )
-    return _create_coverage_proven_batch_context(configured_read_result, envelope)
+    run_provenance = provenance_issuer(configured_read_result, envelope)
+    return _create_coverage_proven_batch_context(
+        configured_read_result, envelope, run_provenance
+    )
 
 
 def _validate_configured_result(configured_read_result: object):
@@ -699,6 +711,9 @@ def _validated_context_envelope(value: object) -> Optional[SourceHealthEnvelope]
             return None
         if type(envelope) is not SourceHealthEnvelope:
             return None
+        trusted_mode = _context_run_provenance_mode(value)
+        if type(trusted_mode) is not RunMode:
+            return None
         plan = _validate_configured_result(result)
         snapshot = result.snapshot
         proof = result.coverage_proof
@@ -736,7 +751,8 @@ def _validated_context_envelope(value: object) -> Optional[SourceHealthEnvelope]
             _sensitive_count_values(sensitive_counts),
             reason_codes,
             _DEFERRED_CHECK_CODES,
-            _disposition(envelope.run_mode, reason_codes),
+            trusted_mode,
+            _disposition(trusted_mode, reason_codes),
             id(result),
         )
         actual = (
@@ -754,6 +770,7 @@ def _validated_context_envelope(value: object) -> Optional[SourceHealthEnvelope]
             _sensitive_count_values(envelope.sensitive_occupied_row_counts),
             envelope.structural_reason_codes,
             envelope.deferred_check_codes,
+            envelope.run_mode,
             envelope.disposition,
             envelope._result_object_identity,
         )

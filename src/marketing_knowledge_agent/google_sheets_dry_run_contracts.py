@@ -121,7 +121,12 @@ class SafeStructuralCounts:
 class CoverageProvenBatchContext:
     """Opaque in-memory coupling of one configured read and its WP2 envelope."""
 
-    __slots__ = ("_configured_read_result", "_envelope", "_result_object_identity")
+    __slots__ = (
+        "_configured_read_result",
+        "_envelope",
+        "_result_object_identity",
+        "_run_provenance",
+    )
 
     def __new__(cls, *args: object, **kwargs: object) -> "CoverageProvenBatchContext":
         raise TypeError("COVERAGE_PROVEN_CONTEXT_CONSTRUCTION_FORBIDDEN")
@@ -137,6 +142,35 @@ class CoverageProvenBatchContext:
 
     def __reduce_ex__(self, protocol: int) -> object:
         raise TypeError("COVERAGE_PROVEN_CONTEXT_PICKLE_FORBIDDEN")
+
+
+class _RunModeProvenance:
+    """Opaque builder-issued mode binding for one exact result and envelope."""
+
+    __slots__ = (
+        "_authority",
+        "_result_object_identity",
+        "_envelope_object_identity",
+    )
+
+    def __new__(cls, *args: object, **kwargs: object) -> "_RunModeProvenance":
+        raise TypeError("RUN_MODE_PROVENANCE_CONSTRUCTION_FORBIDDEN")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("RUN_MODE_PROVENANCE_IMMUTABLE")
+
+    def __repr__(self) -> str:
+        return "_RunModeProvenance(<opaque>)"
+
+    def __reduce__(self) -> object:
+        raise TypeError("RUN_MODE_PROVENANCE_PICKLE_FORBIDDEN")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        raise TypeError("RUN_MODE_PROVENANCE_PICKLE_FORBIDDEN")
+
+
+_FIRST_LIVE_RUN_AUTHORITY = object()
+_SYNTHETIC_RUN_AUTHORITY = object()
 
 
 @dataclass(frozen=True, init=False)
@@ -189,7 +223,11 @@ def create_first_live_baseline_evidence(
     envelope = _validated_context_envelope(context)
     if envelope is None:
         _fail("COVERAGE_PROVEN_CONTEXT_BINDING_INVALID")
-    if envelope.run_mode is not RunMode.FIRST_LIVE:
+    trusted_mode = _context_run_provenance_mode(context)
+    if (
+        trusted_mode is not RunMode.FIRST_LIVE
+        or envelope.run_mode is not RunMode.FIRST_LIVE
+    ):
         _fail("FIRST_LIVE_EVIDENCE_FIRST_LIVE_CONTEXT_REQUIRED")
     evidence = _new_evidence(
         schema_version=FIRST_LIVE_BASELINE_SCHEMA_VERSION,
@@ -226,6 +264,7 @@ def compute_evidence_hash(evidence: FirstLiveBaselineEvidence) -> str:
 def _create_coverage_proven_batch_context(
     configured_read_result: ConfiguredReadResult,
     envelope: "SourceHealthEnvelope",
+    run_provenance: object = None,
 ) -> CoverageProvenBatchContext:
     if type(configured_read_result) is not ConfiguredReadResult:
         _fail("COVERAGE_PROVEN_CONTEXT_RESULT_INVALID")
@@ -233,10 +272,18 @@ def _create_coverage_proven_batch_context(
         configured_read_result
     ):
         _fail("COVERAGE_PROVEN_CONTEXT_BINDING_MISMATCH")
+    if (
+        _provenance_mode_if_valid(
+            run_provenance, configured_read_result, envelope
+        )
+        is None
+    ):
+        _fail("COVERAGE_PROVEN_CONTEXT_PROVENANCE_INVALID")
     context = object.__new__(CoverageProvenBatchContext)
     object.__setattr__(context, "_configured_read_result", configured_read_result)
     object.__setattr__(context, "_envelope", envelope)
     object.__setattr__(context, "_result_object_identity", id(configured_read_result))
+    object.__setattr__(context, "_run_provenance", run_provenance)
     return context
 
 
@@ -247,12 +294,16 @@ def _context_binding_is_valid(value: object) -> bool:
         result = object.__getattribute__(value, "_configured_read_result")
         envelope = object.__getattribute__(value, "_envelope")
         identity = object.__getattribute__(value, "_result_object_identity")
+        run_provenance = object.__getattribute__(value, "_run_provenance")
     except (AttributeError, TypeError):
         return False
+    trusted_mode = _provenance_mode_if_valid(run_provenance, result, envelope)
     return (
         type(result) is ConfiguredReadResult
         and identity == id(result)
         and getattr(envelope, "_result_object_identity", None) == identity
+        and trusted_mode is not None
+        and getattr(envelope, "run_mode", None) is trusted_mode
     )
 
 
@@ -262,6 +313,79 @@ def _context_result(context: CoverageProvenBatchContext) -> ConfiguredReadResult
 
 def _context_envelope(context: CoverageProvenBatchContext) -> "SourceHealthEnvelope":
     return object.__getattribute__(context, "_envelope")
+
+
+def _context_run_provenance_mode(
+    context: CoverageProvenBatchContext,
+) -> object:
+    try:
+        result = object.__getattribute__(context, "_configured_read_result")
+        envelope = object.__getattribute__(context, "_envelope")
+        provenance = object.__getattribute__(context, "_run_provenance")
+    except (AttributeError, TypeError):
+        return None
+    return _provenance_mode_if_valid(provenance, result, envelope)
+
+
+def _issue_first_live_run_provenance(
+    configured_read_result: ConfiguredReadResult,
+    envelope: "SourceHealthEnvelope",
+) -> _RunModeProvenance:
+    return _new_run_mode_provenance(
+        _FIRST_LIVE_RUN_AUTHORITY, configured_read_result, envelope
+    )
+
+
+def _issue_synthetic_run_provenance(
+    configured_read_result: ConfiguredReadResult,
+    envelope: "SourceHealthEnvelope",
+) -> _RunModeProvenance:
+    return _new_run_mode_provenance(
+        _SYNTHETIC_RUN_AUTHORITY, configured_read_result, envelope
+    )
+
+
+def _new_run_mode_provenance(
+    authority: object,
+    configured_read_result: ConfiguredReadResult,
+    envelope: "SourceHealthEnvelope",
+) -> _RunModeProvenance:
+    provenance = object.__new__(_RunModeProvenance)
+    object.__setattr__(provenance, "_authority", authority)
+    object.__setattr__(
+        provenance, "_result_object_identity", id(configured_read_result)
+    )
+    object.__setattr__(provenance, "_envelope_object_identity", id(envelope))
+    return provenance
+
+
+def _provenance_mode_if_valid(
+    provenance: object,
+    configured_read_result: object,
+    envelope: object,
+) -> object:
+    if type(provenance) is not _RunModeProvenance:
+        return None
+    try:
+        authority = object.__getattribute__(provenance, "_authority")
+        result_identity = object.__getattribute__(
+            provenance, "_result_object_identity"
+        )
+        envelope_identity = object.__getattribute__(
+            provenance, "_envelope_object_identity"
+        )
+    except (AttributeError, TypeError):
+        return None
+    if (
+        result_identity != id(configured_read_result)
+        or envelope_identity != id(envelope)
+    ):
+        return None
+    if authority is _FIRST_LIVE_RUN_AUTHORITY:
+        return RunMode.FIRST_LIVE
+    if authority is _SYNTHETIC_RUN_AUTHORITY:
+        return RunMode.SYNTHETIC
+    return None
 
 
 def _new_evidence(**fields: object) -> FirstLiveBaselineEvidence:
