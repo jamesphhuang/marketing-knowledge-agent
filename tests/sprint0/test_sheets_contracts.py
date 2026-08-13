@@ -104,6 +104,16 @@ def test_snapshot_contracts_are_read_only():
         snapshot.spreadsheet_id = "synthetic-mutated-id"
 
 
+def test_snapshot_repr_does_not_expose_cell_payload():
+    snapshot = _snapshot()
+
+    rendered = repr(snapshot)
+
+    assert "Synthetic Plain Text" not in rendered
+    assert "SpreadsheetSnapshot" in rendered
+    assert "sheet_count=2" in rendered
+
+
 def test_google_value_rejects_ambiguous_or_unknown_value_branches():
     with pytest.raises(ValidationError, match="GOOGLE_VALUE_MULTIPLE_KINDS"):
         GoogleValue(string_value="synthetic", bool_value=True)

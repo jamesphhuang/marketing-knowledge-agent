@@ -181,6 +181,9 @@ class SpreadsheetSnapshot(_ReadOnlyDTO):
     spreadsheet_id: StrictStr = Field(..., min_length=1)
     sheets: Tuple[SheetSnapshot, ...]
 
+    def __repr__(self) -> str:
+        return f"SpreadsheetSnapshot(sheet_count={len(self.sheets)})"
+
     if _PYDANTIC_V2:
 
         @field_validator("sheets")

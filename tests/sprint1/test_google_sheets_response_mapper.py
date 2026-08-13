@@ -285,6 +285,7 @@ def test_sparse_omitted_interior_and_trailing_empty_encodings_normalize_equally(
 def test_result_repr_errors_and_logs_do_not_reflect_raw_payload(caplog):
     result = map_google_sheets_response(_response(), _plan())
     assert RAW_SENTINEL not in repr(result)
+    assert RAW_SENTINEL not in repr(result.snapshot)
     assert "SpreadsheetSnapshot" not in repr(result)
 
     malformed = _response()
@@ -333,6 +334,130 @@ def test_omitted_zero_merge_offsets_normalize_to_explicit_zero():
     assert compute_source_fingerprint(omitted_result.snapshot) == (
         compute_source_fingerprint(explicit_result.snapshot)
     )
+
+
+def test_omitted_merges_normalizes_to_explicit_empty_merges():
+    omitted = _response()
+    omitted["sheets"][1].pop("merges")
+    explicit = _response()
+
+    omitted_result = map_google_sheets_response(omitted, _plan())
+    explicit_result = map_google_sheets_response(explicit, _plan())
+
+    assert omitted_result.snapshot == explicit_result.snapshot
+    assert compute_source_fingerprint(omitted_result.snapshot) == (
+        compute_source_fingerprint(explicit_result.snapshot)
+    )
+
+
+def test_omitted_validation_booleans_normalize_to_explicit_false():
+    omitted = _response()
+    omitted_validation = omitted["sheets"][0]["data"][0]["rowData"][1]["values"][2][
+        "dataValidation"
+    ]
+    omitted_validation.pop("strict")
+    omitted_validation.pop("showCustomUi")
+
+    explicit = _response()
+    explicit_validation = explicit["sheets"][0]["data"][0]["rowData"][1]["values"][2][
+        "dataValidation"
+    ]
+    explicit_validation["strict"] = False
+    explicit_validation["showCustomUi"] = False
+
+    omitted_result = map_google_sheets_response(omitted, _plan())
+    explicit_result = map_google_sheets_response(explicit, _plan())
+
+    assert omitted_result.snapshot == explicit_result.snapshot
+    assert compute_source_fingerprint(omitted_result.snapshot) == (
+        compute_source_fingerprint(explicit_result.snapshot)
+    )
+
+
+def test_explicit_true_validation_booleans_remain_true():
+    response = _response()
+    validation = response["sheets"][0]["data"][0]["rowData"][1]["values"][2][
+        "dataValidation"
+    ]
+    validation["strict"] = True
+    validation["showCustomUi"] = True
+
+    result = map_google_sheets_response(response, _plan())
+    mapped_validation = next(
+        cell.data_validation
+        for cell in result.snapshot.sheets[0].cells
+        if (cell.row_index, cell.column_index) == (3, 3)
+    )
+
+    assert mapped_validation.strict is True
+    assert mapped_validation.show_custom_ui is True
+
+
+def test_omitted_zero_sheet_id_normalizes_to_explicit_zero():
+    plan = ConfiguredReadPlan(
+        spreadsheet_id="synthetic-zero-sheet",
+        config_version="synthetic-zero-sheet-v1",
+        sheets=(
+            ConfiguredSheet(
+                sheet_id=0,
+                title="Synthetic Zero Sheet",
+                hidden=False,
+                row_count=2,
+                column_count=2,
+            ),
+        ),
+        ranges=(
+            ConfiguredRange(
+                range_id="zero-sheet-range",
+                sheet_id=0,
+                start_row_index=0,
+                end_row_index=2,
+                start_column_index=0,
+                end_column_index=2,
+            ),
+        ),
+        fields=REQUIRED_GOOGLE_RESPONSE_FIELDS,
+    )
+    omitted = {
+        "spreadsheetId": "synthetic-zero-sheet",
+        "sheets": [
+            {
+                "properties": {
+                    "title": "Synthetic Zero Sheet",
+                    "gridProperties": {"rowCount": 2, "columnCount": 2},
+                },
+                "data": [{"rowData": [{"values": [{"formattedValue": "zero"}]}]}],
+                "merges": [],
+            }
+        ],
+    }
+    explicit = deepcopy(omitted)
+    explicit["sheets"][0]["properties"]["sheetId"] = 0
+
+    omitted_result = map_google_sheets_response(omitted, plan)
+    explicit_result = map_google_sheets_response(explicit, plan)
+
+    assert omitted_result.snapshot.sheets[0].sheet_id == 0
+    assert omitted_result.snapshot == explicit_result.snapshot
+    assert compute_source_fingerprint(omitted_result.snapshot) == (
+        compute_source_fingerprint(explicit_result.snapshot)
+    )
+
+
+def test_omitted_sheet_id_does_not_infer_configured_non_zero_id():
+    response = _response()
+    response["sheets"][0]["properties"].pop("sheetId")
+
+    with pytest.raises(GoogleSheetsResponseError) as caught:
+        map_google_sheets_response(response, _plan())
+
+    assert caught.value.code == "GOOGLE_RESPONSE_SHEET_UNEXPECTED"
+
+
+def test_explicit_correct_non_zero_sheet_id_still_maps():
+    result = map_google_sheets_response(_response(), _plan())
+
+    assert [sheet.sheet_id for sheet in result.snapshot.sheets] == [7, 9]
 
 
 def test_mapper_has_no_client_credential_or_persistence_interface():

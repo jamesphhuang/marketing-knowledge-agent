@@ -53,6 +53,18 @@ def test_same_snapshot_has_stable_canonical_bytes_and_fingerprint():
     assert len(first_fingerprint) == len("sha256:") + 64
 
 
+def test_payload_safe_repr_does_not_change_serialization_or_fingerprint():
+    snapshot = _snapshot()
+    serialized_before = serialize_source_snapshot(snapshot)
+    fingerprint_before = compute_source_fingerprint(snapshot)
+
+    rendered = repr(snapshot)
+
+    assert "Synthetic Plain Text" not in rendered
+    assert serialize_source_snapshot(snapshot) == serialized_before
+    assert compute_source_fingerprint(snapshot) == fingerprint_before
+
+
 def test_synthetic_snapshot_matches_golden_fingerprint():
     assert compute_source_fingerprint(_snapshot()) == (
         "sha256:8f3b71a0b419b35245ddfc0aa1a12327eeadc143aa4a40a8c48aceae4c5c25d9"

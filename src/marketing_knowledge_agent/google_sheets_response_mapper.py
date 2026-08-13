@@ -93,12 +93,11 @@ def _map_response(
         sheet = _mapping(raw_sheet, "GOOGLE_RESPONSE_SHEET_INVALID")
         _keys(
             sheet,
-            required={"properties", "data", "merges"},
+            required={"properties", "data"},
             allowed={"properties", "data", "merges"},
             code="GOOGLE_RESPONSE_SHEET_SHAPE_UNSUPPORTED",
             missing_codes={
                 "data": "GOOGLE_RESPONSE_SHEET_DATA_MISSING",
-                "merges": "GOOGLE_RESPONSE_SHEET_MERGES_MISSING",
             },
         )
         properties = _mapping(
@@ -106,12 +105,12 @@ def _map_response(
         )
         _keys(
             properties,
-            required={"sheetId", "title", "gridProperties"},
+            required={"title", "gridProperties"},
             allowed={"sheetId", "title", "hidden", "gridProperties"},
             code="GOOGLE_RESPONSE_SHEET_PROPERTIES_INVALID",
         )
         sheet_id = _non_negative_int(
-            properties["sheetId"], "GOOGLE_RESPONSE_SHEET_ID_INVALID"
+            properties.get("sheetId", 0), "GOOGLE_RESPONSE_SHEET_ID_INVALID"
         )
         if sheet_id in seen_sheet_ids:
             _fail("GOOGLE_RESPONSE_SHEET_DUPLICATE")
@@ -152,7 +151,7 @@ def _map_response(
             configured_ranges=configured_ranges,
             seen_range_ids=seen_range_ids,
         )
-        merges = _map_merges(sheet["merges"], expected_sheet)
+        merges = _map_merges(sheet.get("merges", []), expected_sheet)
         try:
             mapped_sheets.append(
                 SheetSnapshot(
@@ -506,8 +505,8 @@ def _map_optional_data_validation(
                 values=tuple(condition_values),
             ),
             input_message=_optional_string(validation, "inputMessage"),
-            strict=_optional_bool(validation, "strict", default=None),
-            show_custom_ui=_optional_bool(validation, "showCustomUi", default=None),
+            strict=_optional_bool(validation, "strict", default=False),
+            show_custom_ui=_optional_bool(validation, "showCustomUi", default=False),
         )
     except ValidationError:
         _fail("GOOGLE_RESPONSE_VALIDATION_INVALID")
