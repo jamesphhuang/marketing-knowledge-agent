@@ -9,6 +9,7 @@ description = "Offline RAG prototype for an Obsidian Markdown marketing knowledg
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "google-auth[requests]>=2.50,<2.51",
     "pydantic>=1.10,<3",
     "slack-bolt>=1.20,<2",
 ]
