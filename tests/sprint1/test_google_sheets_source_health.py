@@ -7,7 +7,8 @@ import sys
 import pytest
 
 from marketing_knowledge_agent.google_sheets_dry_run_contracts import (
-    RunMode,
+    CoverageProvenBatchContext,
+    DryRunContractError,
     SourceHealthDisposition,
     create_first_live_baseline_evidence,
     _context_envelope,
@@ -20,13 +21,16 @@ from marketing_knowledge_agent.google_sheets_fingerprint_check import (
 )
 from marketing_knowledge_agent.google_sheets_source_health import (
     SourceHealthError,
-    build_coverage_proven_batch_context,
+    build_first_live_coverage_proven_batch_context,
+    build_synthetic_coverage_proven_batch_context,
+    _validated_context_envelope,
 )
 from sprint1.test_google_sheets_dry_run_contracts import (
     FIXED_UUID4,
     configured_result,
     context,
     production_response,
+    synthetic_context,
 )
 
 
@@ -69,9 +73,8 @@ def test_pending_first_data_row_is_not_inferred_as_a_header():
     result = map_google_sheets_response(
         response, production_google_sheets_runtime_config().read_plan
     )
-    built = build_coverage_proven_batch_context(
+    built = build_synthetic_coverage_proven_batch_context(
         result,
-        run_mode=RunMode.SYNTHETIC,
         _correlation_id_factory=lambda: FIXED_UUID4,
     )
     envelope = _context_envelope(built)
@@ -130,19 +133,22 @@ def test_deferred_governance_is_explicit_and_not_falsely_counted_as_zero():
 
 def test_header_drift_blocks_both_synthetic_and_first_live_without_pass():
     result = configured_result(change="header")
-    for mode in (RunMode.SYNTHETIC, RunMode.FIRST_LIVE):
-        built = build_coverage_proven_batch_context(
-            result,
-            run_mode=mode,
-            _correlation_id_factory=lambda: FIXED_UUID4,
-        )
-        evidence = create_first_live_baseline_evidence(built)
-        assert evidence.disposition is SourceHealthDisposition.STRUCTURAL_BLOCK
-        assert evidence.structural_reason_codes == (
+    synthetic = build_synthetic_coverage_proven_batch_context(
+        result, _correlation_id_factory=lambda: FIXED_UUID4
+    )
+    first_live = build_first_live_coverage_proven_batch_context(
+        result, _correlation_id_factory=lambda: FIXED_UUID4
+    )
+    for built in (synthetic, first_live):
+        envelope = _context_envelope(built)
+        assert envelope.disposition is SourceHealthDisposition.STRUCTURAL_BLOCK
+        assert envelope.structural_reason_codes == (
             "SOURCE_HEALTH_MERCHANT_CASE_HEADER_MISMATCH",
         )
-        assert evidence.safe_counts.structural_issue_count == 1
-        assert "PASS" not in evidence.canonical_json()
+        assert envelope.safe_counts.structural_issue_count == 1
+    evidence = create_first_live_baseline_evidence(first_live)
+    assert evidence.disposition is SourceHealthDisposition.STRUCTURAL_BLOCK
+    assert "PASS" not in evidence.canonical_json()
 
 
 def test_structural_errors_are_payload_free_even_for_hostile_input():
@@ -151,9 +157,8 @@ def test_structural_errors_are_payload_free_even_for_hostile_input():
             return "RAW_CELL_RESTRICTED_CUSTOMER_CREDENTIAL_URL_SENTINEL"
 
     with pytest.raises(SourceHealthError) as caught:
-        build_coverage_proven_batch_context(
+        build_synthetic_coverage_proven_batch_context(
             Hostile(),
-            run_mode=RunMode.SYNTHETIC,
         )
 
     rendered = repr(caught.value) + str(caught.value)
@@ -225,7 +230,7 @@ def test_fingerprint_comparison_reports_each_mismatch_in_order(
     result = compare_coverage_proven_fingerprints(first, changed_context)
 
     assert result.outcome is FingerprintComparisonOutcome.NOT_COMPARABLE
-    assert result.mismatch_code == mismatch_code
+    assert result.mismatch_code == "F1_COMPARE_SECOND_COVERAGE_INVALID"
 
 
 def test_fingerprint_comparison_validates_first_then_second_context():
@@ -250,7 +255,7 @@ def test_fingerprint_comparison_checks_identity_before_f1():
 
     result = compare_coverage_proven_fingerprints(first, changed_context)
 
-    assert result.mismatch_code == "F1_COMPARE_TARGET_MISMATCH"
+    assert result.mismatch_code == "F1_COMPARE_SECOND_COVERAGE_INVALID"
 
 
 def test_fingerprint_comparison_has_no_io_network_or_transport_authority(monkeypatch):
@@ -299,3 +304,70 @@ def test_safe_evidence_json_is_stable_sorted_and_has_no_unknown_nested_fields():
         "positional_binding_valid_count",
         "structural_issue_count",
     }
+
+
+def test_context_subclass_and_altered_envelope_are_rejected():
+    genuine = context()
+    result = _context_result(genuine)
+    altered = replace(
+        _context_envelope(genuine),
+        source_fingerprint="sha256:" + "9" * 64,
+    )
+
+    class ForgedContext(CoverageProvenBatchContext):
+        __slots__ = ()
+
+        def __new__(cls, source_result, source_envelope):
+            value = object.__new__(cls)
+            object.__setattr__(value, "_configured_read_result", source_result)
+            object.__setattr__(value, "_envelope", source_envelope)
+            object.__setattr__(value, "_result_object_identity", id(source_result))
+            return value
+
+        def __init__(self, source_result, source_envelope):
+            pass
+
+    forged = ForgedContext(result, altered)
+    assert _validated_context_envelope(forged) is None
+    with pytest.raises(
+        DryRunContractError, match="COVERAGE_PROVEN_CONTEXT_BINDING_INVALID"
+    ):
+        create_first_live_baseline_evidence(forged)
+    comparison = compare_coverage_proven_fingerprints(genuine, forged)
+    assert comparison.outcome is FingerprintComparisonOutcome.NOT_COMPARABLE
+    assert comparison.mismatch_code == "F1_COMPARE_SECOND_COVERAGE_INVALID"
+
+
+def test_semantic_context_validation_rejects_swap_and_every_altered_fact():
+    first = context()
+    second = context(change="semantic")
+    first_result = _context_result(first)
+    second_envelope = _context_envelope(second)
+
+    with pytest.raises(DryRunContractError, match="BINDING_MISMATCH"):
+        _create_coverage_proven_batch_context(first_result, second_envelope)
+
+    rebound_other_snapshot = replace(
+        second_envelope, _result_object_identity=id(first_result)
+    )
+    rebound_context = _create_coverage_proven_batch_context(
+        first_result, rebound_other_snapshot
+    )
+    assert _validated_context_envelope(rebound_context) is None
+
+    for field_name, value in (
+        ("target_identity_hash", "sha256:" + "1" * 64),
+        ("configuration_identity", "sha256:" + "2" * 64),
+        ("coverage_identity", "sha256:" + "3" * 64),
+        ("mapper_version", "altered-mapper-v2"),
+        ("snapshot_schema_version", "altered-snapshot-v2"),
+        ("fingerprint_semantics_version", "altered-fingerprint-v2"),
+        ("source_fingerprint", "sha256:" + "4" * 64),
+    ):
+        altered = replace(_context_envelope(first), **{field_name: value})
+        altered_context = _create_coverage_proven_batch_context(
+            first_result, altered
+        )
+        assert _validated_context_envelope(altered_context) is None
+        result = compare_coverage_proven_fingerprints(first, altered_context)
+        assert result.mismatch_code == "F1_COMPARE_SECOND_COVERAGE_INVALID"

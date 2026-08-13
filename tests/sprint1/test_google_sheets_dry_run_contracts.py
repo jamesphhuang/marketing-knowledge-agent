@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from copy import deepcopy
+import inspect
 import json
 import pickle
 import uuid
@@ -15,8 +16,10 @@ from marketing_knowledge_agent.google_sheets_dry_run_contracts import (
     CoverageProvenBatchContext,
     DryRunContractError,
     FirstLiveBaselineEvidence,
-    RunMode,
     SourceHealthDisposition,
+    SafeStructuralCounts,
+    _canonical_deferred_check_codes,
+    _canonical_structural_reason_codes,
     compute_evidence_hash,
     create_first_live_baseline_evidence,
     _context_envelope,
@@ -25,6 +28,7 @@ from marketing_knowledge_agent.google_sheets_dry_run_contracts import (
 from marketing_knowledge_agent.google_sheets_read_contracts import (
     ConfiguredRange,
     ConfiguredReadPlan,
+    ConfiguredReadResult,
     ConfiguredSheet,
     REQUIRED_GOOGLE_RESPONSE_FIELDS,
 )
@@ -38,8 +42,10 @@ from marketing_knowledge_agent.google_sheets_source_health import (
     FINGERPRINT_SEMANTICS_VERSION,
     SNAPSHOT_SCHEMA_VERSION,
     SOURCE_HEALTH_ENVELOPE_SCHEMA_VERSION,
+    SensitiveOccupiedRowCounts,
     SourceHealthError,
-    build_coverage_proven_batch_context,
+    build_first_live_coverage_proven_batch_context,
+    build_synthetic_coverage_proven_batch_context,
 )
 
 
@@ -150,10 +156,16 @@ def configured_result(*, change: str = ""):
     return map_google_sheets_response(production_response(change=change), plan)
 
 
-def context(*, change: str = "", mode: RunMode = RunMode.SYNTHETIC):
-    return build_coverage_proven_batch_context(
+def context(*, change: str = ""):
+    return build_first_live_coverage_proven_batch_context(
         configured_result(change=change),
-        run_mode=mode,
+        _correlation_id_factory=lambda: FIXED_UUID4,
+    )
+
+
+def synthetic_context(*, change: str = ""):
+    return build_synthetic_coverage_proven_batch_context(
+        configured_result(change=change),
         _correlation_id_factory=lambda: FIXED_UUID4,
     )
 
@@ -171,9 +183,8 @@ def test_only_frozen_configured_read_result_is_accepted(monkeypatch):
         "marketing_knowledge_agent.google_sheets_source_health.compute_source_fingerprint",
         fingerprint,
     )
-    built = build_coverage_proven_batch_context(
+    built = build_synthetic_coverage_proven_batch_context(
         result,
-        run_mode=RunMode.SYNTHETIC,
         _correlation_id_factory=lambda: FIXED_UUID4,
     )
     assert called is True
@@ -183,17 +194,15 @@ def test_only_frozen_configured_read_result_is_accepted(monkeypatch):
     with pytest.raises(
         SourceHealthError, match="SOURCE_HEALTH_CONFIGURED_READ_RESULT_REQUIRED"
     ):
-        build_coverage_proven_batch_context(
+        build_synthetic_coverage_proven_batch_context(
             result.snapshot,
-            run_mode=RunMode.SYNTHETIC,
         )
     assert called is False
 
     with pytest.raises(TypeError):
-        build_coverage_proven_batch_context(
+        build_synthetic_coverage_proven_batch_context(
             result.snapshot,
             result.coverage_proof,
-            run_mode=RunMode.SYNTHETIC,
         )
 
 
@@ -230,9 +239,8 @@ def test_mismatched_configuration_is_rejected_before_f1(monkeypatch):
     with pytest.raises(
         SourceHealthError, match="SOURCE_HEALTH_FROZEN_SELECTION_MISMATCH"
     ):
-        build_coverage_proven_batch_context(
+        build_synthetic_coverage_proven_batch_context(
             result,
-            run_mode=RunMode.SYNTHETIC,
         )
 
 
@@ -240,9 +248,8 @@ def test_existing_f1_and_version_are_reused_without_redefinition():
     first_result = configured_result()
     second_result = configured_result()
     first = context()
-    second = build_coverage_proven_batch_context(
+    second = build_first_live_coverage_proven_batch_context(
         second_result,
-        run_mode=RunMode.SYNTHETIC,
         _correlation_id_factory=lambda: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     )
     first_envelope = _context_envelope(first)
@@ -264,14 +271,12 @@ def test_existing_f1_and_version_are_reused_without_redefinition():
 def test_context_is_exactly_bound_opaque_immutable_and_nonserializable():
     first_result = configured_result()
     second_result = configured_result(change="semantic")
-    first = build_coverage_proven_batch_context(
+    first = build_first_live_coverage_proven_batch_context(
         first_result,
-        run_mode=RunMode.SYNTHETIC,
         _correlation_id_factory=lambda: FIXED_UUID4,
     )
-    second = build_coverage_proven_batch_context(
+    second = build_first_live_coverage_proven_batch_context(
         second_result,
-        run_mode=RunMode.SYNTHETIC,
         _correlation_id_factory=lambda: FIXED_UUID4,
     )
 
@@ -296,8 +301,8 @@ def test_context_is_exactly_bound_opaque_immutable_and_nonserializable():
 
 
 def test_correlation_id_is_service_generated_and_strict_uuid4():
-    generated = build_coverage_proven_batch_context(
-        configured_result(), run_mode=RunMode.SYNTHETIC
+    generated = build_synthetic_coverage_proven_batch_context(
+        configured_result()
     )
     generated_value = _context_envelope(generated).correlation_id
     parsed = uuid.UUID(generated_value)
@@ -309,9 +314,8 @@ def test_correlation_id_is_service_generated_and_strict_uuid4():
     injected = context()
     assert _context_envelope(injected).correlation_id == FIXED_UUID4
     with pytest.raises(TypeError):
-        build_coverage_proven_batch_context(
+        build_synthetic_coverage_proven_batch_context(
             configured_result(),
-            run_mode=RunMode.SYNTHETIC,
             correlation_id=FIXED_UUID4,
         )
 
@@ -330,16 +334,15 @@ def test_private_correlation_id_seam_rejects_invalid_values(invalid):
     with pytest.raises(
         SourceHealthError, match="SOURCE_HEALTH_CORRELATION_ID_INVALID"
     ):
-        build_coverage_proven_batch_context(
+        build_synthetic_coverage_proven_batch_context(
             configured_result(),
-            run_mode=RunMode.SYNTHETIC,
             _correlation_id_factory=lambda: invalid,
         )
 
 
 def test_dispositions_are_closed_and_caller_cannot_supply_pass_or_threshold():
-    synthetic = _context_envelope(context())
-    first_live = _context_envelope(context(mode=RunMode.FIRST_LIVE))
+    synthetic = _context_envelope(synthetic_context())
+    first_live = _context_envelope(context())
     blocked = _context_envelope(context(change="header"))
 
     assert synthetic.disposition is SourceHealthDisposition.SYNTHETIC_CHECKS_COMPLETE
@@ -351,18 +354,16 @@ def test_dispositions_are_closed_and_caller_cannot_supply_pass_or_threshold():
 
     for forbidden in ("disposition", "threshold", "approved", "baseline_pass"):
         with pytest.raises(TypeError):
-            build_coverage_proven_batch_context(
+            build_synthetic_coverage_proven_batch_context(
                 configured_result(),
-                run_mode=RunMode.SYNTHETIC,
                 **{forbidden: True},
             )
 
 
 def test_first_live_evidence_has_exact_allowlist_and_deterministic_hash():
     first = create_first_live_baseline_evidence(context())
-    second_context = build_coverage_proven_batch_context(
+    second_context = build_first_live_coverage_proven_batch_context(
         configured_result(),
-        run_mode=RunMode.SYNTHETIC,
         _correlation_id_factory=lambda: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     )
     second = create_first_live_baseline_evidence(second_context)
@@ -402,14 +403,10 @@ def test_first_live_evidence_has_exact_allowlist_and_deterministic_hash():
     assert "threshold" not in primitive
     assert "human_approval" not in primitive
 
-    parsed = FirstLiveBaselineEvidence.from_mapping(primitive)
-    assert parsed.canonical_json() == first.canonical_json()
+    assert not hasattr(FirstLiveBaselineEvidence, "from_mapping")
     unknown = deepcopy(primitive)
     unknown["unknown"] = "forbidden"
-    with pytest.raises(
-        DryRunContractError, match="FIRST_LIVE_EVIDENCE_FIELDS_INVALID"
-    ):
-        FirstLiveBaselineEvidence.from_mapping(unknown)
+    assert not callable(getattr(FirstLiveBaselineEvidence, "from_mapping", None))
 
 
 def test_evidence_hash_is_domain_separated_and_rejects_tampering():
@@ -427,8 +424,7 @@ def test_evidence_hash_is_domain_separated_and_rejects_tampering():
     assert evidence.evidence_hash != bare_json_hash
 
     primitive["evidence_hash"] = "sha256:" + "0" * 64
-    with pytest.raises(DryRunContractError, match="FIRST_LIVE_EVIDENCE_HASH_MISMATCH"):
-        FirstLiveBaselineEvidence.from_mapping(primitive)
+    assert not hasattr(FirstLiveBaselineEvidence, "from_mapping")
 
 
 def test_evidence_excludes_sensitive_counts_payload_and_forbidden_surfaces():
@@ -498,3 +494,319 @@ def test_envelope_versions_safe_counts_and_reason_codes_are_reconciled():
         blocked.structural_reason_codes
     )
     assert blocked.safe_counts.header_binding_valid_count == 3
+
+
+def test_configured_result_boundary_rejects_subclasses_and_duck_types():
+    genuine = configured_result()
+    other = configured_result(change="semantic")
+
+    class ForgedConfiguredReadResult(ConfiguredReadResult):
+        __slots__ = ()
+
+        def __new__(cls, snapshot, proof, identity):
+            value = object.__new__(cls)
+            object.__setattr__(value, "_snapshot", snapshot)
+            object.__setattr__(value, "_coverage_proof", proof)
+            object.__setattr__(value, "_configuration_identity", identity)
+            return value
+
+        def __init__(self, snapshot, proof, identity):
+            pass
+
+    forged_proof = ForgedConfiguredReadResult(
+        genuine.snapshot,
+        other.coverage_proof,
+        genuine.configuration_identity,
+    )
+    forged_snapshot = ForgedConfiguredReadResult(
+        other.snapshot,
+        genuine.coverage_proof,
+        genuine.configuration_identity,
+    )
+
+    for value in (forged_proof, forged_snapshot):
+        with pytest.raises(
+            SourceHealthError, match="SOURCE_HEALTH_CONFIGURED_READ_RESULT_REQUIRED"
+        ):
+            build_first_live_coverage_proven_batch_context(value)
+
+    class DuckResult:
+        snapshot = genuine.snapshot
+        coverage_proof = genuine.coverage_proof
+        configuration_identity = genuine.configuration_identity
+
+    with pytest.raises(
+        SourceHealthError, match="SOURCE_HEALTH_CONFIGURED_READ_RESULT_REQUIRED"
+    ):
+        build_synthetic_coverage_proven_batch_context(DuckResult())
+
+
+def test_mode_specific_builders_have_no_caller_mode_or_disposition_authority():
+    first_signature = inspect.signature(
+        build_first_live_coverage_proven_batch_context
+    )
+    synthetic_signature = inspect.signature(
+        build_synthetic_coverage_proven_batch_context
+    )
+    assert "run_mode" not in first_signature.parameters
+    assert "run_mode" not in synthetic_signature.parameters
+
+    for builder in (
+        build_first_live_coverage_proven_batch_context,
+        build_synthetic_coverage_proven_batch_context,
+    ):
+        with pytest.raises(TypeError):
+            builder(configured_result(), run_mode="FIRST_LIVE")
+        with pytest.raises(TypeError):
+            builder(
+                configured_result(),
+                disposition=SourceHealthDisposition.HUMAN_REVIEW_REQUIRED,
+            )
+
+    assert _context_envelope(context()).disposition is (
+        SourceHealthDisposition.HUMAN_REVIEW_REQUIRED
+    )
+    assert _context_envelope(synthetic_context()).disposition is (
+        SourceHealthDisposition.SYNTHETIC_CHECKS_COMPLETE
+    )
+
+
+def test_synthetic_context_cannot_form_authoritative_first_live_evidence():
+    with pytest.raises(
+        DryRunContractError,
+        match="FIRST_LIVE_EVIDENCE_FIRST_LIVE_CONTEXT_REQUIRED",
+    ):
+        create_first_live_baseline_evidence(synthetic_context())
+
+    assert not hasattr(FirstLiveBaselineEvidence, "from_mapping")
+    with pytest.raises(TypeError, match="CONSTRUCTION_FORBIDDEN"):
+        FirstLiveBaselineEvidence(**create_first_live_baseline_evidence(context()).canonical_mapping())
+
+
+def test_code_allowlists_reject_cross_category_payload_duplicates_and_unknowns():
+    envelope = _context_envelope(context(change="header"))
+    assert _canonical_structural_reason_codes(
+        list(reversed(envelope.structural_reason_codes))
+    ) == envelope.structural_reason_codes
+    assert _canonical_deferred_check_codes(
+        list(reversed(envelope.deferred_check_codes))
+    ) == envelope.deferred_check_codes
+
+    structural = envelope.structural_reason_codes[0]
+    deferred = envelope.deferred_check_codes[0]
+    invalid_structural = (
+        deferred,
+        "UNKNOWN_REASON",
+        "CUSTOMER_SECRET_SENTINEL",
+        "UNKNOWN\nREASON",
+        "UNKNOWN\x00REASON",
+        "X" * 10_000,
+    )
+    for code in invalid_structural:
+        with pytest.raises(DryRunContractError):
+            _canonical_structural_reason_codes((code,))
+    with pytest.raises(DryRunContractError):
+        _canonical_deferred_check_codes((structural,))
+    with pytest.raises(DryRunContractError):
+        _canonical_structural_reason_codes((structural, structural))
+    with pytest.raises(DryRunContractError):
+        _canonical_deferred_check_codes((deferred, deferred))
+
+
+def test_code_allowlists_cover_every_wp2_emitted_stable_code():
+    structural = (
+        "SOURCE_HEALTH_CRITICAL_SHEET_PROFILE_MISMATCH",
+        "SOURCE_HEALTH_CRITICAL_SHEET_SET_MISMATCH",
+        "SOURCE_HEALTH_HANDLE_MAPPING_HEADER_MISMATCH",
+        "SOURCE_HEALTH_MERCHANT_CASE_HEADER_MISMATCH",
+        "SOURCE_HEALTH_PENDING_POSITIONAL_BINDING_MISMATCH",
+        "SOURCE_HEALTH_PUBLIC_METRIC_HEADER_MISMATCH",
+        "SOURCE_HEALTH_RESTRICTED_CUSTOMER_HEADER_MISMATCH",
+    )
+    deferred = (
+        "BRAND_ID_INITIAL_REVIEW_DEFERRED",
+        "BRAND_ID_MAPPING_AUTHORITY_DEFERRED",
+        "MERCHANT_BRD_ASSIGNMENT_DEFERRED",
+        "MERCHANT_ID_REVIEW_STATUS_DEFERRED",
+        "MERCHANT_MREC_ASSIGNMENT_DEFERRED",
+        "PUBLIC_METRIC_MET_ASSIGNMENT_DEFERRED",
+    )
+
+    assert _canonical_structural_reason_codes(
+        list(reversed(structural))
+    ) == structural
+    assert _canonical_deferred_check_codes(list(reversed(deferred))) == deferred
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "configured_range_count",
+        "covered_range_count",
+        "configured_sheet_count",
+        "observed_sheet_count",
+        "critical_sheet_expected_count",
+        "critical_sheet_observed_count",
+        "header_binding_expected_count",
+        "header_binding_valid_count",
+        "positional_binding_expected_count",
+        "positional_binding_valid_count",
+        "structural_issue_count",
+    ],
+)
+@pytest.mark.parametrize("invalid", [True, False, -1, 1.0, "1", 10**100])
+def test_safe_counts_reject_invalid_or_impossible_values(field_name, invalid):
+    values = _context_envelope(context()).safe_counts.as_dict()
+    values[field_name] = invalid
+    with pytest.raises(DryRunContractError):
+        SafeStructuralCounts(**values)
+
+
+def test_safe_count_relations_and_sensitive_capacity_fail_closed():
+    values = _context_envelope(context()).safe_counts.as_dict()
+    for field_name, invalid in (
+        ("covered_range_count", 6),
+        ("observed_sheet_count", 6),
+        ("critical_sheet_observed_count", 6),
+        ("critical_sheet_observed_count", 5),
+        ("header_binding_valid_count", 5),
+        ("positional_binding_valid_count", 2),
+    ):
+        changed = dict(values)
+        if field_name == "critical_sheet_observed_count" and invalid == 5:
+            changed["observed_sheet_count"] = 4
+        changed[field_name] = invalid
+        with pytest.raises(DryRunContractError):
+            SafeStructuralCounts(**changed)
+
+    capacities = {
+        "merchant_case": 1012,
+        "restricted_customer": 990,
+        "public_metric": 993,
+        "pending_metric": 997,
+        "handle_mapping": 997,
+    }
+    for field_name, maximum in capacities.items():
+        invalid = dict(capacities)
+        invalid[field_name] = maximum + 1
+        with pytest.raises(SourceHealthError):
+            SensitiveOccupiedRowCounts(**invalid)
+    boundary = SensitiveOccupiedRowCounts(
+        **capacities,
+    )
+    assert boundary.merchant_case == 1012
+
+
+def test_envelope_defensively_canonicalizes_nested_collections_and_mappings():
+    result = configured_result(change="header")
+    original_context = build_first_live_coverage_proven_batch_context(
+        result, _correlation_id_factory=lambda: FIXED_UUID4
+    )
+    original = _context_envelope(original_context)
+    reason_input = list(original.structural_reason_codes)
+    deferred_input = list(reversed(original.deferred_check_codes))
+    safe_mapping = original.safe_counts.as_dict()
+    sensitive_mapping = {
+        "merchant_case": 1,
+        "restricted_customer": 1,
+        "public_metric": 1,
+        "pending_metric": 1,
+        "handle_mapping": 1,
+    }
+    copied = replace(
+        original,
+        structural_reason_codes=reason_input,
+        deferred_check_codes=deferred_input,
+        safe_counts=safe_mapping,
+        sensitive_occupied_row_counts=sensitive_mapping,
+    )
+    baseline_hash = create_first_live_baseline_evidence(
+        _create_coverage_proven_batch_context(result, copied)
+    ).evidence_hash
+    reason_input.clear()
+    deferred_input.clear()
+    safe_mapping.clear()
+    sensitive_mapping.clear()
+
+    assert type(copied.structural_reason_codes) is tuple
+    assert type(copied.deferred_check_codes) is tuple
+    assert type(copied.safe_counts) is SafeStructuralCounts
+    assert type(copied.sensitive_occupied_row_counts) is SensitiveOccupiedRowCounts
+    assert copied.structural_reason_codes == original.structural_reason_codes
+    assert copied.deferred_check_codes == original.deferred_check_codes
+    assert create_first_live_baseline_evidence(
+        _create_coverage_proven_batch_context(result, copied)
+    ).evidence_hash == baseline_hash
+
+    with pytest.raises(AttributeError):
+        copied.safe_counts.configured_range_count = 4
+    with pytest.raises(AttributeError):
+        copied.sensitive_occupied_row_counts.merchant_case = 0
+
+    invalid_safe_mapping = original.safe_counts.as_dict()
+    invalid_safe_mapping["unknown"] = 0
+    with pytest.raises(SourceHealthError):
+        replace(original, safe_counts=invalid_safe_mapping)
+
+    invalid_sensitive_mapping = {
+        "merchant_case": 1,
+        "restricted_customer": 1,
+        "public_metric": 1,
+        "pending_metric": 1,
+        "handle_mapping": 1,
+        "unknown": 0,
+    }
+    with pytest.raises(SourceHealthError):
+        replace(original, sensitive_occupied_row_counts=invalid_sensitive_mapping)
+
+
+def test_every_evidence_semantic_field_changes_the_integrity_hash():
+    mutations = {
+        "schema_version": "mutated-schema",
+        "evidence_kind": "mutated-kind",
+        "authority": "mutated-authority",
+        "review_scope": "mutated-scope",
+        "target_identity_hash": "sha256:" + "1" * 64,
+        "configuration_identity": "sha256:" + "2" * 64,
+        "config_version": "mutated-config",
+        "coverage_identity": "sha256:" + "3" * 64,
+        "mapper_version": "mutated-mapper",
+        "snapshot_schema_version": "mutated-snapshot-schema",
+        "fingerprint_semantics_version": "mutated-fingerprint-semantics",
+        "source_health_rules_version": "mutated-source-health-rules",
+        "source_fingerprint": "sha256:" + "4" * 64,
+        "safe_counts": replace(
+            _context_envelope(context()).safe_counts,
+            covered_range_count=4,
+        ),
+        "structural_reason_codes": (
+            "SOURCE_HEALTH_MERCHANT_CASE_HEADER_MISMATCH",
+        ),
+        "deferred_check_codes": (),
+        "disposition": SourceHealthDisposition.STRUCTURAL_BLOCK,
+    }
+
+    assert len(mutations) == 17
+    for field_name, changed_value in mutations.items():
+        evidence = create_first_live_baseline_evidence(context())
+        original_hash = evidence.evidence_hash
+        object.__setattr__(evidence, field_name, changed_value)
+        assert compute_evidence_hash(evidence) != original_hash, field_name
+
+
+def test_payload_bearing_test_seam_exception_has_no_cause_or_context(caplog):
+    secret = "NESTED_EXCEPTION_SECRET_SENTINEL"
+
+    def hostile_factory():
+        raise ValueError(secret)
+
+    with pytest.raises(SourceHealthError) as caught:
+        build_synthetic_coverage_proven_batch_context(
+            configured_result(), _correlation_id_factory=hostile_factory
+        )
+
+    rendered = str(caught.value) + repr(caught.value)
+    assert secret not in rendered
+    assert secret not in caplog.text
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None

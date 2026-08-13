@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from typing import Callable, Dict, Optional, Set, Tuple
 
 from .canonical_serialization import compute_source_fingerprint
@@ -14,6 +15,8 @@ from .google_sheets_dry_run_contracts import (
     RunMode,
     SafeStructuralCounts,
     SourceHealthDisposition,
+    _canonical_deferred_check_codes,
+    _canonical_structural_reason_codes,
     _context_binding_is_valid,
     _context_envelope,
     _context_result,
@@ -104,6 +107,13 @@ _DEFERRED_CHECK_CODES = tuple(
         )
     )
 )
+_SENSITIVE_ROW_CAPACITIES = {
+    "merchant_case": 1012,
+    "restricted_customer": 990,
+    "public_metric": 993,
+    "pending_metric": 997,
+    "handle_mapping": 997,
+}
 
 
 class SourceHealthError(ValueError):
@@ -146,6 +156,11 @@ class SensitiveOccupiedRowCounts:
         )
         if any(type(value) is not int or value < 0 for value in values):
             _fail("SOURCE_HEALTH_OCCUPIED_ROW_COUNT_INVALID")
+        if any(
+            value > _SENSITIVE_ROW_CAPACITIES[name]
+            for name, value in zip(_SENSITIVE_ROW_CAPACITIES, values)
+        ):
+            _fail("SOURCE_HEALTH_OCCUPIED_ROW_COUNT_OUT_OF_BOUNDS")
         object.__setattr__(self, "_merchant_case", merchant_case)
         object.__setattr__(self, "_restricted_customer", restricted_customer)
         object.__setattr__(self, "_public_metric", public_metric)
@@ -185,6 +200,55 @@ class SensitiveOccupiedRowCounts:
         raise TypeError("SENSITIVE_OCCUPIED_ROW_COUNTS_PICKLE_FORBIDDEN")
 
 
+def _coerce_safe_counts(value: object) -> SafeStructuralCounts:
+    if type(value) is SafeStructuralCounts:
+        return value
+    if not isinstance(value, Mapping):
+        _fail("SOURCE_HEALTH_SAFE_COUNTS_INVALID")
+    safe_counts = None
+    try:
+        copied = dict(value)
+        expected = set(SafeStructuralCounts.__dataclass_fields__)
+        if set(copied) == expected:
+            safe_counts = SafeStructuralCounts(**copied)
+    except Exception:
+        pass
+    if safe_counts is None:
+        _fail("SOURCE_HEALTH_SAFE_COUNTS_INVALID")
+    return safe_counts
+
+
+def _coerce_sensitive_counts(value: object) -> SensitiveOccupiedRowCounts:
+    if type(value) is SensitiveOccupiedRowCounts:
+        return value
+    if not isinstance(value, Mapping):
+        _fail("SOURCE_HEALTH_SENSITIVE_COUNTS_INVALID")
+    sensitive_counts = None
+    try:
+        copied = dict(value)
+        if set(copied) == set(_SENSITIVE_ROW_CAPACITIES):
+            sensitive_counts = SensitiveOccupiedRowCounts(**copied)
+    except Exception:
+        pass
+    if sensitive_counts is None:
+        _fail("SOURCE_HEALTH_SENSITIVE_COUNTS_INVALID")
+    return sensitive_counts
+
+
+def _sensitive_count_values(
+    value: SensitiveOccupiedRowCounts,
+) -> Tuple[int, int, int, int, int]:
+    if type(value) is not SensitiveOccupiedRowCounts:
+        _fail("SOURCE_HEALTH_SENSITIVE_COUNTS_INVALID")
+    return (
+        value.merchant_case,
+        value.restricted_customer,
+        value.public_metric,
+        value.pending_metric,
+        value.handle_mapping,
+    )
+
+
 @dataclass(frozen=True)
 class SourceHealthEnvelope:
     """Internal immutable WP2 envelope; never a durable artifact."""
@@ -208,21 +272,69 @@ class SourceHealthEnvelope:
     disposition: SourceHealthDisposition
     _result_object_identity: int = field(repr=False, compare=False)
 
+    def __post_init__(self) -> None:
+        safe_counts = _coerce_safe_counts(self.safe_counts)
+        sensitive_counts = _coerce_sensitive_counts(
+            self.sensitive_occupied_row_counts
+        )
+        structural_codes = _canonical_structural_reason_codes(
+            self.structural_reason_codes
+        )
+        deferred_codes = _canonical_deferred_check_codes(self.deferred_check_codes)
+        if safe_counts.structural_issue_count != len(structural_codes):
+            _fail("SOURCE_HEALTH_STRUCTURAL_ISSUE_COUNT_MISMATCH")
+        if type(self.run_mode) is not RunMode:
+            _fail("SOURCE_HEALTH_RUN_MODE_INVALID")
+        if type(self.disposition) is not SourceHealthDisposition:
+            _fail("SOURCE_HEALTH_DISPOSITION_INVALID")
+        if type(self._result_object_identity) is not int:
+            _fail("SOURCE_HEALTH_RESULT_IDENTITY_INVALID")
+        object.__setattr__(self, "safe_counts", safe_counts)
+        object.__setattr__(self, "sensitive_occupied_row_counts", sensitive_counts)
+        object.__setattr__(self, "structural_reason_codes", structural_codes)
+        object.__setattr__(self, "deferred_check_codes", deferred_codes)
+
     def __repr__(self) -> str:
         return "SourceHealthEnvelope(<sensitive>)"
 
 
-def build_coverage_proven_batch_context(
+def build_first_live_coverage_proven_batch_context(
     configured_read_result: ConfiguredReadResult,
     *,
-    run_mode: RunMode,
     _correlation_id_factory: Optional[Callable[[], object]] = None,
+) -> CoverageProvenBatchContext:
+    """Build a trusted first-live context with mandatory human review semantics."""
+
+    return _build_coverage_proven_batch_context(
+        configured_read_result,
+        RunMode.FIRST_LIVE,
+        _correlation_id_factory,
+    )
+
+
+def build_synthetic_coverage_proven_batch_context(
+    configured_read_result: ConfiguredReadResult,
+    *,
+    _correlation_id_factory: Optional[Callable[[], object]] = None,
+) -> CoverageProvenBatchContext:
+    """Build an offline synthetic context that cannot form first-live evidence."""
+
+    return _build_coverage_proven_batch_context(
+        configured_read_result,
+        RunMode.SYNTHETIC,
+        _correlation_id_factory,
+    )
+
+
+def _build_coverage_proven_batch_context(
+    configured_read_result: ConfiguredReadResult,
+    run_mode: RunMode,
+    correlation_id_factory: Optional[Callable[[], object]],
 ) -> CoverageProvenBatchContext:
     """Validate one frozen configured result and build its in-memory WP2 context."""
 
     plan = _validate_configured_result(configured_read_result)
-    mode = _validate_run_mode(run_mode)
-    correlation_id = _new_correlation_id(_correlation_id_factory)
+    correlation_id = _new_correlation_id(correlation_id_factory)
 
     snapshot = configured_read_result.snapshot
     proof = configured_read_result.coverage_proof
@@ -245,15 +357,18 @@ def build_coverage_proven_batch_context(
     )
     sensitive_counts = _occupied_row_counts(snapshot, plan.ranges)
 
+    source_fingerprint = None
     try:
         source_fingerprint = compute_source_fingerprint(snapshot)
-    except (TypeError, ValueError):
+    except Exception:
+        pass
+    if source_fingerprint is None:
         _fail("SOURCE_HEALTH_FINGERPRINT_FAILED")
 
-    disposition = _disposition(mode, reason_codes_tuple)
+    disposition = _disposition(run_mode, reason_codes_tuple)
     envelope = SourceHealthEnvelope(
         schema_version=SOURCE_HEALTH_ENVELOPE_SCHEMA_VERSION,
-        run_mode=mode,
+        run_mode=run_mode,
         correlation_id=correlation_id,
         target_identity_hash=_target_identity_hash(snapshot.spreadsheet_id),
         configuration_identity=configured_read_result.configuration_identity,
@@ -275,7 +390,7 @@ def build_coverage_proven_batch_context(
 
 
 def _validate_configured_result(configured_read_result: object):
-    if not isinstance(configured_read_result, ConfiguredReadResult):
+    if type(configured_read_result) is not ConfiguredReadResult:
         _fail("SOURCE_HEALTH_CONFIGURED_READ_RESULT_REQUIRED")
     try:
         snapshot = configured_read_result.snapshot
@@ -283,9 +398,9 @@ def _validate_configured_result(configured_read_result: object):
         configuration_identity = configured_read_result.configuration_identity
     except (AttributeError, TypeError):
         _fail("SOURCE_HEALTH_CONFIGURED_READ_RESULT_INVALID")
-    if not isinstance(snapshot, SpreadsheetSnapshot):
+    if type(snapshot) is not SpreadsheetSnapshot:
         _fail("SOURCE_HEALTH_SNAPSHOT_INVALID")
-    if not isinstance(proof, ConfiguredRangeCoverageProof):
+    if type(proof) is not ConfiguredRangeCoverageProof:
         _fail("SOURCE_HEALTH_COVERAGE_PROOF_INVALID")
     if (
         configuration_identity != proof.configuration_identity
@@ -470,7 +585,7 @@ def _covered_range(configured_range: ConfiguredRange) -> CoveredRange:
 
 
 def _target_identity_hash(spreadsheet_id: str) -> str:
-    if not isinstance(spreadsheet_id, str) or not spreadsheet_id:
+    if type(spreadsheet_id) is not str or not spreadsheet_id:
         _fail("SOURCE_HEALTH_TARGET_INVALID")
     digest = hashlib.sha256(
         _TARGET_IDENTITY_DOMAIN + spreadsheet_id.encode("utf-8")
@@ -499,6 +614,7 @@ def _coverage_identity(proof: ConfiguredRangeCoverageProof) -> str:
             for value in proof.covered_ranges
         ],
     }
+    serialized = None
     try:
         serialized = json.dumps(
             payload,
@@ -507,7 +623,9 @@ def _coverage_identity(proof: ConfiguredRangeCoverageProof) -> str:
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-    except (TypeError, ValueError):
+    except Exception:
+        pass
+    if serialized is None:
         _fail("SOURCE_HEALTH_COVERAGE_IDENTITY_FAILED")
     return "sha256:" + hashlib.sha256(
         _COVERAGE_IDENTITY_DOMAIN + serialized
@@ -515,32 +633,42 @@ def _coverage_identity(proof: ConfiguredRangeCoverageProof) -> str:
 
 
 def _new_correlation_id(factory: Optional[Callable[[], object]]) -> str:
-    generated = uuid.uuid4() if factory is None else factory()
-    value = str(generated)
+    value = None
+    try:
+        generated = uuid.uuid4() if factory is None else factory()
+        value = str(generated)
+    except Exception:
+        pass
+    if value is None:
+        _fail("SOURCE_HEALTH_CORRELATION_ID_INVALID")
+    if _validated_correlation_id(value) is None:
+        _fail("SOURCE_HEALTH_CORRELATION_ID_INVALID")
+    return value
+
+
+def _validated_correlation_id(value: object) -> Optional[str]:
     if (
-        len(value) != 36
+        not isinstance(value, str)
+        or len(value) != 36
         or value != value.strip()
         or value != value.lower()
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
-        _fail("SOURCE_HEALTH_CORRELATION_ID_INVALID")
+        return None
+    parsed = None
     try:
         parsed = uuid.UUID(value)
     except (AttributeError, TypeError, ValueError):
-        _fail("SOURCE_HEALTH_CORRELATION_ID_INVALID")
+        pass
+    if parsed is None:
+        return None
     if (
         parsed.version != 4
         or parsed.variant != uuid.RFC_4122
         or str(parsed) != value
     ):
-        _fail("SOURCE_HEALTH_CORRELATION_ID_INVALID")
+        return None
     return value
-
-
-def _validate_run_mode(run_mode: object) -> RunMode:
-    if not isinstance(run_mode, RunMode):
-        _fail("SOURCE_HEALTH_RUN_MODE_INVALID")
-    return run_mode
 
 
 def _disposition(
@@ -554,19 +682,88 @@ def _disposition(
 
 
 def _context_coverage_binding_valid(value: object) -> bool:
+    return _validated_context_envelope(value) is not None
+
+
+def _validated_context_envelope(value: object) -> Optional[SourceHealthEnvelope]:
+    """Return the exact envelope only when all result-derived facts still bind."""
+
+    if type(value) is not CoverageProvenBatchContext:
+        return None
     if not _context_binding_is_valid(value):
-        return False
+        return None
     try:
         result = _context_result(value)
+        envelope = _context_envelope(value)
+        if type(result) is not ConfiguredReadResult:
+            return None
+        if type(envelope) is not SourceHealthEnvelope:
+            return None
+        plan = _validate_configured_result(result)
+        snapshot = result.snapshot
         proof = result.coverage_proof
-        return (
-            isinstance(proof, ConfiguredRangeCoverageProof)
-            and proof.configuration_identity == result.configuration_identity
-            and proof.expected_range_count == proof.observed_range_count
-            and proof.expected_range_count == len(proof.covered_ranges)
+        reasons, valid_headers, valid_positionals, observed_sheets = (
+            _structural_reason_codes(snapshot, plan.sheets, plan.ranges)
         )
-    except (AttributeError, TypeError, ValueError):
-        return False
+        reason_codes = tuple(sorted(reasons))
+        safe_counts = SafeStructuralCounts(
+            configured_range_count=len(plan.ranges),
+            covered_range_count=proof.observed_range_count,
+            configured_sheet_count=len(plan.sheets),
+            observed_sheet_count=len(snapshot.sheets),
+            critical_sheet_expected_count=len(plan.sheets),
+            critical_sheet_observed_count=observed_sheets,
+            header_binding_expected_count=len(_HEADER_BINDINGS),
+            header_binding_valid_count=valid_headers,
+            positional_binding_expected_count=1,
+            positional_binding_valid_count=valid_positionals,
+            structural_issue_count=len(reason_codes),
+        )
+        sensitive_counts = _occupied_row_counts(snapshot, plan.ranges)
+        source_fingerprint = compute_source_fingerprint(snapshot)
+        expected = (
+            SOURCE_HEALTH_ENVELOPE_SCHEMA_VERSION,
+            _target_identity_hash(snapshot.spreadsheet_id),
+            result.configuration_identity,
+            proof.config_version,
+            _coverage_identity(proof),
+            proof.mapper_version,
+            SNAPSHOT_SCHEMA_VERSION,
+            FINGERPRINT_SEMANTICS_VERSION,
+            SOURCE_HEALTH_RULES_VERSION,
+            source_fingerprint,
+            safe_counts,
+            _sensitive_count_values(sensitive_counts),
+            reason_codes,
+            _DEFERRED_CHECK_CODES,
+            _disposition(envelope.run_mode, reason_codes),
+            id(result),
+        )
+        actual = (
+            envelope.schema_version,
+            envelope.target_identity_hash,
+            envelope.configuration_identity,
+            envelope.config_version,
+            envelope.coverage_identity,
+            envelope.mapper_version,
+            envelope.snapshot_schema_version,
+            envelope.fingerprint_semantics_version,
+            envelope.source_health_rules_version,
+            envelope.source_fingerprint,
+            envelope.safe_counts,
+            _sensitive_count_values(envelope.sensitive_occupied_row_counts),
+            envelope.structural_reason_codes,
+            envelope.deferred_check_codes,
+            envelope.disposition,
+            envelope._result_object_identity,
+        )
+        if expected != actual:
+            return None
+        if _validated_correlation_id(envelope.correlation_id) is None:
+            return None
+        return envelope
+    except Exception:
+        return None
 
 
 def _context_facts(
@@ -594,5 +791,6 @@ __all__ = [
     "SOURCE_HEALTH_ENVELOPE_SCHEMA_VERSION",
     "SOURCE_HEALTH_RULES_VERSION",
     "SourceHealthError",
-    "build_coverage_proven_batch_context",
+    "build_first_live_coverage_proven_batch_context",
+    "build_synthetic_coverage_proven_batch_context",
 ]

@@ -7,7 +7,7 @@ from enum import Enum
 import hashlib
 import json
 import re
-from typing import Dict, Mapping, Tuple, TYPE_CHECKING
+from typing import Dict, Tuple, TYPE_CHECKING
 
 from .google_sheets_read_contracts import ConfiguredReadResult
 
@@ -20,6 +20,27 @@ FIRST_LIVE_BASELINE_SCHEMA_VERSION = (
 )
 EVIDENCE_HASH_DOMAIN = b"first-live-baseline-evidence:v1\x00"
 _HASH_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_STRUCTURAL_REASON_CODE_ALLOWLIST = frozenset(
+    {
+        "SOURCE_HEALTH_CRITICAL_SHEET_PROFILE_MISMATCH",
+        "SOURCE_HEALTH_CRITICAL_SHEET_SET_MISMATCH",
+        "SOURCE_HEALTH_HANDLE_MAPPING_HEADER_MISMATCH",
+        "SOURCE_HEALTH_MERCHANT_CASE_HEADER_MISMATCH",
+        "SOURCE_HEALTH_PENDING_POSITIONAL_BINDING_MISMATCH",
+        "SOURCE_HEALTH_PUBLIC_METRIC_HEADER_MISMATCH",
+        "SOURCE_HEALTH_RESTRICTED_CUSTOMER_HEADER_MISMATCH",
+    }
+)
+_DEFERRED_CHECK_CODE_ALLOWLIST = frozenset(
+    {
+        "BRAND_ID_INITIAL_REVIEW_DEFERRED",
+        "BRAND_ID_MAPPING_AUTHORITY_DEFERRED",
+        "MERCHANT_BRD_ASSIGNMENT_DEFERRED",
+        "MERCHANT_ID_REVIEW_STATUS_DEFERRED",
+        "MERCHANT_MREC_ASSIGNMENT_DEFERRED",
+        "PUBLIC_METRIC_MET_ASSIGNMENT_DEFERRED",
+    }
+)
 
 
 class DryRunContractError(ValueError):
@@ -63,6 +84,23 @@ class SafeStructuralCounts:
     def __post_init__(self) -> None:
         if any(type(value) is not int or value < 0 for value in self.__dict__.values()):
             _fail("SAFE_STRUCTURAL_COUNT_INVALID")
+        if (
+            self.configured_range_count != 5
+            or self.covered_range_count > self.configured_range_count
+            or self.configured_sheet_count != 5
+            or self.observed_sheet_count > self.configured_sheet_count
+            or self.critical_sheet_expected_count != 5
+            or self.critical_sheet_observed_count
+            > self.critical_sheet_expected_count
+            or self.critical_sheet_observed_count > self.observed_sheet_count
+            or self.header_binding_expected_count != 4
+            or self.header_binding_valid_count > self.header_binding_expected_count
+            or self.positional_binding_expected_count != 1
+            or self.positional_binding_valid_count
+            > self.positional_binding_expected_count
+            or self.structural_issue_count > len(_STRUCTURAL_REASON_CODE_ALLOWLIST)
+        ):
+            _fail("SAFE_STRUCTURAL_COUNT_RECONCILIATION_FAILED")
 
     def as_dict(self) -> Dict[str, int]:
         return {
@@ -127,55 +165,6 @@ class FirstLiveBaselineEvidence:
     def __init__(self, *args: object, **kwargs: object) -> None:
         raise TypeError("FIRST_LIVE_EVIDENCE_CONSTRUCTION_FORBIDDEN")
 
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "FirstLiveBaselineEvidence":
-        """Parse only the exact reviewed evidence field allowlist."""
-
-        if not isinstance(value, Mapping):
-            _fail("FIRST_LIVE_EVIDENCE_TYPE_INVALID")
-        expected = set(_evidence_field_names())
-        if set(value) != expected:
-            _fail("FIRST_LIVE_EVIDENCE_FIELDS_INVALID")
-        safe_counts_value = value["safe_counts"]
-        if not isinstance(safe_counts_value, Mapping):
-            _fail("FIRST_LIVE_EVIDENCE_SAFE_COUNTS_INVALID")
-        safe_count_fields = set(SafeStructuralCounts.__dataclass_fields__)
-        if set(safe_counts_value) != safe_count_fields:
-            _fail("FIRST_LIVE_EVIDENCE_SAFE_COUNTS_INVALID")
-        try:
-            safe_counts = SafeStructuralCounts(
-                **{key: safe_counts_value[key] for key in safe_count_fields}
-            )
-            disposition = SourceHealthDisposition(value["disposition"])
-            evidence = _new_evidence(
-                schema_version=value["schema_version"],
-                evidence_kind=value["evidence_kind"],
-                authority=value["authority"],
-                review_scope=value["review_scope"],
-                target_identity_hash=value["target_identity_hash"],
-                configuration_identity=value["configuration_identity"],
-                config_version=value["config_version"],
-                coverage_identity=value["coverage_identity"],
-                mapper_version=value["mapper_version"],
-                snapshot_schema_version=value["snapshot_schema_version"],
-                fingerprint_semantics_version=value[
-                    "fingerprint_semantics_version"
-                ],
-                source_health_rules_version=value["source_health_rules_version"],
-                source_fingerprint=value["source_fingerprint"],
-                safe_counts=safe_counts,
-                structural_reason_codes=_strict_code_tuple(
-                    value["structural_reason_codes"]
-                ),
-                deferred_check_codes=_strict_code_tuple(value["deferred_check_codes"]),
-                disposition=disposition,
-                evidence_hash=value["evidence_hash"],
-            )
-        except (KeyError, TypeError, ValueError):
-            _fail("FIRST_LIVE_EVIDENCE_VALUE_INVALID")
-        _validate_evidence(evidence)
-        return evidence
-
     def canonical_mapping(self) -> Dict[str, object]:
         return _evidence_primitive(self, include_hash=True)
 
@@ -195,9 +184,13 @@ def create_first_live_baseline_evidence(
 ) -> FirstLiveBaselineEvidence:
     """Project one opaque context into the reviewed redacted evidence contract."""
 
-    if not _context_binding_is_valid(context):
+    from .google_sheets_source_health import _validated_context_envelope
+
+    envelope = _validated_context_envelope(context)
+    if envelope is None:
         _fail("COVERAGE_PROVEN_CONTEXT_BINDING_INVALID")
-    envelope = _context_envelope(context)
+    if envelope.run_mode is not RunMode.FIRST_LIVE:
+        _fail("FIRST_LIVE_EVIDENCE_FIRST_LIVE_CONTEXT_REQUIRED")
     evidence = _new_evidence(
         schema_version=FIRST_LIVE_BASELINE_SCHEMA_VERSION,
         evidence_kind="FIRST_LIVE_BASELINE",
@@ -224,7 +217,7 @@ def create_first_live_baseline_evidence(
 
 
 def compute_evidence_hash(evidence: FirstLiveBaselineEvidence) -> str:
-    if not isinstance(evidence, FirstLiveBaselineEvidence):
+    if type(evidence) is not FirstLiveBaselineEvidence:
         _fail("FIRST_LIVE_EVIDENCE_TYPE_INVALID")
     payload = _canonical_json(_evidence_primitive(evidence, include_hash=False))
     return "sha256:" + hashlib.sha256(EVIDENCE_HASH_DOMAIN + payload).hexdigest()
@@ -234,7 +227,7 @@ def _create_coverage_proven_batch_context(
     configured_read_result: ConfiguredReadResult,
     envelope: "SourceHealthEnvelope",
 ) -> CoverageProvenBatchContext:
-    if not isinstance(configured_read_result, ConfiguredReadResult):
+    if type(configured_read_result) is not ConfiguredReadResult:
         _fail("COVERAGE_PROVEN_CONTEXT_RESULT_INVALID")
     if getattr(envelope, "_result_object_identity", None) != id(
         configured_read_result
@@ -248,7 +241,7 @@ def _create_coverage_proven_batch_context(
 
 
 def _context_binding_is_valid(value: object) -> bool:
-    if not isinstance(value, CoverageProvenBatchContext):
+    if type(value) is not CoverageProvenBatchContext:
         return False
     try:
         result = object.__getattribute__(value, "_configured_read_result")
@@ -257,7 +250,7 @@ def _context_binding_is_valid(value: object) -> bool:
     except (AttributeError, TypeError):
         return False
     return (
-        isinstance(result, ConfiguredReadResult)
+        type(result) is ConfiguredReadResult
         and identity == id(result)
         and getattr(envelope, "_result_object_identity", None) == identity
     )
@@ -310,15 +303,21 @@ def _validate_evidence(evidence: FirstLiveBaselineEvidence) -> None:
     ):
         if not _HASH_PATTERN.fullmatch(getattr(evidence, name)):
             _fail("FIRST_LIVE_EVIDENCE_HASH_INVALID")
-    if not isinstance(evidence.safe_counts, SafeStructuralCounts):
+    if type(evidence.safe_counts) is not SafeStructuralCounts:
         _fail("FIRST_LIVE_EVIDENCE_SAFE_COUNTS_INVALID")
-    _validate_codes(evidence.structural_reason_codes)
-    _validate_codes(evidence.deferred_check_codes)
+    structural_codes = _canonical_structural_reason_codes(
+        evidence.structural_reason_codes
+    )
+    deferred_codes = _canonical_deferred_check_codes(evidence.deferred_check_codes)
+    if structural_codes != evidence.structural_reason_codes:
+        _fail("FIRST_LIVE_EVIDENCE_STRUCTURAL_CODES_NOT_CANONICAL")
+    if deferred_codes != evidence.deferred_check_codes:
+        _fail("FIRST_LIVE_EVIDENCE_DEFERRED_CODES_NOT_CANONICAL")
     if evidence.safe_counts.structural_issue_count != len(
         evidence.structural_reason_codes
     ):
         _fail("FIRST_LIVE_EVIDENCE_COUNT_RECONCILIATION_FAILED")
-    if not isinstance(evidence.disposition, SourceHealthDisposition):
+    if type(evidence.disposition) is not SourceHealthDisposition:
         _fail("FIRST_LIVE_EVIDENCE_DISPOSITION_INVALID")
     if evidence.evidence_hash != compute_evidence_hash(evidence):
         _fail("FIRST_LIVE_EVIDENCE_HASH_MISMATCH")
@@ -352,31 +351,52 @@ def _evidence_primitive(
 
 
 def _canonical_json(value: object) -> bytes:
+    serialized = None
     try:
-        return json.dumps(
+        serialized = json.dumps(
             value,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-    except (TypeError, ValueError):
+    except Exception:
+        pass
+    if serialized is None:
         _fail("FIRST_LIVE_EVIDENCE_NOT_CANONICAL")
+    return serialized
 
 
-def _strict_code_tuple(value: object) -> Tuple[str, ...]:
+def _canonical_structural_reason_codes(value: object) -> Tuple[str, ...]:
+    return _canonical_codes(
+        value,
+        _STRUCTURAL_REASON_CODE_ALLOWLIST,
+        "STRUCTURAL_REASON_CODE_INVALID",
+    )
+
+
+def _canonical_deferred_check_codes(value: object) -> Tuple[str, ...]:
+    return _canonical_codes(
+        value,
+        _DEFERRED_CHECK_CODE_ALLOWLIST,
+        "DEFERRED_CHECK_CODE_INVALID",
+    )
+
+
+def _canonical_codes(
+    value: object,
+    allowlist: frozenset,
+    error_code: str,
+) -> Tuple[str, ...]:
     if type(value) not in {tuple, list}:
-        _fail("FIRST_LIVE_EVIDENCE_CODE_LIST_INVALID")
-    return tuple(value)
-
-
-def _validate_codes(value: Tuple[str, ...]) -> None:
-    if type(value) is not tuple or any(
-        not isinstance(code, str) or not code for code in value
+        _fail(error_code)
+    copied = tuple(value)
+    if (
+        any(type(code) is not str or code not in allowlist for code in copied)
+        or len(copied) != len(set(copied))
     ):
-        _fail("FIRST_LIVE_EVIDENCE_CODE_LIST_INVALID")
-    if value != tuple(sorted(value)) or len(value) != len(set(value)):
-        _fail("FIRST_LIVE_EVIDENCE_CODE_LIST_INVALID")
+        _fail(error_code)
+    return tuple(sorted(copied))
 
 
 def _evidence_field_names() -> Tuple[str, ...]:
