@@ -73,7 +73,7 @@ def test_brand_metadata_and_assets_use_requested_mrkdwn_shape():
     assert "_Sales Category LV1：其他_" in text
     assert "> • *文章 [1]*" in text
     assert "> *標題：*完整標題" in text
-    assert "> *連結：*https://example.com/a" in text
+    assert "> *連結：*<https://example.com/a|開啟連結>" in text
     assert "> *採訪年份：*2024" in text
     assert "> *資料來源：*商家夥伴案例資料庫 r32" in text
     assert "📚 來源" not in text
@@ -208,6 +208,21 @@ def test_url_identity_ignores_fragment_and_trailing_slash_but_keeps_unknown_para
     assert "b=2" in first.display and "a=1" in first.display
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "javascript:alert(1)",
+        "file:///internal/content.md",
+        "data:text/plain,unsafe",
+        "https://user:password@example.com/path",
+        "https://example.com:invalid/path",
+        "http://[invalid",
+    ],
+)
+def test_unsafe_or_malformed_urls_are_not_renderable(value):
+    assert canonicalize_url(value) is None
+
+
 def test_same_canonical_url_from_multiple_allowed_rows_lists_sorted_sources_once():
     answer = _answer(
         "query",
@@ -223,7 +238,7 @@ def test_same_canonical_url_from_multiple_allowed_rows_lists_sorted_sources_once
     assert "商家夥伴案例資料庫 r32、商家夥伴案例資料庫 r87" in text
 
 
-def test_title_url_and_link_url_conflict_are_both_visible_as_data_conflict():
+def test_title_url_and_link_url_conflict_does_not_guess_a_link():
     answer = _answer(
         "query",
         [_entity("Brand", [_asset("article", "https://example.com/title", row=1, url="https://example.com/link")])],
@@ -231,7 +246,8 @@ def test_title_url_and_link_url_conflict_are_both_visible_as_data_conflict():
 
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
-    assert text.count("資料不一致") >= 2
+    assert "標題：*資料不一致" in text
+    assert "連結：*資料未提供" in text
 
 
 def test_explicit_domain_policy_controls_www_https_and_path_case_merges():
@@ -249,7 +265,7 @@ def test_explicit_domain_policy_controls_www_https_and_path_case_merges():
     assert unknown_http.identity != canonicalize_url("https://other.example/article").identity
 
 
-def test_title_url_moves_to_link_and_conflicting_title_link_is_not_guessed():
+def test_title_url_never_becomes_an_asset_link_without_approved_url_evidence():
     answer = _answer(
         "query",
         [
@@ -260,7 +276,8 @@ def test_title_url_moves_to_link_and_conflicting_title_link_is_not_guessed():
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
     assert "> *標題：*資料未提供" in text
-    assert "> *連結：*https://example.com/a" in text
+    assert "> *連結：*資料未提供" in text
+    assert "<https://example.com/a|開啟連結>" not in text
     assert "Brand B" in text
 
 

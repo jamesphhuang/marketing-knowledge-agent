@@ -206,7 +206,11 @@ def _aggregate_entities(
             asset = StructuredAsset(
                 asset_type=asset_type,
                 title=title,
-                url=metadata.canonical_url,
+                url=(
+                    None
+                    if metadata.record_type == "merchant_case"
+                    else metadata.canonical_url
+                ),
                 published_at=(
                     metadata.publish_date.isoformat()
                     if metadata.record_type == "content_asset" and metadata.publish_date
@@ -229,6 +233,8 @@ def _aggregate_entities(
                 retrieval_reason=_retrieval_reason(query_plan),
                 today=today,
             )
+            if metadata.record_type == "merchant_case":
+                citation.canonical_url = None
             citation_warnings = []
             if metadata.status in NON_PUBLIC_STATUSES:
                 citation_warnings.append(f"{label} {title} 的 status={metadata.status}，不可直接對外引用。")

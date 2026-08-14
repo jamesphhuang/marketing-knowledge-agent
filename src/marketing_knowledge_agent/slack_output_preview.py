@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import urlsplit
 
+from .governance import metadata_allows_written_external_use
 from .models import GeneratedAnswer, SearchFilters
 from .pipeline import ask_index
 from .query_planning import FIELD_REGISTRY
@@ -154,6 +155,48 @@ def load_asset_url_overlay(
         errors=errors,
         warnings=warnings,
     )
+
+
+def apply_approved_asset_url_overlay(answer, overlay: AssetUrlOverlay) -> int:
+    """Attach approved asset-level URLs to an externally safe structured answer."""
+    generated = getattr(answer, "generated", answer)
+    structured = getattr(generated, "structured_result", None)
+    if structured is None or overlay.errors:
+        return 0
+
+    citations = {
+        citation.label: citation
+        for citation in getattr(generated, "citations", [])
+        if citation.can_quote_externally
+        and citation.data_classification == "public"
+        and metadata_allows_written_external_use(citation)
+    }
+    applied = 0
+    for entity in structured.matched_entities:
+        for asset in entity.assets:
+            record_id = asset.source_record_id
+            asset_id = f"{record_id}:{asset.asset_type}"
+            if asset_id in overlay.blocked_asset_ids:
+                continue
+            citation = citations.get(asset.citation_label)
+            if (
+                citation is None
+                or citation.title != asset.title
+                or citation.source_sheet != asset.source_sheet
+                or citation.source_row != asset.source_row
+                or citation.chunk_id.rsplit(":", 1)[-1] != asset.asset_type
+            ):
+                continue
+            value = (
+                overlay.value(record_id, asset_id, "canonical_url")
+                or overlay.value(record_id, asset_id, "asset_url")
+            )
+            if not value or not _safe_http_url(value):
+                continue
+            asset.url = value
+            citation.canonical_url = value
+            applied += 1
+    return applied
 
 
 def build_slack_preview_payload(
@@ -750,8 +793,16 @@ def _unique_sources(entities: Sequence[Mapping[str, object]]) -> List[str]:
 def _safe_http_url(value: str) -> bool:
     if not value or re.search(r"[\x00-\x20<>|]", value):
         return False
-    parsed = urlsplit(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and not (parsed.username or parsed.password)
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.hostname)
+        and not (parsed.username or parsed.password)
+    )
 
 
 def _valid_iso_date(value: str) -> bool:

@@ -19,8 +19,11 @@ from marketing_knowledge_agent.models import (
     Document,
     DocumentMetadata,
     GeneratedAnswer,
+    StructuredAsset,
+    StructuredEntity,
     StructuredRetrievalResult,
 )
+from marketing_knowledge_agent.slack_output_preview import AssetUrlOverlay, AssetUrlRecord
 from marketing_knowledge_agent.query_gating import RESTRICTED_QUERY_REFUSAL
 from marketing_knowledge_agent.query_gating import append_denylist_query_audit
 from marketing_knowledge_agent.slack_interface import (
@@ -343,6 +346,80 @@ def test_load_slack_config_uses_documented_defaults(tmp_path):
     assert config.allowed_channel_ids == ["C123"]
     assert config.notify_owner_on_denylist is False
     assert config.max_answer_chars == 2500
+    assert config.enable_approved_asset_urls is False
+
+
+def test_opted_in_slack_reply_uses_approved_asset_links_only(monkeypatch, tmp_path):
+    assets = [
+        StructuredAsset(
+            asset_type="article",
+            title="Article",
+            external_usage_status="可對外引用",
+            source_record_id="Sheet:r8",
+            source_sheet="Sheet",
+            source_row=8,
+            citation_label="[1]",
+        ),
+        StructuredAsset(
+            asset_type="video",
+            title="Video",
+            external_usage_status="可對外引用",
+            source_record_id="Sheet:r8",
+            source_sheet="Sheet",
+            source_row=8,
+            citation_label="[2]",
+        ),
+    ]
+    citations = [
+        _citation("Article", "[1]"),
+        _citation("Video", "[2]"),
+    ]
+    for citation, asset_type in zip(citations, ("article", "video")):
+        citation.source_sheet = "Sheet"
+        citation.source_row = 8
+        citation.record_type = "merchant_case"
+        citation.chunk_id = f"chunk-r8:{asset_type}"
+    structured = StructuredRetrievalResult(
+        query_plan={"raw_query": "Merchant A", "supported_constraints": []},
+        matched_entities=[StructuredEntity(entity_type="merchant", entity_name="Merchant A", assets=assets)],
+        total_entities=1,
+        total_assets=2,
+    )
+    answer = GeneratedAnswer(
+        question="Merchant A",
+        answer="unused",
+        citations=citations,
+        warnings=[],
+        governance_checked=True,
+        structured_result=structured,
+    )
+    record_id = "Sheet:r8"
+    overlay = AssetUrlOverlay(
+        values={
+            (record_id, f"{record_id}:article", "canonical_url"): AssetUrlRecord(
+                record_id, f"{record_id}:article", "canonical_url", "https://example.com/article", "Reviewer", "2026-07-17"
+            ),
+            (record_id, f"{record_id}:video", "asset_url"): AssetUrlRecord(
+                record_id, f"{record_id}:video", "asset_url", "https://example.com/video", "Reviewer", "2026-07-17"
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_interface.load_asset_url_overlay",
+        lambda *args: overlay,
+    )
+
+    reply = handle_slack_event(
+        {"text": "Merchant A", "channel": "C123", "user": "U123", "ts": "10"},
+        config=SlackConfig(allowed_channel_ids=["C123"], enable_approved_asset_urls=True),
+        ask_fn=lambda *args, **kwargs: answer,
+        audit_log_path=tmp_path / "audit.csv",
+    )
+
+    assert "*連結：*<https://example.com/article|開啟連結>" in reply["text"]
+    assert "*連結：*<https://example.com/video|開啟連結>" in reply["text"]
+    assert [asset.url for asset in assets] == ["https://example.com/article", "https://example.com/video"]
+    assert [citation.canonical_url for citation in citations] == ["https://example.com/article", "https://example.com/video"]
 
 
 class FakeSlackClient:

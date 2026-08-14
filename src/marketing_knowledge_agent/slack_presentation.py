@@ -65,7 +65,10 @@ def canonicalize_url(
     host = parsed.hostname.casefold()
     if host.startswith("www.") and host[4:] in policy.www_equivalent_hosts:
         host = host[4:]
-    port = parsed.port
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
     netloc = host if port is None else f"{host}:{port}"
     scheme = parsed.scheme.casefold()
     if host in policy.https_equivalent_hosts:
@@ -149,7 +152,7 @@ def format_structured_slack_reply(answer) -> Optional[str]:
                     + f"{ASSET_LABELS.get(asset['asset_type'], '其他')} [{asset['number']}]"
                     + "*",
                     f"> *標題：*{_normal_text(asset['title'])}",
-                    f"> *連結：*{_normal_text(asset['url']) or MISSING}",
+                    f"> *連結：*{_slack_link(asset['url']) if asset['url'] else MISSING}",
                     f"> *上線日期：*{_normal_text(asset['published_at']) or MISSING}",
                     f"> *採訪年份：*{_normal_text(asset.get('interview_year') or entity.get('interview_year')) or MISSING}",
                     f"> *狀態：*{_status_label(asset['status'])}",
@@ -241,7 +244,7 @@ def _asset_candidate(
     citation_url = canonicalize_url(citation.canonical_url)
     asset_url = canonicalize_url(asset.url)
     title_is_url = canonicalize_url(asset.title)
-    url = citation_url or asset_url or title_is_url
+    url = citation_url or asset_url
     title = asset.title or citation.title
     url_conflict = False
     if title_is_url and not (citation.canonical_url or asset.url):
@@ -424,6 +427,13 @@ def _status_label(value: Optional[str]) -> str:
 
 def _label_value(label: str, value: object) -> str:
     return f"{label}：{_normal_text(value) or MISSING}"
+
+
+def _slack_link(value: object) -> str:
+    url = canonicalize_url(str(value or ""))
+    if url is None or re.search(r"[\x00-\x20<>|]", url.display):
+        return MISSING
+    return f"<{url.display}|開啟連結>"
 
 
 def _normal_text(value: object) -> str:

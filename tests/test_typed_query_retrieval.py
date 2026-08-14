@@ -389,8 +389,10 @@ def test_structured_renderer_omits_empty_asset_sections_and_preserves_traceabili
     assert "Podcast" not in answer.answer
     assert "新聞" not in answer.answer
     assert "連結：資料未提供" in answer.answer
+    assert "merchant-generic" not in answer.answer
     assert "資料來源：商家夥伴案例資料庫 r8" in answer.answer
     assert all(citation.source_sheet and citation.source_row for citation in answer.citations)
+    assert all(citation.canonical_url is None for citation in answer.citations)
 
 
 def test_parent_record_status_is_not_copied_to_structured_assets(tmp_path):
@@ -563,6 +565,7 @@ def _build_index(tmp_path):
             article="三風製麵數位轉型文章",
             video="三風製麵數位轉型影片",
             source_row=8,
+            canonical_url="https://example.com/merchant-generic",
         ),
         _record("生活倉庫", "life-store", "居家生活", 2025, article="收納用品文章"),
         _record("STANCAVE", "stancave", "流行服飾", 2025, article="生活風格男裝"),
@@ -597,6 +600,7 @@ def _record(
     news=None,
     source_row=1,
     publish_date=date(2026, 7, 1),
+    canonical_url=None,
 ):
     title = article or video or podcast or news or brand_name
     metadata = DocumentMetadata(
@@ -608,6 +612,7 @@ def _record(
         source_path=f"商家夥伴案例資料庫:{source_row}",
         source_sheet="商家夥伴案例資料庫",
         source_row=source_row,
+        canonical_url=canonical_url,
         brand_name=brand_name,
         merchant_handle=handle,
         merchant_status="現有商家",

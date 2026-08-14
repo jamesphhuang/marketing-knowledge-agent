@@ -14,11 +14,18 @@ from .governance import metadata_allows_written_external_use
 from .llm import DEFAULT_LLM_CONFIG_PATH, load_llm_config
 from .models import SearchFilters
 from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, agent_ask
+from .slack_output_preview import (
+    apply_approved_asset_url_overlay,
+    load_asset_url_overlay,
+)
 from .slack_presentation import format_structured_slack_reply
 
 
 DEFAULT_SLACK_CONFIG_PATH = Path(".mka/slack_config.json")
 DEFAULT_SLACK_AUDIT_LOG = Path("reports/audit_log.csv")
+DEFAULT_ASSET_URL_APPLY_PREVIEW_PATH = Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv")
+DEFAULT_ASSET_URL_BLOCKED_PREVIEW_PATH = Path("reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv")
+DEFAULT_ASSET_URL_DECISIONS_PATH = Path("reports/asset_metadata_preview/human_review_template.csv")
 DENIED_CHANNEL_MESSAGE = "此頻道未啟用行銷知識查詢"
 ANSWER_TRUNCATION_NOTICE = "(內容過長已截斷,完整結果請用內部工具查詢)"
 SLACK_NO_RESULTS_MESSAGE = "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
@@ -42,6 +49,7 @@ class SlackConfig:
     allowed_channel_ids: List[str] = field(default_factory=list)
     notify_owner_on_denylist: bool = False
     max_answer_chars: int = 2500
+    enable_approved_asset_urls: bool = False
 
 
 def load_slack_config(path: Path = DEFAULT_SLACK_CONFIG_PATH) -> SlackConfig:
@@ -66,10 +74,14 @@ def load_slack_config(path: Path = DEFAULT_SLACK_CONFIG_PATH) -> SlackConfig:
     max_answer_chars = payload.get("max_answer_chars", 2500)
     if not isinstance(max_answer_chars, int) or isinstance(max_answer_chars, bool) or max_answer_chars <= 0:
         raise SlackInterfaceError("max_answer_chars 必須是正整數。")
+    enable_approved_asset_urls = payload.get("enable_approved_asset_urls", False)
+    if not isinstance(enable_approved_asset_urls, bool):
+        raise SlackInterfaceError("enable_approved_asset_urls 必須是 boolean。")
     return SlackConfig(
         allowed_channel_ids=[value.strip() for value in allowed_channel_ids],
         notify_owner_on_denylist=notify_owner,
         max_answer_chars=max_answer_chars,
+        enable_approved_asset_urls=enable_approved_asset_urls,
     )
 
 
@@ -112,6 +124,8 @@ def handle_slack_event(
         llm_audit_log_path=Path(audit_log_path),
         query_audit_metadata={"channel_id": channel_id, "user_id": user_id},
     )
+    if config.enable_approved_asset_urls:
+        _apply_approved_asset_urls(answer)
     is_denylist_refusal = getattr(getattr(answer, "trace", None), "mode", None) == "refused"
     if not is_denylist_refusal:
         _append_slack_audit(
@@ -124,6 +138,18 @@ def handle_slack_event(
             query=question,
         )
     return _reply_dict(channel_id, thread_ts, format_slack_reply(answer, config.max_answer_chars))
+
+
+def _apply_approved_asset_urls(answer) -> None:
+    try:
+        overlay = load_asset_url_overlay(
+            DEFAULT_ASSET_URL_APPLY_PREVIEW_PATH,
+            DEFAULT_ASSET_URL_BLOCKED_PREVIEW_PATH,
+            DEFAULT_ASSET_URL_DECISIONS_PATH,
+        )
+    except (OSError, csv.Error):
+        return
+    apply_approved_asset_url_overlay(answer, overlay)
 
 
 def format_slack_reply(answer, max_answer_chars: int) -> str:

@@ -3,6 +3,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from marketing_knowledge_agent.models import (
     Citation,
     GeneratedAnswer,
@@ -13,6 +15,7 @@ from marketing_knowledge_agent.models import (
 from marketing_knowledge_agent.slack_output_preview import (
     AssetUrlOverlay,
     AssetUrlRecord,
+    apply_approved_asset_url_overlay,
     build_slack_preview_payload,
     generate_slack_output_preview,
     load_asset_url_overlay,
@@ -113,6 +116,94 @@ def test_missing_asset_url_is_explicit_and_does_not_fall_back_to_canonical():
     assert "連結未提供" in text
     assert "backend-only" not in text
     assert any(item["code"] == "url_overlay_missing" for item in bundle.warnings)
+
+
+def test_approved_overlay_updates_each_asset_and_matching_citation_independently():
+    assets = [
+        _asset("article", "Story A", "r8", "[1]"),
+        _asset("video", "Story B", "r8", "[2]"),
+    ]
+    answer = _answer([_entity("Merchant A", "a", assets)])
+    overlay = _merge_overlay(
+        _overlay(
+            "r8",
+            "article",
+            asset_url="https://example.com/article-direct",
+            canonical_url="https://example.com/article-canonical",
+        ),
+        _overlay(
+            "r8",
+            "video",
+            asset_url="https://example.com/video-direct",
+            canonical_url="https://example.com/video-canonical",
+        ),
+    )
+
+    assert apply_approved_asset_url_overlay(answer, overlay) == 2
+    assert [asset.url for asset in assets] == [
+        "https://example.com/article-canonical",
+        "https://example.com/video-canonical",
+    ]
+    assert [citation.canonical_url for citation in answer.citations] == [
+        "https://example.com/article-canonical",
+        "https://example.com/video-canonical",
+    ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "file:///internal/content.md",
+        "data:text/plain,unsafe",
+        "https://user:password@example.com/path",
+        "http://[invalid",
+    ],
+)
+def test_invalid_overlay_url_never_reaches_structured_assets_or_citations(url):
+    asset = _asset("article", "Story A", "r8", "[1]")
+    answer = _answer([_entity("Merchant A", "a", [asset])])
+    asset.url = None
+    answer.citations[0].canonical_url = None
+    record_id = "Sheet:r8"
+    asset_id = f"{record_id}:article"
+    overlay = AssetUrlOverlay(
+        values={
+            (record_id, asset_id, "asset_url"): AssetUrlRecord(
+                record_id, asset_id, "asset_url", url, "Reviewer", "2026-07-17"
+            )
+        }
+    )
+
+    assert apply_approved_asset_url_overlay(answer, overlay) == 0
+    assert asset.url is None
+    assert answer.citations[0].canonical_url is None
+
+
+def test_governance_blocked_or_non_external_asset_cannot_receive_an_overlay_url():
+    asset = _asset("article", "Secret Story", "r8", "[1]")
+    answer = _answer([_entity("Restricted Brand", "secret", [asset])])
+    asset.url = None
+    answer.citations[0].canonical_url = None
+    answer.citations[0].can_quote_externally = False
+    overlay = _overlay("r8", "article")
+
+    assert apply_approved_asset_url_overlay(answer, overlay) == 0
+    assert asset.url is None
+    assert answer.citations[0].canonical_url is None
+
+
+def test_pending_source_url_cannot_receive_an_overlay_url():
+    asset = _asset("article", "Pending Story", "r8", "[1]")
+    answer = _answer([_entity("Merchant A", "a", [asset])])
+    asset.url = None
+    answer.citations[0].canonical_url = None
+    answer.citations[0].record_type = "pending_metric"
+    overlay = _overlay("r8", "article")
+
+    assert apply_approved_asset_url_overlay(answer, overlay) == 0
+    assert asset.url is None
+    assert answer.citations[0].canonical_url is None
 
 
 def test_governance_blocked_or_restricted_asset_is_omitted():
@@ -338,7 +429,14 @@ def _answer(
     citations = []
     for entity in entities:
         for asset in entity.assets:
-            citations.append(_citation(asset.citation_label, asset.title, asset.source_row or 0))
+            citations.append(
+                _citation(
+                    asset.citation_label,
+                    asset.title,
+                    asset.source_row or 0,
+                    asset.asset_type,
+                )
+            )
     structured = StructuredRetrievalResult(
         query_plan=plan,
         matched_entities=entities,
@@ -388,12 +486,12 @@ def _asset(asset_type, title, record, label):
     )
 
 
-def _citation(label, title, row):
+def _citation(label, title, row, asset_type):
     return Citation(
         label=label,
         title=title,
         source_path=f"internal/{row}.md",
-        chunk_id=f"chunk-{row}",
+        chunk_id=f"chunk-{row}:{asset_type}",
         status="published",
         source_type="database",
         record_type="merchant_case",
