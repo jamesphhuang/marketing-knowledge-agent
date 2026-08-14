@@ -279,6 +279,7 @@ def _create_configured_read_result(
     coverage_proof: ConfiguredRangeCoverageProof,
     configuration_identity: str,
 ) -> ConfiguredReadResult:
+    # Guard scope: docs/governance/PYTHON_GUARD_THREAT_MODEL.md (T1/T2, not T3).
     if not isinstance(snapshot, SpreadsheetSnapshot):
         raise TypeError("CONFIGURED_READ_RESULT_SNAPSHOT_INVALID")
     if not isinstance(coverage_proof, ConfiguredRangeCoverageProof):

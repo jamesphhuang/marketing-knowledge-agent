@@ -67,7 +67,7 @@ class SourceHealthDisposition(str, Enum):
 
 @dataclass(frozen=True)
 class SafeStructuralCounts:
-    """The complete WP2 v1 allowlist of non-sensitive count facts."""
+    """Approved structural evidence counts only, never a security proof."""
 
     configured_range_count: int
     covered_range_count: int
@@ -169,6 +169,7 @@ class _RunModeProvenance:
         raise TypeError("RUN_MODE_PROVENANCE_PICKLE_FORBIDDEN")
 
 
+# Guard scope: docs/governance/PYTHON_GUARD_THREAT_MODEL.md (T1/T2, not T3).
 _FIRST_LIVE_RUN_AUTHORITY = object()
 _SYNTHETIC_RUN_AUTHORITY = object()
 

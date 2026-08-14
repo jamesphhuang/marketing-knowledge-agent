@@ -315,11 +315,17 @@ class SourceRecord(_CanonicalModel):
 
 
 def _build_public_metric_functions():
+    # Guard scope: docs/governance/PYTHON_GUARD_THREAT_MODEL.md (T1/T2, not T3).
     authorization = object()
 
     def public_metric_init(self, _wp5_gate=None, **data):
         if _wp5_gate is not authorization:
             raise _public_metric_gate_error()
+        _validate_public_metric_governance_state(
+            review_status=data.get("review_status"),
+            publish_eligibility=data.get("publish_eligibility"),
+            can_quote_externally=data.get("can_quote_externally"),
+        )
         _CanonicalModel.__init__(self, **data)
 
     def create_public_metric(eligible: PersistenceEligibleMetricInput) -> PublicMetric:
@@ -356,7 +362,7 @@ del _build_public_metric_functions
 
 
 class PublicMetric(_CanonicalModel):
-    """Final MET schema whose construction requires exact WP5 output."""
+    """Final MET schema; governance fields are declarative until enforced."""
 
     _identity_fields = ("metric_id",)
 
@@ -503,6 +509,26 @@ def _validate_brand_identity_decision(
         raise CanonicalModelError("BRAND_ID_FORBIDDEN_FOR_UNCERTAIN_DECISION")
     if review_status is ReviewStatus.EXCLUDED and brand_id is not None:
         raise CanonicalModelError("BRAND_ID_FORBIDDEN_FOR_EXCLUDED_DECISION")
+
+
+def _validate_public_metric_governance_state(
+    *,
+    review_status: object,
+    publish_eligibility: object,
+    can_quote_externally: object,
+) -> None:
+    """Validate the shared PublicMetric quote/exclusion state invariant."""
+
+    if can_quote_externally is True and (
+        review_status is not ReviewStatus.APPROVED
+        or publish_eligibility is not PublishEligibility.ELIGIBLE
+    ):
+        raise CanonicalModelError("PUBLIC_METRIC_GOVERNANCE_STATE_INVALID")
+    if review_status is ReviewStatus.EXCLUDED and (
+        can_quote_externally is not False
+        or publish_eligibility is not PublishEligibility.INELIGIBLE
+    ):
+        raise CanonicalModelError("PUBLIC_METRIC_GOVERNANCE_STATE_INVALID")
 
 
 def _require_non_blank_text(value: str, code: str) -> str:

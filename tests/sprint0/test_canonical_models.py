@@ -14,6 +14,7 @@ from marketing_knowledge_agent.canonical_models import (
     BrandEntityType,
     BrandId,
     BrandIdentityDecision,
+    CanonicalModelError,
     CanonicalSourceLineage,
     ContentAssetKey,
     LifecycleStatus,
@@ -346,6 +347,40 @@ def test_public_metric_copy_update_paths_are_explicitly_fail_closed():
     for field_filter in ({"include": {"metric_id"}}, {"exclude": {"approved_statement"}}):
         with pytest.raises(TypeError, match="PUBLIC_METRIC_REQUIRES_WP5_ELIGIBLE_INPUT"):
             copy_method(None, **field_filter)
+
+
+@pytest.mark.parametrize(
+    ("review_status", "publish_eligibility", "can_quote_externally", "valid"),
+    [
+        (ReviewStatus.APPROVED, PublishEligibility.ELIGIBLE, True, True),
+        (ReviewStatus.APPROVED, PublishEligibility.INELIGIBLE, True, False),
+        (ReviewStatus.NEEDS_REVIEW, PublishEligibility.ELIGIBLE, True, False),
+        (ReviewStatus.NEEDS_REVIEW, PublishEligibility.INELIGIBLE, True, False),
+        (ReviewStatus.EXCLUDED, PublishEligibility.INELIGIBLE, True, False),
+        (ReviewStatus.EXCLUDED, PublishEligibility.ELIGIBLE, False, False),
+        (ReviewStatus.EXCLUDED, PublishEligibility.INELIGIBLE, False, True),
+        (ReviewStatus.APPROVED, PublishEligibility.INELIGIBLE, False, True),
+        (ReviewStatus.NEEDS_REVIEW, PublishEligibility.ELIGIBLE, False, True),
+    ],
+)
+def test_shared_public_metric_governance_invariant_has_exact_frozen_matrix(
+    review_status,
+    publish_eligibility,
+    can_quote_externally,
+    valid,
+):
+    kwargs = {
+        "review_status": review_status,
+        "publish_eligibility": publish_eligibility,
+        "can_quote_externally": can_quote_externally,
+    }
+
+    if valid:
+        assert canonical_models._validate_public_metric_governance_state(**kwargs) is None
+    else:
+        with pytest.raises(CanonicalModelError) as caught:
+            canonical_models._validate_public_metric_governance_state(**kwargs)
+        assert caught.value.code == "PUBLIC_METRIC_GOVERNANCE_STATE_INVALID"
 
 
 @pytest.mark.parametrize(

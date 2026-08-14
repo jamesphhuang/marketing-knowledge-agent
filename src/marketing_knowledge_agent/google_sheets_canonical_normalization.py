@@ -125,9 +125,7 @@ class WP3FieldSpec:
     name: str
     column: str
     value_kind: str
-    required: bool = False
     merge_inheritance_allowed: bool = False
-    sensitive: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,8 +133,6 @@ class WP3SheetSpec:
     source_class: str
     sheet_id: int
     title: str
-    hidden: bool
-    header_row: Optional[int]
     first_data_row: int
     last_data_row: int
     first_column: str
@@ -146,11 +142,11 @@ class WP3SheetSpec:
 
 WP3_FIELD_REGISTRY = (
     WP3SheetSpec(
-        "merchant_case", 0, "商家/夥伴案例資料庫", False, 6, 7, 1018, "A", "L",
+        "merchant_case", 0, "商家/夥伴案例資料庫", 7, 1018, "A", "L",
         (
             WP3FieldSpec("interview_year", "A", "YEAR_ONLY"),
             WP3FieldSpec("source_status", "B", "TEXT"),
-            WP3FieldSpec("merchant_name", "C", "TEXT_LINK", True, sensitive=True),
+            WP3FieldSpec("merchant_name", "C", "TEXT_LINK"),
             WP3FieldSpec("normalized_handle", "D", "HANDLE"),
             WP3FieldSpec("sales_category_lv1", "E", "TEXT"),
             WP3FieldSpec("sales_category_lv2", "F", "TEXT"),
@@ -159,54 +155,54 @@ WP3_FIELD_REGISTRY = (
             WP3FieldSpec("video", "I", "TEXT_LINK"),
             WP3FieldSpec("podcast", "J", "TEXT_LINK"),
             WP3FieldSpec("news", "K", "TEXT_LINK"),
-            WP3FieldSpec("notes", "L", "TEXT", sensitive=True),
+            WP3FieldSpec("notes", "L", "TEXT"),
         ),
     ),
     WP3SheetSpec(
-        "restricted_customer", 1456785208, "「不可公開」客戶名單", False, 4, 5, 994, "A", "H",
+        "restricted_customer", 1456785208, "「不可公開」客戶名單", 5, 994, "A", "H",
         (
             WP3FieldSpec("updated_year", "A", "YEAR_ONLY"),
-            WP3FieldSpec("customer_brand", "B", "TEXT", sensitive=True),
-            WP3FieldSpec("website", "C", "TEXT_LINK", sensitive=True),
+            WP3FieldSpec("customer_brand", "B", "TEXT"),
+            WP3FieldSpec("website", "C", "TEXT_LINK"),
             WP3FieldSpec("sales_category_lv1", "D", "TEXT"),
             WP3FieldSpec("nda_signed", "E", "BOOLEAN"),
             WP3FieldSpec("nda_uploaded", "F", "BOOLEAN"),
-            WP3FieldSpec("restricted_reason", "G", "TEXT", sensitive=True),
-            WP3FieldSpec("submitted_by", "H", "TEXT", sensitive=True),
+            WP3FieldSpec("restricted_reason", "G", "TEXT"),
+            WP3FieldSpec("submitted_by", "H", "TEXT"),
         ),
     ),
     WP3SheetSpec(
-        "public_metric", 918878896, "「可公開」對外數據", False, 6, 7, 999, "A", "M",
+        "public_metric", 918878896, "「可公開」對外數據", 7, 999, "A", "M",
         (
-            WP3FieldSpec("metric_type", "A", "TEXT", True, True),
-            WP3FieldSpec("indicator", "B", "TEXT", True, True),
-            WP3FieldSpec("statement", "C", "TEXT", True, sensitive=True),
-            WP3FieldSpec("note", "D", "TEXT", sensitive=True),
+            WP3FieldSpec("metric_type", "A", "TEXT", merge_inheritance_allowed=True),
+            WP3FieldSpec("indicator", "B", "TEXT", merge_inheritance_allowed=True),
+            WP3FieldSpec("statement", "C", "TEXT"),
+            WP3FieldSpec("note", "D", "TEXT"),
             WP3FieldSpec("updated_date", "E", "DATE_ONLY"),
             WP3FieldSpec("evidence_url", "F", "TEXT_LINK", merge_inheritance_allowed=True),
-            WP3FieldSpec("press_release", "G", "BOOLEAN", True),
-            WP3FieldSpec("owned_media", "H", "BOOLEAN", True),
-            WP3FieldSpec("saleskits", "I", "BOOLEAN", True),
-            WP3FieldSpec("verbal_briefing", "J", "BOOLEAN", True),
-            WP3FieldSpec("speaking_deck", "K", "BOOLEAN", True),
-            WP3FieldSpec("website_recruiting", "L", "BOOLEAN", True),
-            WP3FieldSpec("ads", "M", "BOOLEAN", True),
+            WP3FieldSpec("press_release", "G", "BOOLEAN"),
+            WP3FieldSpec("owned_media", "H", "BOOLEAN"),
+            WP3FieldSpec("saleskits", "I", "BOOLEAN"),
+            WP3FieldSpec("verbal_briefing", "J", "BOOLEAN"),
+            WP3FieldSpec("speaking_deck", "K", "BOOLEAN"),
+            WP3FieldSpec("website_recruiting", "L", "BOOLEAN"),
+            WP3FieldSpec("ads", "M", "BOOLEAN"),
         ),
     ),
     WP3SheetSpec(
-        "pending_metric", 956677822, "待確認數據", True, None, 3, 999, "A", "D",
+        "pending_metric", 956677822, "待確認數據", 3, 999, "A", "D",
         (
             WP3FieldSpec("metric_type", "A", "TEXT"),
             WP3FieldSpec("indicator", "B", "TEXT"),
-            WP3FieldSpec("statement", "C", "TEXT", True, sensitive=True),
-            WP3FieldSpec("note", "D", "TEXT", sensitive=True),
+            WP3FieldSpec("statement", "C", "TEXT"),
+            WP3FieldSpec("note", "D", "TEXT"),
         ),
     ),
     WP3SheetSpec(
-        "handle_mapping", 737692182, "handle 比對", True, 1, 2, 998, "A", "D",
+        "handle_mapping", 737692182, "handle 比對", 2, 998, "A", "D",
         (
             WP3FieldSpec("normalized_handle", "A", "HANDLE"),
-            WP3FieldSpec("name_with_link", "B", "TEXT_LINK", sensitive=True),
+            WP3FieldSpec("name_with_link", "B", "TEXT_LINK"),
             WP3FieldSpec("category_lv1", "C", "TEXT"),
             WP3FieldSpec("category_lv2", "D", "TEXT"),
         ),
@@ -226,6 +222,9 @@ _CHANNEL_FIELDS = (
 
 
 class _SensitiveStaging:
+    """Application correctness/data boundary, not same-process isolation."""
+
+    # Guard scope: docs/governance/PYTHON_GUARD_THREAT_MODEL.md (T1/T2, not T3).
     __slots__ = ("__weakref__",)
 
     def __new__(cls, *args: object, **kwargs: object) -> "_SensitiveStaging":
@@ -373,6 +372,8 @@ class _SafeFact:
 
 
 class RestrictedGovernanceFact(_SafeFact):
+    """Declarative governance facts; consumers must explicitly enforce them."""
+
     __slots__ = ("_source_ref", "_reason_codes", "_identity_term_count")
 
     source_ref = property(lambda self: self._source_ref)
@@ -1519,7 +1520,14 @@ def _column_index(column: str) -> int:
 
 
 def _column_letter(index: int) -> str:
-    return chr(ord("A") + index)
+    if type(index) is not int or index < 0:
+        _fail("WP3_COLUMN_INDEX_INVALID")
+    value = index + 1
+    label = ""
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        label = chr(ord("A") + remainder) + label
+    return label
 
 
 def _fail(code: str) -> None:

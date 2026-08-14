@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import date
 import json
 import pickle
@@ -20,6 +20,11 @@ from marketing_knowledge_agent.canonical_models import (
     PublicMetric,
     ReviewStatus,
     SourceRecord,
+)
+from marketing_knowledge_agent.cell_normalization import (
+    FieldContract,
+    FieldValueKind,
+    normalize_source_cell,
 )
 from marketing_knowledge_agent.google_normalization import ExcludedSourceRef
 from marketing_knowledge_agent.google_sheets_canonical_normalization import (
@@ -51,7 +56,13 @@ from marketing_knowledge_agent.google_sheets_source_health import (
     build_first_live_coverage_proven_batch_context,
     build_synthetic_coverage_proven_batch_context,
 )
-from marketing_knowledge_agent.sheets_contracts import SpreadsheetSnapshot
+from marketing_knowledge_agent.sheets_contracts import (
+    CellData,
+    GoogleValue,
+    GridRange,
+    SheetSnapshot,
+    SpreadsheetSnapshot,
+)
 from sprint1.test_google_sheets_dry_run_contracts import (
     FIXED_UUID4,
     HEADERS,
@@ -126,7 +137,7 @@ def full_rows() -> dict[str, list[list[dict]]]:
             text("PENDING_NOTE_SENTINEL"),
         ]],
         "handle_mapping": [[
-            text("@example"), text("Mapping Secret", hyperlink="https://shop.example/about"),
+            text("@example"), text("Merchant Secret", hyperlink="https://shop.example/about"),
             text("Suggested"), text("Suggested 2"),
         ]],
     }
@@ -251,6 +262,22 @@ def test_structural_block_is_rejected_before_snapshot_use():
 
 
 def test_registry_is_exactly_the_frozen_five_source_interpretation():
+    assert tuple(field.name for field in fields(wp3.WP3FieldSpec)) == (
+        "name",
+        "column",
+        "value_kind",
+        "merge_inheritance_allowed",
+    )
+    assert tuple(field.name for field in fields(wp3.WP3SheetSpec)) == (
+        "source_class",
+        "sheet_id",
+        "title",
+        "first_data_row",
+        "last_data_row",
+        "first_column",
+        "last_column",
+        "fields",
+    )
     assert [(item.source_class, item.sheet_id, item.title) for item in WP3_FIELD_REGISTRY] == [
         ("merchant_case", 0, "商家/夥伴案例資料庫"),
         ("restricted_customer", 1456785208, "「不可公開」客戶名單"),
@@ -259,14 +286,14 @@ def test_registry_is_exactly_the_frozen_five_source_interpretation():
         ("handle_mapping", 737692182, "handle 比對"),
     ]
     assert [
-        (item.header_row, item.first_data_row, item.last_data_row, item.first_column, item.last_column)
+        (item.first_data_row, item.last_data_row, item.first_column, item.last_column)
         for item in WP3_FIELD_REGISTRY
     ] == [
-        (6, 7, 1018, "A", "L"),
-        (4, 5, 994, "A", "H"),
-        (6, 7, 999, "A", "M"),
-        (None, 3, 999, "A", "D"),
-        (1, 2, 998, "A", "D"),
+        (7, 1018, "A", "L"),
+        (5, 994, "A", "H"),
+        (7, 999, "A", "M"),
+        (3, 999, "A", "D"),
+        (2, 998, "A", "D"),
     ]
     public = next(item for item in WP3_FIELD_REGISTRY if item.source_class == "public_metric")
     assert {field.column for field in public.fields if field.merge_inheritance_allowed} == {"A", "B", "F"}
@@ -301,6 +328,99 @@ def test_registry_is_exactly_the_frozen_five_source_interpretation():
             ("C", "category_lv1"), ("D", "category_lv2"),
         ),
     }
+    assert {
+        item.source_class: tuple(field.value_kind for field in item.fields)
+        for item in WP3_FIELD_REGISTRY
+    } == {
+        "merchant_case": (
+            "YEAR_ONLY", "TEXT", "TEXT_LINK", "HANDLE", "TEXT", "TEXT",
+            "TAGS", "TEXT_LINK", "TEXT_LINK", "TEXT_LINK", "TEXT_LINK", "TEXT",
+        ),
+        "restricted_customer": (
+            "YEAR_ONLY", "TEXT", "TEXT_LINK", "TEXT", "BOOLEAN", "BOOLEAN", "TEXT", "TEXT",
+        ),
+        "public_metric": (
+            "TEXT", "TEXT", "TEXT", "TEXT", "DATE_ONLY", "TEXT_LINK",
+            "BOOLEAN", "BOOLEAN", "BOOLEAN", "BOOLEAN", "BOOLEAN", "BOOLEAN", "BOOLEAN",
+        ),
+        "pending_metric": ("TEXT", "TEXT", "TEXT", "TEXT"),
+        "handle_mapping": ("HANDLE", "TEXT_LINK", "TEXT", "TEXT"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [(0, "A"), (25, "Z"), (26, "AA"), (27, "AB"), (51, "AZ"), (52, "BA")],
+)
+def test_zero_based_column_index_uses_bijective_a1_labels(index, expected):
+    assert wp3._column_letter(index) == expected
+
+
+@pytest.mark.parametrize("invalid", [True, False, -1, 1.0, "26"])
+def test_invalid_a1_column_indexes_fail_with_payload_free_stable_code(invalid):
+    with pytest.raises(CanonicalNormalizationError) as caught:
+        wp3._column_letter(invalid)
+
+    assert caught.value.args == ("WP3_COLUMN_INDEX_INVALID",)
+    assert repr(invalid) not in str(caught.value)
+
+
+def test_lineage_generation_uses_multi_letter_a1_columns_and_merge_ranges():
+    snapshot = SpreadsheetSnapshot(
+        spreadsheet_id="synthetic-wide-sheet",
+        sheets=(
+            SheetSnapshot(
+                sheet_id=901,
+                title="Synthetic Wide",
+                row_count=1,
+                column_count=53,
+                cells=(
+                    CellData(
+                        row_index=0,
+                        column_index=26,
+                        formatted_value="synthetic",
+                        effective_value=GoogleValue(string_value="synthetic"),
+                    ),
+                ),
+                merges=(
+                    GridRange(
+                        sheet_id=901,
+                        start_row_index=0,
+                        end_row_index=1,
+                        start_column_index=26,
+                        end_column_index=28,
+                    ),
+                ),
+            ),
+        ),
+    )
+    resolved = normalize_source_cell(
+        snapshot,
+        sheet_id=901,
+        source_row_index=0,
+        field_contract=FieldContract(
+            "wide_field",
+            FieldValueKind.TEXT,
+            27,
+            merge_inheritance_allowed=True,
+        ),
+        source_fingerprint="sha256:synthetic-source",
+        sync_batch_id="synthetic-batch",
+    )
+
+    lineage = wp3._lineage(
+        SimpleNamespace(sheet_id=901, title="Synthetic Wide"),
+        0,
+        {"wide_field": resolved},
+        SimpleNamespace(
+            target_identity_hash="sha256:synthetic-target",
+            source_fingerprint="sha256:synthetic-source",
+            correlation_id="synthetic-batch",
+        ),
+    )
+
+    assert lineage.source_columns == {"wide_field": "AB"}
+    assert lineage.source_ranges == {"wide_field": "AA1:AB1"}
 
 
 def test_common_text_handle_tag_year_row_and_lineage_normalization():

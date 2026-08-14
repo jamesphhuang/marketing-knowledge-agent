@@ -59,6 +59,89 @@ def test_unique_evidence_is_redacted_non_authoritative_and_still_requires_human_
     assert not hasattr(candidate, "approved")
 
 
+def test_same_handle_and_same_normalized_name_remains_unique_evidence():
+    rows = full_rows()
+    rows["merchant_case"][0][2] = text(" Same Brand ", hyperlink="https://same.example")
+    rows["handle_mapping"][0][1] = text("same brand", hyperlink="https://same.example")
+
+    candidate = candidates(rows)[0]
+
+    assert candidate.classification is BrandCandidateClassification.UNIQUE_EVIDENCE
+    assert "NAME_DIVERGENCE_WITHIN_CANDIDATE" not in candidate.reason_codes
+
+
+def test_same_handle_with_divergent_names_downgrades_unique_evidence_to_ambiguous():
+    rows = full_rows()
+    rows["merchant_case"][0][2] = text("First Brand", hyperlink="https://same.example")
+    rows["handle_mapping"][0][1] = text("Second Brand", hyperlink="https://same.example")
+
+    candidate = candidates(rows)[0]
+
+    assert candidate.classification is BrandCandidateClassification.AMBIGUOUS
+    assert "NAME_DIVERGENCE_WITHIN_CANDIDATE" in candidate.reason_codes
+
+
+def test_missing_name_is_not_treated_as_name_divergence():
+    rows = full_rows()
+    rows["merchant_case"][0][2] = text("Known Brand", hyperlink="https://same.example")
+    rows["handle_mapping"][0][1] = text("", hyperlink="https://same.example")
+
+    candidate = candidates(rows)[0]
+
+    assert candidate.classification is BrandCandidateClassification.UNIQUE_EVIDENCE
+    assert "NAME_DIVERGENCE_WITHIN_CANDIDATE" not in candidate.reason_codes
+
+
+def test_three_divergent_names_in_one_exact_handle_component_are_ambiguous():
+    rows = full_rows()
+    first = list(rows["merchant_case"][0])
+    first[2] = text("Brand One", hyperlink="https://same.example")
+    first[3] = text("@same")
+    second = list(first)
+    second[0] = text("2025")
+    second[2] = text("Brand Two", hyperlink="https://same.example")
+    third = list(first)
+    third[0] = text("2026")
+    third[2] = text("Brand Three", hyperlink="https://same.example")
+    rows["merchant_case"] = [first, second, third]
+    rows["handle_mapping"] = []
+
+    candidate = candidates(rows)[0]
+
+    assert candidate.classification is BrandCandidateClassification.AMBIGUOUS
+    assert "NAME_DIVERGENCE_WITHIN_CANDIDATE" in candidate.reason_codes
+
+
+def test_name_divergence_classification_is_invariant_to_evidence_order():
+    rows = full_rows()
+    rows["merchant_case"] = [
+        [text("2024"), {}, text("One"), text("@one"), {}, {}, {}, {}, {}, {}, {}, {}],
+        [text("2025"), {}, text("Two"), text("@two"), {}, {}, {}, {}, {}, {}, {}, {}],
+        [text("2026"), {}, text("Three"), text("@three"), {}, {}, {}, {}, {}, {}, {}, {}],
+    ]
+    rows["handle_mapping"] = []
+    source_refs = tuple(item.source_refs[0] for item in candidates(rows))
+    evidence = tuple(
+        brand_module._UntrustedBrandEvidence(
+            source_ref=source_ref,
+            normalized_name=name,
+            normalized_handle="@same",
+            canonical_urls=("https://same.example",),
+            unsafe_website_evidence=False,
+            handle_mapping=False,
+            multiple_urls_in_one_cell=False,
+        )
+        for source_ref, name in zip(source_refs, ("one", "two", "three"))
+    )
+
+    forward = brand_module._project_brand_review_candidates(evidence)
+    reversed_order = brand_module._project_brand_review_candidates(reversed(evidence))
+
+    assert forward == reversed_order
+    assert forward[0].classification is BrandCandidateClassification.AMBIGUOUS
+    assert "NAME_DIVERGENCE_WITHIN_CANDIDATE" in forward[0].reason_codes
+
+
 def test_no_handle_and_no_url_is_ambiguous_even_when_name_exists():
     rows = full_rows()
     rows["merchant_case"][0][2] = text("Name Only")
@@ -102,6 +185,7 @@ def test_exact_handle_equality_connects_sources_and_distinct_websites_conflict()
     assert set(candidate.reason_codes) >= {
         "MULTIPLE_SAFE_WEBSITES",
         "HANDLE_TO_WEBSITE_CONFLICT",
+        "NAME_DIVERGENCE_WITHIN_CANDIDATE",
     }
 
 
@@ -145,6 +229,23 @@ def test_name_is_not_a_graph_edge_and_collision_marks_separate_candidates_ambigu
     assert all(item.classification is BrandCandidateClassification.AMBIGUOUS for item in result)
     assert all("NAME_COLLISION_ACROSS_CANDIDATES" in item.reason_codes for item in result)
     assert {item.normalized_handle for item in result} == {"@first", "@second"}
+
+
+def test_divergent_names_without_exact_handle_or_url_evidence_do_not_create_an_edge():
+    rows = full_rows()
+    rows["merchant_case"][0][2] = text("First Name")
+    rows["merchant_case"][0][3] = text("@first")
+    rows["handle_mapping"][0][0] = text("@second")
+    rows["handle_mapping"][0][1] = text("Second Name")
+
+    result = candidates(rows)
+
+    assert len(result) == 2
+    assert {item.normalized_handle for item in result} == {"@first", "@second"}
+    assert all(
+        "NAME_DIVERGENCE_WITHIN_CANDIDATE" not in item.reason_codes
+        for item in result
+    )
 
 
 def test_duplicate_name_without_exact_handle_or_url_never_auto_merges():

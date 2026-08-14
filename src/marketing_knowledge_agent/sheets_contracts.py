@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Optional, Protocol, Tuple, Union, runtime_checkable
+from typing import ClassVar, Mapping, Optional, Protocol, Tuple, Union, runtime_checkable
 
 from pydantic import (
     BaseModel,
@@ -34,12 +34,29 @@ class _ReadOnlyDTO(BaseModel):
             extra = "forbid"
 
 
-class GoogleError(_ReadOnlyDTO):
+class _PayloadSafeDTO(_ReadOnlyDTO):
+    """Payload-safe debug rendering; trusted serialization remains unchanged."""
+
+    _safe_repr_fields: ClassVar[Tuple[str, ...]] = ()
+
+    def __repr__(self) -> str:
+        details = ", ".join(
+            f"{name}={getattr(self, name)!r}" for name in self._safe_repr_fields
+        )
+        return f"{type(self).__name__}({details})"
+
+    def __str__(self) -> str:
+        return repr(self)
+
+
+class GoogleError(_PayloadSafeDTO):
+    _safe_repr_fields = ("error_type",)
+
     error_type: StrictStr
     message: Optional[StrictStr] = None
 
 
-class GoogleValue(_ReadOnlyDTO):
+class GoogleValue(_PayloadSafeDTO):
     """One branch of the Google Sheets ``ExtendedValue`` union."""
 
     string_value: Optional[StrictStr] = None
@@ -63,16 +80,18 @@ class GoogleValue(_ReadOnlyDTO):
             return values
 
 
-class TextFormatLink(_ReadOnlyDTO):
+class TextFormatLink(_PayloadSafeDTO):
     uri: StrictStr = Field(..., min_length=1)
 
 
-class TextFormatRun(_ReadOnlyDTO):
+class TextFormatRun(_PayloadSafeDTO):
+    _safe_repr_fields = ("start_index",)
+
     start_index: int = Field(..., ge=0)
     link: Optional[TextFormatLink] = None
 
 
-class ConditionValue(_ReadOnlyDTO):
+class ConditionValue(_PayloadSafeDTO):
     relative_date: Optional[StrictStr] = None
     user_entered_value: Optional[StrictStr] = None
 
@@ -91,20 +110,24 @@ class ConditionValue(_ReadOnlyDTO):
             return values
 
 
-class DataValidationCondition(_ReadOnlyDTO):
+class DataValidationCondition(_PayloadSafeDTO):
+    _safe_repr_fields = ("condition_type",)
+
     condition_type: StrictStr = Field(..., min_length=1)
     values: Tuple[ConditionValue, ...] = ()
 
 
-class DataValidation(_ReadOnlyDTO):
+class DataValidation(_PayloadSafeDTO):
     condition: DataValidationCondition
     input_message: Optional[StrictStr] = None
     strict: Optional[StrictBool] = None
     show_custom_ui: Optional[StrictBool] = None
 
 
-class CellData(_ReadOnlyDTO):
+class CellData(_PayloadSafeDTO):
     """A source cell without business-value selection or normalization."""
+
+    _safe_repr_fields = ("row_index", "column_index")
 
     row_index: int = Field(..., ge=0)
     column_index: int = Field(..., ge=0)
@@ -153,7 +176,9 @@ class GridRange(_ReadOnlyDTO):
             return values
 
 
-class SheetSnapshot(_ReadOnlyDTO):
+class SheetSnapshot(_PayloadSafeDTO):
+    _safe_repr_fields = ("sheet_id", "row_count", "column_count")
+
     sheet_id: int = Field(..., ge=0)
     title: StrictStr = Field(..., min_length=1)
     hidden: StrictBool = False
@@ -177,12 +202,14 @@ class SheetSnapshot(_ReadOnlyDTO):
             return values
 
 
-class SpreadsheetSnapshot(_ReadOnlyDTO):
+class SpreadsheetSnapshot(_PayloadSafeDTO):
     spreadsheet_id: StrictStr = Field(..., min_length=1)
     sheets: Tuple[SheetSnapshot, ...]
 
     def __repr__(self) -> str:
         return f"SpreadsheetSnapshot(sheet_count={len(self.sheets)})"
+
+    __str__ = __repr__
 
     if _PYDANTIC_V2:
 

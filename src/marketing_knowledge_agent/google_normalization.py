@@ -10,12 +10,14 @@ from typing import Literal, Optional, Tuple, Union
 from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 from .canonical_models import (
+    CanonicalModelError,
     CanonicalSourceLineage,
     ExposureChannel,
     LifecycleStatus,
     MetricId,
     PublishEligibility,
     ReviewStatus,
+    _validate_public_metric_governance_state,
 )
 from .cell_normalization import FieldValueKind, InheritanceReason, ResolvedCellValue
 from .url_safety import URLValidationError, validate_and_canonicalize_evidence_url
@@ -90,7 +92,7 @@ class _ImmutableDTO(BaseModel):
 
 
 class ExcludedSourceRef(_ImmutableDTO):
-    """Persistable safe reference after irreversible payload exclusion."""
+    """Pseudonymous digest ref; no secrecy, redaction, authenticity, or ID."""
 
     sheet_id: int = Field(..., ge=0)
     source_row: int = Field(..., gt=0)
@@ -185,6 +187,7 @@ class MetricSourceCells:
 
 
 def _build_persistence_eligible_functions():
+    # Guard scope: docs/governance/PYTHON_GUARD_THREAT_MODEL.md (T1/T2, not T3).
     authorization = object()
 
     def persistence_eligible_init(self, _wp5_gate=None, **data):
@@ -451,6 +454,14 @@ def _validate_eligible_source(source: MetricSourceCells, channel_values: dict) -
         raise MetricMinimizationError("METRIC_PUBLISH_ELIGIBILITY_INVALID")
     if type(source._can_quote_externally) is not bool:
         raise MetricMinimizationError("METRIC_QUOTE_POLICY_UNCERTAIN")
+    try:
+        _validate_public_metric_governance_state(
+            review_status=source._review_status,
+            publish_eligibility=source._publish_eligibility,
+            can_quote_externally=source._can_quote_externally,
+        )
+    except CanonicalModelError as exc:
+        raise MetricMinimizationError(exc.code) from None
     _safe_lineage(source._source_lineage)
     if source._can_quote_externally and not any(
         channel_values[channel] for channel in _WRITTEN_CHANNELS

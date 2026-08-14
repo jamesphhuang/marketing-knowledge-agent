@@ -6,10 +6,18 @@ import pytest
 from pydantic import ValidationError
 
 from marketing_knowledge_agent.sheets_contracts import (
+    CellData,
+    ConditionValue,
+    DataValidation,
+    DataValidationCondition,
+    GoogleError,
     GoogleValue,
+    SheetSnapshot,
     SheetsReadRequest,
     SheetsReader,
     SpreadsheetSnapshot,
+    TextFormatLink,
+    TextFormatRun,
 )
 from sprint0_fixtures import load_synthetic_json
 
@@ -112,6 +120,76 @@ def test_snapshot_repr_does_not_expose_cell_payload():
     assert "Synthetic Plain Text" not in rendered
     assert "SpreadsheetSnapshot" in rendered
     assert "sheet_count=2" in rendered
+
+
+def test_all_payload_bearing_google_dto_repr_and_str_surfaces_are_redacted():
+    sentinel = "SYNTHETIC_NESTED_DTO_PAYLOAD_SENTINEL"
+    error = GoogleError(error_type="SYNTHETIC_ERROR", message=sentinel)
+    effective = GoogleValue(error_value=error)
+    entered = GoogleValue(formula_value=f"={sentinel}")
+    link = TextFormatLink(uri=f"https://example.test/{sentinel}")
+    run = TextFormatRun(start_index=0, link=link)
+    condition_value = ConditionValue(user_entered_value=sentinel)
+    condition = DataValidationCondition(
+        condition_type="TEXT_EQ",
+        values=(condition_value,),
+    )
+    validation = DataValidation(condition=condition, input_message=sentinel)
+    cell = CellData(
+        row_index=0,
+        column_index=0,
+        formatted_value=sentinel,
+        effective_value=effective,
+        user_entered_value=entered,
+        hyperlink=f"https://example.test/{sentinel}",
+        text_format_runs=(run,),
+        data_validation=validation,
+    )
+    sheet = SheetSnapshot(
+        sheet_id=101,
+        title=sentinel,
+        row_count=1,
+        column_count=1,
+        cells=(cell,),
+    )
+    snapshot = SpreadsheetSnapshot(spreadsheet_id=sentinel, sheets=(sheet,))
+
+    payload_bearing_values = (
+        error,
+        effective,
+        entered,
+        link,
+        run,
+        condition_value,
+        condition,
+        validation,
+        cell,
+        sheet,
+        snapshot,
+    )
+    for value in payload_bearing_values:
+        assert sentinel not in repr(value)
+        assert sentinel not in str(value)
+
+    assert repr(cell) == "CellData(row_index=0, column_index=0)"
+    assert repr(sheet) == "SheetSnapshot(sheet_id=101, row_count=1, column_count=1)"
+    assert repr(snapshot) == "SpreadsheetSnapshot(sheet_count=1)"
+
+
+def test_payload_safe_repr_does_not_change_trusted_internal_serialization():
+    sentinel = "SYNTHETIC_TRUSTED_SERIALIZATION_SENTINEL"
+    cell = CellData(
+        row_index=0,
+        column_index=0,
+        formatted_value=sentinel,
+        user_entered_value=GoogleValue(formula_value=f"={sentinel}"),
+    )
+
+    dumped = cell.model_dump() if hasattr(cell, "model_dump") else cell.dict()
+
+    assert dumped["formatted_value"] == sentinel
+    assert dumped["user_entered_value"]["formula_value"] == f"={sentinel}"
+    assert sentinel not in repr(cell)
 
 
 def test_google_value_rejects_ambiguous_or_unknown_value_branches():

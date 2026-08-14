@@ -105,7 +105,7 @@ DEFAULT_URL_POLICY = URLPolicy()
 
 @dataclass(frozen=True, init=False)
 class CanonicalURL:
-    """An immutable HTTP(S) URL created only after WP7 validation."""
+    """Accepted offline ref; not safe-to-fetch, SSRF safety, or network authority."""
 
     value: str
 
@@ -252,6 +252,7 @@ def _validate_and_canonicalize_raw_url(
 
 
 def _build_canonical_url_authority():
+    # Guard scope: docs/governance/PYTHON_GUARD_THREAT_MODEL.md (T1/T2, not T3).
     authorization = object()
 
     def canonical_url_init(self, value, _validation_token=None):

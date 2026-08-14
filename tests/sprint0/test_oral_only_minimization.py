@@ -10,6 +10,7 @@ import pytest
 import marketing_knowledge_agent.canonical_models as canonical_models
 import marketing_knowledge_agent.google_normalization as google_normalization
 from marketing_knowledge_agent.canonical_models import (
+    CanonicalModelError,
     CanonicalSourceLineage,
     ExposureChannel,
     LifecycleStatus,
@@ -164,15 +165,18 @@ def _copy_cell_data(cell: CellData, **update) -> CellData:
 
 def _source(
     *,
+    metric_id: MetricId | None = MetricId("MET-0001"),
     approved_statement: str = "Synthetic eligible statement",
     note: str | None = None,
     channel_cells=None,
     evidence_urls=(),
     can_quote_externally: bool = True,
+    review_status: ReviewStatus = ReviewStatus.APPROVED,
+    publish_eligibility: PublishEligibility = PublishEligibility.ELIGIBLE,
     source_lineage: CanonicalSourceLineage | None = None,
 ) -> MetricSourceCells:
     return MetricSourceCells(
-        metric_id=MetricId("MET-0001"),
+        metric_id=metric_id,
         metric_type="Synthetic metric type",
         indicator="Synthetic indicator",
         approved_statement=approved_statement,
@@ -188,8 +192,8 @@ def _source(
             )
         ),
         lifecycle_status=LifecycleStatus.ACTIVE,
-        review_status=ReviewStatus.APPROVED,
-        publish_eligibility=PublishEligibility.ELIGIBLE,
+        review_status=review_status,
+        publish_eligibility=publish_eligibility,
         can_quote_externally=can_quote_externally,
         source_lineage=source_lineage if source_lineage is not None else _lineage(),
     )
@@ -218,6 +222,82 @@ def test_oral_only_is_excluded_before_any_persistence_eligible_or_public_metric_
         "reason",
         "source_digest",
     }
+
+
+def test_oral_only_exclusion_precedes_missing_met_and_governance_state_validation():
+    result = minimize_public_metric_source(
+        _source(
+            metric_id=None,
+            channel_cells=_channels(verbal=True),
+            review_status=ReviewStatus.EXCLUDED,
+            publish_eligibility=PublishEligibility.ELIGIBLE,
+            can_quote_externally=True,
+        )
+    )
+
+    assert type(result) is ExcludedSourceRef
+    assert result.metric_id is None
+    assert result.reason is ExclusionReason.ORAL_ONLY
+
+
+@pytest.mark.parametrize(
+    ("review_status", "publish_eligibility", "can_quote_externally", "valid"),
+    [
+        (ReviewStatus.APPROVED, PublishEligibility.ELIGIBLE, True, True),
+        (ReviewStatus.APPROVED, PublishEligibility.INELIGIBLE, True, False),
+        (ReviewStatus.NEEDS_REVIEW, PublishEligibility.ELIGIBLE, True, False),
+        (ReviewStatus.NEEDS_REVIEW, PublishEligibility.INELIGIBLE, True, False),
+        (ReviewStatus.EXCLUDED, PublishEligibility.INELIGIBLE, True, False),
+        (ReviewStatus.EXCLUDED, PublishEligibility.ELIGIBLE, False, False),
+        (ReviewStatus.EXCLUDED, PublishEligibility.INELIGIBLE, False, True),
+        (ReviewStatus.APPROVED, PublishEligibility.INELIGIBLE, False, True),
+        (ReviewStatus.NEEDS_REVIEW, PublishEligibility.ELIGIBLE, False, True),
+    ],
+)
+def test_governance_state_is_enforced_at_early_minimization_boundary(
+    review_status,
+    publish_eligibility,
+    can_quote_externally,
+    valid,
+):
+    source = _source(
+        review_status=review_status,
+        publish_eligibility=publish_eligibility,
+        can_quote_externally=can_quote_externally,
+    )
+
+    if valid:
+        assert type(minimize_public_metric_source(source)) is PersistenceEligibleMetricInput
+    else:
+        with pytest.raises(MetricMinimizationError) as caught:
+            minimize_public_metric_source(source)
+        assert caught.value.code == "PUBLIC_METRIC_GOVERNANCE_STATE_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("review_status", "publish_eligibility", "can_quote_externally"),
+    [
+        (ReviewStatus.APPROVED, PublishEligibility.INELIGIBLE, True),
+        (ReviewStatus.NEEDS_REVIEW, PublishEligibility.ELIGIBLE, True),
+        (ReviewStatus.NEEDS_REVIEW, PublishEligibility.INELIGIBLE, True),
+        (ReviewStatus.EXCLUDED, PublishEligibility.INELIGIBLE, True),
+        (ReviewStatus.EXCLUDED, PublishEligibility.ELIGIBLE, False),
+    ],
+)
+def test_governance_state_is_rechecked_at_final_public_metric_boundary(
+    review_status,
+    publish_eligibility,
+    can_quote_externally,
+):
+    eligible = minimize_public_metric_source(_source())
+    object.__setattr__(eligible, "review_status", review_status)
+    object.__setattr__(eligible, "publish_eligibility", publish_eligibility)
+    object.__setattr__(eligible, "can_quote_externally", can_quote_externally)
+
+    with pytest.raises(CanonicalModelError) as caught:
+        create_public_metric(eligible)
+
+    assert caught.value.code == "PUBLIC_METRIC_GOVERNANCE_STATE_INVALID"
 
 
 def test_oral_only_hostile_evidence_is_excluded_before_url_validation(monkeypatch):

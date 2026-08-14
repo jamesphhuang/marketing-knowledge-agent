@@ -44,12 +44,15 @@ class BrandCandidateReason(str, Enum):
     HANDLE_TO_WEBSITE_CONFLICT = "HANDLE_TO_WEBSITE_CONFLICT"
     WEBSITE_TO_HANDLE_CONFLICT = "WEBSITE_TO_HANDLE_CONFLICT"
     NAME_COLLISION_ACROSS_CANDIDATES = "NAME_COLLISION_ACROSS_CANDIDATES"
+    NAME_DIVERGENCE_WITHIN_CANDIDATE = "NAME_DIVERGENCE_WITHIN_CANDIDATE"
     BRD_AUTHORITY_DEFERRED = "BRD_AUTHORITY_DEFERRED"
     HANDLE_MAPPING_EVIDENCE_ONLY = "HANDLE_MAPPING_EVIDENCE_ONLY"
 
 
 class SafeSourceRef:
-    """A redacted source locator whose digest is a review reference, not an ID."""
+    """Pseudonymous ref; no secrecy, redaction, authenticity, or permanent ID."""
+
+    # Guard scope: docs/governance/PYTHON_GUARD_THREAT_MODEL.md (T1/T2, not T3).
 
     __slots__ = (
         "_source_class", "_sheet_id", "_source_row", "_source_ref", "__weakref__",
@@ -140,6 +143,8 @@ class BrandReviewCandidate:
 
     @property
     def candidate_ref(self) -> str:
+        """Batch review ref; not identity, continuity key, or authorization."""
+
         return self._candidate_ref
 
     @property
@@ -160,6 +165,8 @@ class BrandReviewCandidate:
 
     @property
     def website_refs(self) -> Tuple[str, ...]:
+        """Pseudonymous refs; no secrecy, redaction, authenticity, or identity."""
+
         return self._website_refs
 
     @property
@@ -344,6 +351,10 @@ def _projection_from_component(
     unsafe = any(item.unsafe_website_evidence for item in records)
     mapping = any(item.handle_mapping for item in records)
     one_cell_conflict = any(item.multiple_urls_in_one_cell for item in records)
+    names = {
+        item.normalized_name for item in records if item.normalized_name is not None
+    }
+    name_divergence = len(names) > 1
 
     reasons = {BrandCandidateReason.BRD_AUTHORITY_DEFERRED.value}
     if handles:
@@ -356,6 +367,8 @@ def _projection_from_component(
         reasons.add(BrandCandidateReason.HANDLE_MAPPING_EVIDENCE_ONLY.value)
     if name_collision:
         reasons.add(BrandCandidateReason.NAME_COLLISION_ACROSS_CANDIDATES.value)
+    if name_divergence:
+        reasons.add(BrandCandidateReason.NAME_DIVERGENCE_WITHIN_CANDIDATE.value)
 
     conflict = one_cell_conflict or len(handles) > 1 or len(urls) > 1
     if len(urls) > 1:
@@ -379,6 +392,7 @@ def _projection_from_component(
         and len(urls) <= 1
         and not unsafe
         and not name_collision
+        and not name_divergence
     ):
         classification = BrandCandidateClassification.UNIQUE_EVIDENCE
     else:
@@ -415,6 +429,8 @@ def _candidate_ref_digest(
 
 
 def _website_ref(canonical_url: str) -> str:
+    """Compute a deterministic pseudonymous ref, not a redaction guarantee."""
+
     return "sha256:" + hashlib.sha256(
         _WEBSITE_REF_DOMAIN + canonical_url.encode("utf-8")
     ).hexdigest()
