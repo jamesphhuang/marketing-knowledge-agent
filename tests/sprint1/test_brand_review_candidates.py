@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
 import hashlib
 import re
 
 import pytest
+
+import marketing_knowledge_agent.brand_review_candidates as brand_module
 
 from marketing_knowledge_agent.brand_review_candidates import (
     BRAND_REVIEW_CANDIDATE_SCHEMA_VERSION,
@@ -226,6 +230,155 @@ def test_candidate_and_safe_source_ref_construction_is_forbidden_to_callers():
         SafeSourceRef("merchant_case", 0, 7, "sha256:" + "0" * 64)
     with pytest.raises(TypeError, match="BRAND_REVIEW_CANDIDATE_CONSTRUCTION_FORBIDDEN"):
         BrandReviewCandidate({"authority": "NON_AUTHORITATIVE"})
+
+
+def test_trusted_brand_factories_are_absent_and_pure_digests_cannot_mint_objects():
+    for name in (
+        "_new_safe_source_ref",
+        "_new_brand_evidence",
+        "_build_brand_review_candidates",
+    ):
+        assert not hasattr(brand_module, name)
+
+    fake_digest = brand_module._safe_source_ref_digest(
+        "merchant_case",
+        0,
+        7,
+        "sha256:" + "1" * 64,
+        "sha256:" + "2" * 64,
+    )
+    assert _HASH.fullmatch(fake_digest)
+    with pytest.raises(TypeError, match="SAFE_SOURCE_REF_CONSTRUCTION_FORBIDDEN"):
+        SafeSourceRef(
+            source_class="merchant_case",
+            sheet_id=0,
+            source_row=7,
+            source_ref=fake_digest,
+        )
+    with pytest.raises(TypeError, match="BRAND_REVIEW_CANDIDATE_CONSTRUCTION_FORBIDDEN"):
+        BrandReviewCandidate(
+            candidate_ref="sha256:" + "3" * 64,
+            website_ref="sha256:" + "4" * 64,
+            hostname="fake.example",
+        )
+
+    genuine_ref = candidates()[0].source_refs[0]
+    untrusted = brand_module._UntrustedBrandEvidence(
+        source_ref=genuine_ref,
+        normalized_name="caller-selected",
+        normalized_handle="@caller-selected",
+        canonical_urls=("https://caller-selected.example/path",),
+        unsafe_website_evidence=False,
+        handle_mapping=False,
+        multiple_urls_in_one_cell=False,
+    )
+    projection = brand_module._project_brand_review_candidates((untrusted,))[0]
+    assert type(projection).__name__ == "_UntrustedBrandCandidateProjection"
+    assert not isinstance(projection, BrandReviewCandidate)
+
+
+def test_candidate_source_ref_subclass_replace_copy_and_deepcopy_cannot_mint_authority():
+    candidate = candidates()[0]
+    source_ref = candidate.source_refs[0]
+
+    class CandidateSubclass(BrandReviewCandidate):
+        pass
+
+    with pytest.raises(TypeError, match="CONSTRUCTION_FORBIDDEN"):
+        CandidateSubclass()
+    with pytest.raises(TypeError):
+        replace(candidate, candidate_ref="sha256:" + "0" * 64)
+    for value in (candidate, source_ref):
+        with pytest.raises(TypeError):
+            copy.copy(value)
+        with pytest.raises(TypeError):
+            copy.deepcopy(value)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("merchant123", "merchant123"),
+        ("Merchant123", "merchant123"),
+        ("@merchant123", "@merchant123"),
+        ("shop_line", "shop_line"),
+        ("shop-line", "shop-line"),
+        ("shop.line", "shop.line"),
+        ("＠Ｍｅｒｃｈａｎｔ１２３", "@merchant123"),
+        ("商店１２３", "商店123"),
+    ],
+)
+def test_owner_decision_two_valid_safe_handles(raw, expected):
+    rows = full_rows()
+    rows["merchant_case"][0][2] = text("Safe Handle")
+    rows["merchant_case"][0][3] = text(raw)
+    rows["handle_mapping"] = []
+    candidate = candidates(rows)[0]
+    assert candidate.normalized_handle == expected
+    assert candidate.classification is BrandCandidateClassification.UNIQUE_EVIDENCE
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://example.com",
+        "http://example.com",
+        "example.com/path?secret=x",
+        "foo/bar",
+        "foo\\bar",
+        "foo?bar",
+        "foo#bar",
+        "foo&bar",
+        "foo=bar",
+        "foo%20bar",
+        "foo:bar",
+        "foo@@bar",
+        "foo bar",
+        "foo\tbar",
+        "foo\nbar",
+        "foo\n",
+        "\nfoo",
+        "foo\rbar",
+        "foo\x00bar",
+        "foo\x1fbar",
+        "foo\u2028bar",
+        "foo\u2029bar",
+        "a" * 129,
+        "field: value\nsecret: payload",
+    ],
+)
+def test_owner_decision_two_invalid_handles_never_enter_safe_candidate(raw):
+    rows = full_rows()
+    rows["merchant_case"][0][2] = text("Invalid Handle")
+    rows["merchant_case"][0][3] = text(raw)
+    rows["handle_mapping"] = []
+    candidate = candidates(rows)[0]
+    rendered = repr(candidate) + repr(candidate.source_refs) + repr(candidate.reason_codes)
+
+    assert candidate.normalized_handle is None
+    assert candidate.classification is BrandCandidateClassification.AMBIGUOUS
+    assert "INSUFFICIENT_IDENTITY_EVIDENCE" in candidate.reason_codes
+    assert raw not in rendered
+
+
+def test_same_invalid_handle_never_creates_a_brand_graph_edge():
+    rows = full_rows()
+    first = list(rows["merchant_case"][0])
+    first[2] = text("First invalid handle")
+    first[3] = text("https://payload.example/secret?token=one")
+    second = list(first)
+    second[0] = text("2025")
+    second[2] = text("Second invalid handle")
+    rows["merchant_case"] = [first, second]
+    rows["handle_mapping"] = []
+
+    result = candidates(rows)
+    assert len(result) == 2
+    assert all(candidate.normalized_handle is None for candidate in result)
+    assert all(
+        candidate.classification is BrandCandidateClassification.AMBIGUOUS
+        for candidate in result
+    )
 
 
 def test_hash_shape_is_sha256_and_not_correlation_uuid_material():

@@ -5,16 +5,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 from enum import Enum
+import math
 import re
 import unicodedata
+import weakref
 from typing import Dict, Iterable, Optional, Tuple
 
 from .brand_review_candidates import (
     BrandReviewCandidate,
     SafeSourceRef,
-    _build_brand_review_candidates,
-    _new_brand_evidence,
-    _new_safe_source_ref,
+    _UntrustedBrandCandidateProjection,
+    _UntrustedBrandEvidence,
+    _candidate_ref_digest,
+    _project_brand_review_candidates,
+    _safe_hostname,
+    _safe_source_ref_digest,
+    _website_ref,
 )
 from .canonical_models import (
     CanonicalSourceLineage,
@@ -28,7 +34,6 @@ from .cell_normalization import (
     FieldContract,
     FieldValueKind,
     ResolvedCellValue,
-    ValueSource,
     normalize_source_cell,
 )
 from .google_normalization import (
@@ -68,64 +73,36 @@ class CanonicalNormalizationError(ValueError):
         return f"{type(self).__name__}(code={self.code!r})"
 
 
-class _WP3ConstructionProvenance:
-    __slots__ = ("_authority", "_context_identity", "_result_identity", "_envelope_identity")
+@dataclass(frozen=True, eq=False)
+class _ContextBinding:
+    context: object
+    result: object
+    envelope: object
+    target_identity_hash: str
+    source_fingerprint: str
+    sync_batch_id: str
 
-    def __new__(cls, *args: object, **kwargs: object) -> "_WP3ConstructionProvenance":
-        raise TypeError("WP3_CONSTRUCTION_PROVENANCE_FORBIDDEN")
+    @property
+    def context_identity(self) -> int:
+        return id(self.context)
 
-    def __setattr__(self, name: str, value: object) -> None:
-        raise AttributeError("WP3_CONSTRUCTION_PROVENANCE_IMMUTABLE")
+    @property
+    def result_identity(self) -> int:
+        return id(self.result)
 
-    def __repr__(self) -> str:
-        return "_WP3ConstructionProvenance(<opaque>)"
-
-    def __reduce__(self) -> object:
-        raise TypeError("WP3_CONSTRUCTION_PROVENANCE_PICKLE_FORBIDDEN")
-
-    def __reduce_ex__(self, protocol: int) -> object:
-        raise TypeError("WP3_CONSTRUCTION_PROVENANCE_PICKLE_FORBIDDEN")
-
-
-def _build_construction_authority():
-    authority = object()
-
-    def issue(context, result, envelope):
-        if (
-            type(context) is not CoverageProvenBatchContext
-            or _validated_context_envelope(context) is not envelope
-            or _context_result(context) is not result
-        ):
-            _fail("WP3_CONSTRUCTION_PROVENANCE_ISSUANCE_INVALID")
-        provenance = object.__new__(_WP3ConstructionProvenance)
-        object.__setattr__(provenance, "_authority", authority)
-        object.__setattr__(provenance, "_context_identity", id(context))
-        object.__setattr__(provenance, "_result_identity", id(result))
-        object.__setattr__(provenance, "_envelope_identity", id(envelope))
-        return provenance
-
-    def new(cls, provenance, **fields):
-        if type(provenance) is not _WP3ConstructionProvenance:
-            _fail("WP3_CONSTRUCTION_PROVENANCE_INVALID")
-        try:
-            trusted = object.__getattribute__(provenance, "_authority") is authority
-        except (AttributeError, TypeError):
-            trusted = False
-        if not trusted:
-            _fail("WP3_CONSTRUCTION_PROVENANCE_INVALID")
-        value = object.__new__(cls)
-        object.__setattr__(value, "_provenance", provenance)
-        for name, field_value in fields.items():
-            if isinstance(field_value, list):
-                field_value = tuple(field_value)
-            object.__setattr__(value, f"_{name}", field_value)
-        return value
-
-    return issue, new
+    @property
+    def envelope_identity(self) -> int:
+        return id(self.envelope)
 
 
-_issue_wp3_provenance, _new = _build_construction_authority()
-del _build_construction_authority
+@dataclass(frozen=True)
+class _TrustedObjectRecord:
+    kind: str
+    binding: _ContextBinding
+    source_class: Optional[str] = None
+    sheet_id: Optional[int] = None
+    source_row: Optional[int] = None
+    source_ref_identities: Tuple[int, ...] = ()
 
 
 class IdentityState(str, Enum):
@@ -249,7 +226,7 @@ _CHANNEL_FIELDS = (
 
 
 class _SensitiveStaging:
-    __slots__ = ("_provenance",)
+    __slots__ = ("__weakref__",)
 
     def __new__(cls, *args: object, **kwargs: object) -> "_SensitiveStaging":
         raise TypeError(f"{cls.__name__.upper()}_CONSTRUCTION_FORBIDDEN")
@@ -380,13 +357,19 @@ class HandleMappingStaging(_SensitiveStaging):
 
 
 class _SafeFact:
-    __slots__ = ("_provenance",)
+    __slots__ = ("__weakref__",)
 
     def __new__(cls, *args: object, **kwargs: object) -> "_SafeFact":
         raise TypeError(f"{cls.__name__.upper()}_CONSTRUCTION_FORBIDDEN")
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("WP3_SAFE_FACT_IMMUTABLE")
+
+    def __reduce__(self) -> object:
+        raise TypeError("WP3_SAFE_FACT_SERIALIZATION_FORBIDDEN")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        raise TypeError("WP3_SAFE_FACT_SERIALIZATION_FORBIDDEN")
 
 
 class RestrictedGovernanceFact(_SafeFact):
@@ -477,83 +460,21 @@ class CanonicalNormalizationBatch(_SensitiveStaging):
         )
 
 
-def normalize_coverage_proven_batch(
-    context: CoverageProvenBatchContext,
-) -> CanonicalNormalizationBatch:
-    """Normalize one exact, authentic, structurally valid synthetic WP2 batch."""
-
-    if type(context) is not CoverageProvenBatchContext:
-        _fail("WP3_COVERAGE_PROVEN_CONTEXT_REQUIRED")
-    envelope = _validated_context_envelope(context)
-    if envelope is None:
-        _fail("WP3_COVERAGE_PROVEN_CONTEXT_INVALID")
-    if (
-        envelope.run_mode is not RunMode.SYNTHETIC
-        or envelope.disposition is not SourceHealthDisposition.SYNTHETIC_CHECKS_COMPLETE
-        or envelope.structural_reason_codes
-    ):
-        _fail("WP3_TRUSTED_SYNTHETIC_CONTEXT_REQUIRED")
-    result = _context_result(context)
-    snapshot = result.snapshot
-    provenance = _issue_wp3_provenance(context, result, envelope)
-
-    merchants, merchant_evidence, duplicates, merchant_reviews = _merchant_rows(
-        snapshot, envelope, provenance
-    )
-    restricted, restricted_facts, restricted_reviews = _restricted_rows(
-        snapshot, envelope, provenance
-    )
-    public_metrics, exclusions, public_reviews = _public_metric_rows(
-        snapshot, envelope, provenance
-    )
-    pending, pending_facts, pending_reviews = _pending_rows(
-        snapshot, envelope, provenance
-    )
-    mappings, mapping_evidence, mapping_reviews = _handle_mapping_rows(
-        snapshot, envelope, provenance
-    )
-    candidates = _build_brand_review_candidates(
-        (*merchant_evidence, *mapping_evidence)
-    )
-    batch = _new(
-        CanonicalNormalizationBatch,
-        provenance,
-        merchant_cases=merchants,
-        restricted_denylist=restricted,
-        restricted_facts=restricted_facts,
-        public_metrics=public_metrics,
-        excluded_public_metrics=exclusions,
-        pending_metrics=pending,
-        pending_facts=pending_facts,
-        handle_mappings=mappings,
-        brand_review_candidates=candidates,
-        duplicate_review_facts=duplicates,
-        review_facts=tuple(
-            sorted(
-                (*merchant_reviews, *restricted_reviews, *public_reviews, *pending_reviews, *mapping_reviews),
-                key=lambda item: (item.source_ref.source_ref, item.reason_codes),
-            )
-        ),
-        id_diagnostics=_id_diagnostics(provenance),
-    )
-    return batch
-
-
-def _merchant_rows(snapshot, envelope, provenance):
+def _merchant_rows(snapshot, envelope, builder):
     spec = _SPECS["merchant_case"]
     staging = []
     evidence = []
     reviews = []
     duplicate_keys: Dict[tuple, list] = {}
     for row_index in _occupied_rows(snapshot, spec):
-        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, provenance)
-        source_ref = _source_ref(spec, row_index, envelope)
+        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, builder)
+        source_ref = builder.source_ref(spec, row_index)
         name = _text(resolved.get("merchant_name"))
         handle = _handle(resolved.get("normalized_handle"))
-        year = _year_value(resolved.get("interview_year"), reviews, source_ref, provenance)
+        year = _year_value(resolved.get("interview_year"), reviews, source_ref, builder)
         name_urls, name_unsafe = _links(resolved.get("merchant_name"))
         if name is None:
-            reviews.append(_review(source_ref, ("MERCHANT_NAME_MISSING",), provenance))
+            reviews.append(_review(source_ref, ("MERCHANT_NAME_MISSING",), builder))
         assets = []
         duplicate_asset_values = []
         for field_name in ("article", "video", "podcast", "news"):
@@ -562,16 +483,15 @@ def _merchant_rows(snapshot, envelope, provenance):
             text = _text(cell)
             lineage = _lineage(spec, row_index, {field_name: cell}, envelope)
             assets.append(
-                _new(
-                    AssetCellStaging, provenance, field_name=field_name, text=text,
+                builder.new(
+                    AssetCellStaging, field_name=field_name, text=text,
                     canonical_urls=urls, unsafe_url=unsafe, lineage=lineage,
                 )
             )
             duplicate_asset_values.append((text, urls))
         lineage = _lineage(spec, row_index, resolved, envelope)
-        item = _new(
+        item = builder.new(
             MerchantCaseStaging,
-            provenance,
             source_ref=source_ref,
             lineage=lineage,
             interview_year=year,
@@ -586,7 +506,7 @@ def _merchant_rows(snapshot, envelope, provenance):
         )
         staging.append(item)
         evidence.append(
-            _new_brand_evidence(
+            _UntrustedBrandEvidence(
                 source_ref=source_ref,
                 normalized_name=_name_key(name),
                 normalized_handle=handle,
@@ -608,9 +528,8 @@ def _merchant_rows(snapshot, envelope, provenance):
     for refs in duplicate_keys.values():
         if len(refs) > 1:
             duplicate_facts.append(
-                _new(
+                builder.new(
                     DuplicateMerchantReviewFact,
-                    provenance,
                     source_refs=tuple(sorted(refs, key=lambda item: item.source_ref)),
                     reason_code="DUPLICATE_MERCHANT_INTERVIEW_REVIEW",
                 )
@@ -618,14 +537,14 @@ def _merchant_rows(snapshot, envelope, provenance):
     return tuple(staging), tuple(evidence), tuple(duplicate_facts), tuple(reviews)
 
 
-def _restricted_rows(snapshot, envelope, provenance):
+def _restricted_rows(snapshot, envelope, builder):
     spec = _SPECS["restricted_customer"]
     staging = []
     facts = []
     reviews = []
     for row_index in _occupied_rows(snapshot, spec):
-        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, provenance)
-        source_ref = _source_ref(spec, row_index, envelope)
+        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, builder)
+        source_ref = builder.source_ref(spec, row_index)
         brand = _text(resolved.get("customer_brand"))
         website = _text(resolved.get("website"))
         urls, _unsafe = _links(resolved.get("website"))
@@ -634,12 +553,11 @@ def _restricted_rows(snapshot, envelope, provenance):
             reason_codes.append("RESTRICTED_IDENTITY_MISSING")
         lineage = _lineage(spec, row_index, resolved, envelope)
         staging.append(
-            _new(
+            builder.new(
                 RestrictedDenylistStaging,
-                provenance,
                 source_ref=source_ref,
                 lineage=lineage,
-                updated_year=_year_value(resolved.get("updated_year"), reviews, source_ref, provenance),
+                updated_year=_year_value(resolved.get("updated_year"), reviews, source_ref, builder),
                 customer_brand=brand,
                 website_text=website,
                 canonical_urls=urls,
@@ -651,9 +569,8 @@ def _restricted_rows(snapshot, envelope, provenance):
             )
         )
         facts.append(
-            _new(
+            builder.new(
                 RestrictedGovernanceFact,
-                provenance,
                 source_ref=source_ref,
                 reason_codes=tuple(sorted(reason_codes)),
                 identity_term_count=int(brand is not None)
@@ -663,19 +580,19 @@ def _restricted_rows(snapshot, envelope, provenance):
     return tuple(staging), tuple(facts), tuple(reviews)
 
 
-def _public_metric_rows(snapshot, envelope, provenance):
+def _public_metric_rows(snapshot, envelope, builder):
     spec = _SPECS["public_metric"]
     staging = []
     exclusions = []
     reviews = []
     for row_index in _occupied_rows(snapshot, spec):
         review_count_before_resolution = len(reviews)
-        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, provenance)
+        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, builder)
         source_normalization_failed = len(reviews) != review_count_before_resolution
-        source_ref = _source_ref(spec, row_index, envelope)
+        source_ref = builder.source_ref(spec, row_index)
         statement = _text(resolved.get("statement"))
         if statement is None:
-            reviews.append(_review(source_ref, ("PUBLIC_METRIC_STATEMENT_MISSING",), provenance))
+            reviews.append(_review(source_ref, ("PUBLIC_METRIC_STATEMENT_MISSING",), builder))
             continue
         metric_type = _text(resolved.get("metric_type"))
         indicator = _text(resolved.get("indicator"))
@@ -728,9 +645,8 @@ def _public_metric_rows(snapshot, envelope, provenance):
         except MetricMinimizationError as exc:
             if exc.code == "METRIC_ID_REQUIRED_FOR_PERSISTENCE" and not precheck_codes:
                 staging.append(
-                    _new(
+                    builder.new(
                         PublicMetricStaging,
-                        provenance,
                         source_ref=source_ref,
                         lineage=lineage,
                         metric_type=metric_type,
@@ -744,7 +660,7 @@ def _public_metric_rows(snapshot, envelope, provenance):
                 )
             else:
                 codes = tuple(sorted(set(precheck_codes or (exc.code,))))
-                reviews.append(_review(source_ref, codes, provenance))
+                reviews.append(_review(source_ref, codes, builder))
         else:
             if type(minimized) is not ExcludedSourceRef:
                 _fail("WP3_FINAL_METRIC_OBJECT_FORBIDDEN")
@@ -752,21 +668,20 @@ def _public_metric_rows(snapshot, envelope, provenance):
     return tuple(staging), tuple(exclusions), tuple(reviews)
 
 
-def _pending_rows(snapshot, envelope, provenance):
+def _pending_rows(snapshot, envelope, builder):
     spec = _SPECS["pending_metric"]
     staging = []
     facts = []
     reviews = []
     for row_index in _occupied_rows(snapshot, spec):
-        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, provenance)
-        source_ref = _source_ref(spec, row_index, envelope)
+        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, builder)
+        source_ref = builder.source_ref(spec, row_index)
         statement = _text(resolved.get("statement"))
         if statement is None:
-            reviews.append(_review(source_ref, ("PENDING_METRIC_STATEMENT_MISSING",), provenance))
+            reviews.append(_review(source_ref, ("PENDING_METRIC_STATEMENT_MISSING",), builder))
         staging.append(
-            _new(
+            builder.new(
                 PendingMetricStaging,
-                provenance,
                 source_ref=source_ref,
                 lineage=_lineage(spec, row_index, resolved, envelope),
                 metric_type=_text(resolved.get("metric_type")),
@@ -775,27 +690,26 @@ def _pending_rows(snapshot, envelope, provenance):
                 note=_text(resolved.get("note")),
             )
         )
-        facts.append(_new(PendingMetricGovernanceFact, provenance, source_ref=source_ref))
+        facts.append(builder.new(PendingMetricGovernanceFact, source_ref=source_ref))
     return tuple(staging), tuple(facts), tuple(reviews)
 
 
-def _handle_mapping_rows(snapshot, envelope, provenance):
+def _handle_mapping_rows(snapshot, envelope, builder):
     spec = _SPECS["handle_mapping"]
     staging = []
     evidence = []
     reviews = []
     for row_index in _occupied_rows(snapshot, spec):
-        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, provenance)
-        source_ref = _source_ref(spec, row_index, envelope)
+        resolved = _resolve_fields(snapshot, envelope, spec, row_index, reviews, builder)
+        source_ref = builder.source_ref(spec, row_index)
         handle = _handle(resolved.get("normalized_handle"))
         name = _text(resolved.get("name_with_link"))
         urls, unsafe = _links(resolved.get("name_with_link"))
         if handle is None and not urls:
-            reviews.append(_review(source_ref, ("HANDLE_MAPPING_IDENTITY_EVIDENCE_MISSING",), provenance))
+            reviews.append(_review(source_ref, ("HANDLE_MAPPING_IDENTITY_EVIDENCE_MISSING",), builder))
         staging.append(
-            _new(
+            builder.new(
                 HandleMappingStaging,
-                provenance,
                 source_ref=source_ref,
                 lineage=_lineage(spec, row_index, resolved, envelope),
                 normalized_handle=handle,
@@ -806,7 +720,7 @@ def _handle_mapping_rows(snapshot, envelope, provenance):
             )
         )
         evidence.append(
-            _new_brand_evidence(
+            _UntrustedBrandEvidence(
                 source_ref=source_ref,
                 normalized_name=_name_key(name),
                 normalized_handle=handle,
@@ -819,9 +733,9 @@ def _handle_mapping_rows(snapshot, envelope, provenance):
     return tuple(staging), tuple(evidence), tuple(reviews)
 
 
-def _resolve_fields(snapshot, envelope, spec, row_index, reviews, provenance):
+def _resolve_fields(snapshot, envelope, spec, row_index, reviews, builder):
     resolved = {}
-    source_ref = _source_ref(spec, row_index, envelope)
+    source_ref = builder.source_ref(spec, row_index)
     for field in spec.fields:
         value_kind = FieldValueKind.BOOLEAN if field.value_kind == "BOOLEAN" else FieldValueKind.TEXT
         try:
@@ -839,7 +753,7 @@ def _resolve_fields(snapshot, envelope, spec, row_index, reviews, provenance):
                 sync_batch_id=envelope.correlation_id,
             )
         except CellNormalizationError as exc:
-            reviews.append(_review(source_ref, (exc.code,), provenance))
+            reviews.append(_review(source_ref, (exc.code,), builder))
             resolved[field.name] = None
     return resolved
 
@@ -882,8 +796,38 @@ def _text(cell: Optional[ResolvedCellValue]) -> Optional[str]:
 
 
 def _handle(cell: Optional[ResolvedCellValue]) -> Optional[str]:
-    value = _text(cell)
-    return value.casefold() if value is not None else None
+    if cell is None or cell.normalized_value is None:
+        return None
+    if type(cell.normalized_value) is not str:
+        _fail("WP3_TEXT_VALUE_TYPE_INVALID")
+    normalized = unicodedata.normalize("NFKC", cell.normalized_value)
+    if any(
+        character in "\t\n\r"
+        or unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) in {"Zl", "Zp"}
+        for character in normalized
+    ):
+        return None
+    normalized = normalized.strip().casefold()
+    return normalized if _safe_handle_value(normalized) else None
+
+
+def _safe_handle_value(normalized: object) -> bool:
+    if type(normalized) is not str or not normalized or len(normalized) > 128:
+        return False
+    if normalized != unicodedata.normalize("NFKC", normalized).strip().casefold():
+        return False
+    body = normalized[1:] if normalized.startswith("@") else normalized
+    if not body or "@" in body:
+        return False
+    has_identity_character = False
+    for character in body:
+        category = unicodedata.category(character)
+        if category.startswith(("L", "N")):
+            has_identity_character = True
+        elif character not in "._-":
+            return False
+    return has_identity_character
 
 
 def _name_key(value: Optional[str]) -> Optional[str]:
@@ -903,49 +847,48 @@ def _tags(value: Optional[str]) -> Tuple[str, ...]:
     return tuple(output)
 
 
-def _year_value(cell, reviews, source_ref, provenance) -> Optional[int]:
+def _year_value(cell, reviews, source_ref, builder) -> Optional[int]:
     text = _text(cell)
     if text is None:
         return None
     if _YEAR.fullmatch(text) and 1000 <= int(text) <= 9999:
         return int(text)
-    reviews.append(_review(source_ref, ("YEAR_ONLY_NEEDS_REVIEW",), provenance))
+    reviews.append(_review(source_ref, ("YEAR_ONLY_NEEDS_REVIEW",), builder))
     return None
 
 
 def _date_value(cell: Optional[ResolvedCellValue]) -> Optional[date]:
     if cell is None or cell.normalized_value is None:
         return None
-    display = cell.display_value
-    if cell.value_source is ValueSource.FORMATTED_VALUE and type(display) is str:
-        normalized = unicodedata.normalize("NFKC", display).strip()
-        matched = _DATE_TEXT.fullmatch(normalized)
-        if matched is None:
-            _fail("DATE_ONLY_NEEDS_REVIEW")
-        try:
-            return date(int(matched.group(1)), int(matched.group(3)), int(matched.group(4)))
-        except ValueError:
-            _fail("DATE_ONLY_NEEDS_REVIEW")
     value_cell = cell.value_cell
     effective = value_cell.effective_value if value_cell is not None else None
     number = effective.number_value if effective is not None else None
     text = effective.string_value if effective is not None else None
-    if type(text) is str:
-        normalized = unicodedata.normalize("NFKC", text).strip()
-        matched = _DATE_TEXT.fullmatch(normalized)
-        if matched is None:
+    if number is not None:
+        if (
+            type(number) is bool
+            or not isinstance(number, (int, float))
+            or not math.isfinite(number)
+            or number < 0
+            or int(number) != number
+        ):
             _fail("DATE_ONLY_NEEDS_REVIEW")
         try:
-            return date(int(matched.group(1)), int(matched.group(3)), int(matched.group(4)))
-        except ValueError:
+            return _GOOGLE_DATE_EPOCH + timedelta(days=int(number))
+        except (OverflowError, ValueError):
             _fail("DATE_ONLY_NEEDS_REVIEW")
-    if type(number) is bool or not isinstance(number, (int, float)):
+    if cell.source_was_formula:
         _fail("DATE_ONLY_NEEDS_REVIEW")
-    if number < 0 or int(number) != number:
+    text_value = text if type(text) is str else cell.display_value
+    if type(text_value) is not str:
+        _fail("DATE_ONLY_NEEDS_REVIEW")
+    normalized = unicodedata.normalize("NFKC", text_value).strip()
+    matched = _DATE_TEXT.fullmatch(normalized)
+    if matched is None:
         _fail("DATE_ONLY_NEEDS_REVIEW")
     try:
-        return _GOOGLE_DATE_EPOCH + timedelta(days=int(number))
-    except (OverflowError, ValueError):
+        return date(int(matched.group(1)), int(matched.group(3)), int(matched.group(4)))
+    except ValueError:
         _fail("DATE_ONLY_NEEDS_REVIEW")
 
 
@@ -1038,26 +981,15 @@ def _clone_lineage(value: CanonicalSourceLineage) -> CanonicalSourceLineage:
     )
 
 
-def _source_ref(spec, row_index, envelope) -> SafeSourceRef:
-    return _new_safe_source_ref(
-        source_class=spec.source_class,
-        sheet_id=spec.sheet_id,
-        source_row=row_index + 1,
-        target_identity_hash=envelope.target_identity_hash,
-        source_fingerprint=envelope.source_fingerprint,
-    )
-
-
-def _review(source_ref, reason_codes, provenance) -> SourceReviewFact:
-    return _new(
+def _review(source_ref, reason_codes, builder) -> SourceReviewFact:
+    return builder.new(
         SourceReviewFact,
-        provenance,
         source_ref=source_ref,
         reason_codes=tuple(sorted(set(reason_codes))),
     )
 
 
-def _id_diagnostics(provenance) -> Tuple[IdDiagnostic, ...]:
+def _id_diagnostics(builder) -> Tuple[IdDiagnostic, ...]:
     definitions = (
         (IdNamespace.MREC, "merchant_case", "MREC", "MERCHANT_MREC_ASSIGNMENT_DEFERRED"),
         (IdNamespace.BRD, "merchant_case", "BRD", "MERCHANT_BRD_ASSIGNMENT_DEFERRED"),
@@ -1067,9 +999,8 @@ def _id_diagnostics(provenance) -> Tuple[IdDiagnostic, ...]:
         (IdNamespace.BRD, "handle_mapping", "品牌 ID 初始化審核", "BRAND_ID_INITIAL_REVIEW_DEFERRED"),
     )
     return tuple(
-        _new(
+        builder.new(
             IdDiagnostic,
-            provenance,
             namespace=namespace,
             source_class=source_class,
             field_name_or_surface=surface,
@@ -1077,6 +1008,503 @@ def _id_diagnostics(provenance) -> Tuple[IdDiagnostic, ...]:
         )
         for namespace, source_class, surface, reason in definitions
     )
+
+
+def _build_normalization_entrypoint():
+    trusted_objects = {}
+    trusted_builders = {}
+    source_ref_cache = {}
+    project_candidates = _project_brand_review_candidates
+    source_ref_digest = _safe_source_ref_digest
+    candidate_ref_digest = _candidate_ref_digest
+    website_ref = _website_ref
+    safe_hostname = _safe_hostname
+    safe_handle_value = _safe_handle_value
+    validate_evidence_url = validate_and_canonicalize_evidence_url
+    specs = dict(_SPECS)
+    validated_context_envelope = _validated_context_envelope
+    context_result = _context_result
+    merchant_rows = _merchant_rows
+    restricted_rows_normalizer = _restricted_rows
+    public_metric_rows = _public_metric_rows
+    pending_rows_normalizer = _pending_rows
+    handle_mapping_rows = _handle_mapping_rows
+    id_diagnostics = _id_diagnostics
+
+    source_class_by_type = {
+        MerchantCaseStaging: "merchant_case",
+        RestrictedDenylistStaging: "restricted_customer",
+        RestrictedGovernanceFact: "restricted_customer",
+        PublicMetricStaging: "public_metric",
+        PendingMetricStaging: "pending_metric",
+        PendingMetricGovernanceFact: "pending_metric",
+        HandleMappingStaging: "handle_mapping",
+    }
+    collection_contracts = {
+        "merchant_cases": (MerchantCaseStaging, "merchant_case"),
+        "restricted_denylist": (RestrictedDenylistStaging, "restricted_customer"),
+        "restricted_facts": (RestrictedGovernanceFact, "restricted_customer"),
+        "public_metrics": (PublicMetricStaging, "public_metric"),
+        "pending_metrics": (PendingMetricStaging, "pending_metric"),
+        "pending_facts": (PendingMetricGovernanceFact, "pending_metric"),
+        "handle_mappings": (HandleMappingStaging, "handle_mapping"),
+        "brand_review_candidates": (BrandReviewCandidate, None),
+        "duplicate_review_facts": (DuplicateMerchantReviewFact, "merchant_case"),
+        "review_facts": (SourceReviewFact, None),
+        "id_diagnostics": (IdDiagnostic, None),
+    }
+
+    def remember(value, record):
+        identity = id(value)
+
+        def discard(reference):
+            current = trusted_objects.get(identity)
+            if current is not None and current[0] is reference:
+                trusted_objects.pop(identity, None)
+
+        reference = weakref.ref(value, discard)
+        trusted_objects[identity] = (reference, record)
+
+    def trusted_record(value):
+        current = trusted_objects.get(id(value))
+        if current is None or current[0]() is not value:
+            return None
+        return current[1]
+
+    def builder_binding(builder):
+        current = trusted_builders.get(id(builder))
+        if current is None or current[0]() is not builder:
+            _fail("WP3_PIPELINE_BUILDER_INVALID")
+        return current[1]
+
+    def validate_lineage(value, binding, source_class, source_row):
+        spec = specs[source_class]
+        if (
+            type(value) is not CanonicalSourceLineage
+            or value.spreadsheet_id_hash != binding.target_identity_hash
+            or value.source_fingerprint != binding.source_fingerprint
+            or value.sync_batch_id != binding.sync_batch_id
+            or value.sheet_id != spec.sheet_id
+            or value.sheet_title != spec.title
+            or value.source_row != source_row
+        ):
+            _fail("WP3_SOURCE_LINEAGE_BINDING_INVALID")
+
+    def validate_source_ref(value, binding, source_class=None):
+        record = trusted_record(value)
+        if (
+            type(value) is not SafeSourceRef
+            or record is None
+            or record.kind != "safe_source_ref"
+            or record.binding != binding
+            or (source_class is not None and record.source_class != source_class)
+            or value.source_class != record.source_class
+            or value.sheet_id != record.sheet_id
+            or value.source_row != record.source_row
+        ):
+            _fail("WP3_SAFE_SOURCE_REF_BINDING_INVALID")
+        expected = source_ref_digest(
+            record.source_class,
+            record.sheet_id,
+            record.source_row,
+            binding.target_identity_hash,
+            binding.source_fingerprint,
+        )
+        if value.source_ref != expected:
+            _fail("WP3_SAFE_SOURCE_REF_BINDING_INVALID")
+        return record
+
+    def validate_nested(value, binding, expected_type, source_class=None):
+        record = trusted_record(value)
+        if (
+            type(value) is not expected_type
+            or record is None
+            or record.binding != binding
+            or (source_class is not None and record.source_class != source_class)
+        ):
+            _fail("WP3_NESTED_CONTEXT_BINDING_INVALID")
+        return record
+
+    class PipelineBuilder:
+        __slots__ = ("__weakref__",)
+
+        def __new__(cls, *args, **kwargs):
+            raise TypeError("WP3_PIPELINE_BUILDER_CONSTRUCTION_FORBIDDEN")
+
+        def source_ref(self, spec, row_index):
+            binding = builder_binding(self)
+            if (
+                type(spec) is not WP3SheetSpec
+                or specs.get(spec.source_class) is not spec
+                or type(row_index) is not int
+                or not spec.first_data_row - 1 <= row_index <= spec.last_data_row - 1
+            ):
+                _fail("WP3_SAFE_SOURCE_REF_SOURCE_INVALID")
+            cache_key = (
+                binding.context_identity,
+                binding.result_identity,
+                binding.envelope_identity,
+                spec.source_class,
+                row_index,
+            )
+            cached = source_ref_cache.get(cache_key)
+            if cached is not None and cached() is not None:
+                return cached()
+            value = object.__new__(SafeSourceRef)
+            object.__setattr__(value, "_source_class", spec.source_class)
+            object.__setattr__(value, "_sheet_id", spec.sheet_id)
+            object.__setattr__(value, "_source_row", row_index + 1)
+            object.__setattr__(
+                value,
+                "_source_ref",
+                source_ref_digest(
+                    spec.source_class,
+                    spec.sheet_id,
+                    row_index + 1,
+                    binding.target_identity_hash,
+                    binding.source_fingerprint,
+                ),
+            )
+            remember(
+                value,
+                _TrustedObjectRecord(
+                    "safe_source_ref",
+                    binding,
+                    spec.source_class,
+                    spec.sheet_id,
+                    row_index + 1,
+                ),
+            )
+            source_ref_cache[cache_key] = weakref.ref(value)
+            return value
+
+        def new(self, cls, **fields):
+            binding = builder_binding(self)
+            if cls not in {
+                AssetCellStaging,
+                MerchantCaseStaging,
+                RestrictedDenylistStaging,
+                PublicMetricStaging,
+                PendingMetricStaging,
+                HandleMappingStaging,
+                RestrictedGovernanceFact,
+                PendingMetricGovernanceFact,
+                SourceReviewFact,
+                DuplicateMerchantReviewFact,
+                IdDiagnostic,
+            }:
+                _fail("WP3_TRUSTED_OUTPUT_TYPE_INVALID")
+            expected_fields = {
+                name[1:] for name in cls.__slots__ if name != "__weakref__"
+            }
+            if set(fields) != expected_fields:
+                _fail("WP3_TRUSTED_OUTPUT_FIELDS_INVALID")
+            normalized_fields = {
+                name: tuple(value) if isinstance(value, list) else value
+                for name, value in fields.items()
+            }
+            source_class = source_class_by_type.get(cls)
+            sheet_id = None
+            source_row = None
+            source_ref = normalized_fields.get("source_ref")
+            if source_ref is not None:
+                source_record = validate_source_ref(source_ref, binding, source_class)
+                source_class = source_record.source_class
+                sheet_id = source_record.sheet_id
+                source_row = source_record.source_row
+            lineage = normalized_fields.get("lineage")
+            if cls is AssetCellStaging:
+                source_class = "merchant_case"
+                if normalized_fields["field_name"] not in {"article", "video", "podcast", "news"}:
+                    _fail("WP3_ASSET_FIELD_INVALID")
+                if type(lineage) is not CanonicalSourceLineage:
+                    _fail("WP3_SOURCE_LINEAGE_BINDING_INVALID")
+                sheet_id = lineage.sheet_id
+                source_row = lineage.source_row
+            if lineage is not None:
+                validate_lineage(lineage, binding, source_class, source_row)
+            if cls is MerchantCaseStaging:
+                for asset in normalized_fields["asset_cells"]:
+                    asset_record = validate_nested(
+                        asset, binding, AssetCellStaging, "merchant_case"
+                    )
+                    if (
+                        asset_record.sheet_id != sheet_id
+                        or asset_record.source_row != source_row
+                    ):
+                        _fail("WP3_NESTED_CONTEXT_BINDING_INVALID")
+                handle = normalized_fields["normalized_handle"]
+                if handle is not None and not safe_handle_value(handle):
+                    _fail("WP3_SAFE_HANDLE_BINDING_INVALID")
+            if cls is HandleMappingStaging:
+                handle = normalized_fields["normalized_handle"]
+                if handle is not None and not safe_handle_value(handle):
+                    _fail("WP3_SAFE_HANDLE_BINDING_INVALID")
+            if cls is DuplicateMerchantReviewFact:
+                refs = normalized_fields["source_refs"]
+                if type(refs) is not tuple or len(refs) < 2:
+                    _fail("WP3_DUPLICATE_REVIEW_BINDING_INVALID")
+                records = [
+                    validate_source_ref(ref, binding, "merchant_case") for ref in refs
+                ]
+                source_class = "merchant_case"
+                sheet_id = specs[source_class].sheet_id
+                source_row = None
+                if normalized_fields["reason_code"] != "DUPLICATE_MERCHANT_INTERVIEW_REVIEW":
+                    _fail("WP3_DUPLICATE_REVIEW_BINDING_INVALID")
+                source_ref_ids = tuple(id(ref) for ref in refs)
+            else:
+                source_ref_ids = (() if source_ref is None else (id(source_ref),))
+            if cls is IdDiagnostic:
+                source_class = normalized_fields["source_class"]
+            value = object.__new__(cls)
+            for name, field_value in normalized_fields.items():
+                object.__setattr__(value, f"_{name}", field_value)
+            remember(
+                value,
+                _TrustedObjectRecord(
+                    cls.__name__,
+                    binding,
+                    source_class,
+                    sheet_id,
+                    source_row,
+                    source_ref_ids,
+                ),
+            )
+            return value
+
+        def brand_candidates(self, evidence):
+            binding = builder_binding(self)
+            records = tuple(evidence)
+            evidence_ref_ids = []
+            for item in records:
+                if type(item) is not _UntrustedBrandEvidence:
+                    _fail("WP3_BRAND_EVIDENCE_TYPE_INVALID")
+                source_record = validate_source_ref(item.source_ref, binding)
+                if source_record.source_class not in {"merchant_case", "handle_mapping"}:
+                    _fail("WP3_BRAND_EVIDENCE_SOURCE_INVALID")
+                if item.handle_mapping is not (
+                    source_record.source_class == "handle_mapping"
+                ):
+                    _fail("WP3_BRAND_EVIDENCE_SOURCE_INVALID")
+                if item.normalized_handle is not None and not safe_handle_value(
+                    item.normalized_handle
+                ):
+                    _fail("WP3_SAFE_HANDLE_BINDING_INVALID")
+                for canonical_url in item.canonical_urls:
+                    try:
+                        validated = validate_evidence_url(canonical_url).value
+                    except URLValidationError:
+                        _fail("WP3_BRAND_EVIDENCE_URL_INVALID")
+                    if validated != canonical_url:
+                        _fail("WP3_BRAND_EVIDENCE_URL_INVALID")
+                evidence_ref_ids.append(id(item.source_ref))
+            projections = project_candidates(records)
+            projected_ref_ids = [
+                id(source_ref)
+                for projection in projections
+                for source_ref in projection.source_refs
+            ]
+            if sorted(projected_ref_ids) != sorted(evidence_ref_ids):
+                _fail("WP3_BRAND_PROJECTION_SOURCE_BINDING_INVALID")
+            candidates = []
+            for projection in projections:
+                if type(projection) is not _UntrustedBrandCandidateProjection:
+                    _fail("WP3_BRAND_PROJECTION_TYPE_INVALID")
+                sources = projection.source_refs
+                for source_ref in sources:
+                    validate_source_ref(source_ref, binding)
+                if any(not safe_handle_value(handle) for handle in projection.handles):
+                    _fail("WP3_SAFE_HANDLE_BINDING_INVALID")
+                website_refs = tuple(
+                    website_ref(url) for url in projection.canonical_urls
+                )
+                hosts = tuple(
+                    sorted({safe_hostname(url) for url in projection.canonical_urls})
+                )
+                candidate_ref = candidate_ref_digest(
+                    projection.classification,
+                    projection.handles,
+                    sources,
+                    website_refs,
+                )
+                candidate = object.__new__(BrandReviewCandidate)
+                object.__setattr__(candidate, "_candidate_ref", candidate_ref)
+                object.__setattr__(
+                    candidate, "_classification", projection.classification
+                )
+                object.__setattr__(candidate, "_source_refs", sources)
+                object.__setattr__(
+                    candidate,
+                    "_normalized_handle",
+                    projection.handles[0] if len(projection.handles) == 1 else None,
+                )
+                object.__setattr__(candidate, "_website_hosts", hosts)
+                object.__setattr__(candidate, "_website_refs", website_refs)
+                object.__setattr__(
+                    candidate, "_reason_codes", projection.reason_codes
+                )
+                remember(
+                    candidate,
+                    _TrustedObjectRecord(
+                        "BrandReviewCandidate",
+                        binding,
+                        source_ref_identities=tuple(id(ref) for ref in sources),
+                    ),
+                )
+                candidates.append(candidate)
+            return tuple(sorted(candidates, key=lambda item: item.candidate_ref))
+
+        def batch(self, **fields):
+            binding = builder_binding(self)
+            expected_fields = {
+                name[1:]
+                for name in CanonicalNormalizationBatch.__slots__
+                if name != "__weakref__"
+            }
+            if set(fields) != expected_fields:
+                _fail("WP3_BATCH_FIELDS_INVALID")
+            normalized_fields = {
+                name: tuple(value) if isinstance(value, list) else value
+                for name, value in fields.items()
+            }
+            for name, (expected_type, source_class) in collection_contracts.items():
+                values = normalized_fields[name]
+                if type(values) is not tuple:
+                    _fail("WP3_BATCH_COLLECTION_TYPE_INVALID")
+                for value in values:
+                    validate_nested(value, binding, expected_type, source_class)
+            exclusions = normalized_fields["excluded_public_metrics"]
+            if type(exclusions) is not tuple or any(
+                type(value) is not ExcludedSourceRef
+                or value.sheet_id != specs["public_metric"].sheet_id
+                or not specs["public_metric"].first_data_row
+                <= value.source_row
+                <= specs["public_metric"].last_data_row
+                for value in exclusions
+            ):
+                _fail("WP3_EXCLUDED_SOURCE_BINDING_INVALID")
+            restricted_rows = {
+                (item.source_ref.sheet_id, item.source_ref.source_row)
+                for item in normalized_fields["restricted_denylist"]
+            }
+            if restricted_rows != {
+                (item.sheet_id, item.source_row)
+                for item in normalized_fields["restricted_facts"]
+            }:
+                _fail("WP3_RESTRICTED_FACT_BINDING_INVALID")
+            pending_rows = {
+                (item.source_ref.sheet_id, item.source_ref.source_row)
+                for item in normalized_fields["pending_metrics"]
+            }
+            if pending_rows != {
+                (item.sheet_id, item.source_row)
+                for item in normalized_fields["pending_facts"]
+            }:
+                _fail("WP3_PENDING_FACT_BINDING_INVALID")
+            value = object.__new__(CanonicalNormalizationBatch)
+            for name, field_value in normalized_fields.items():
+                object.__setattr__(value, f"_{name}", field_value)
+            remember(
+                value,
+                _TrustedObjectRecord("CanonicalNormalizationBatch", binding),
+            )
+            return value
+
+    def normalize(context: CoverageProvenBatchContext) -> CanonicalNormalizationBatch:
+        """Normalize one exact, authentic, structurally valid synthetic WP2 batch."""
+
+        if type(context) is not CoverageProvenBatchContext:
+            _fail("WP3_COVERAGE_PROVEN_CONTEXT_REQUIRED")
+        envelope = validated_context_envelope(context)
+        if envelope is None:
+            _fail("WP3_COVERAGE_PROVEN_CONTEXT_INVALID")
+        if (
+            envelope.run_mode is not RunMode.SYNTHETIC
+            or envelope.disposition
+            is not SourceHealthDisposition.SYNTHETIC_CHECKS_COMPLETE
+            or envelope.structural_reason_codes
+        ):
+            _fail("WP3_TRUSTED_SYNTHETIC_CONTEXT_REQUIRED")
+        result = context_result(context)
+        if (
+            validated_context_envelope(context) is not envelope
+            or context_result(context) is not result
+        ):
+            _fail("WP3_COVERAGE_PROVEN_CONTEXT_INVALID")
+        binding = _ContextBinding(
+            context,
+            result,
+            envelope,
+            envelope.target_identity_hash,
+            envelope.source_fingerprint,
+            envelope.correlation_id,
+        )
+        builder = object.__new__(PipelineBuilder)
+        builder_identity = id(builder)
+
+        def discard_builder(reference):
+            current = trusted_builders.get(builder_identity)
+            if current is not None and current[0] is reference:
+                trusted_builders.pop(builder_identity, None)
+
+        trusted_builders[builder_identity] = (
+            weakref.ref(builder, discard_builder),
+            binding,
+        )
+        snapshot = result.snapshot
+        merchants, merchant_evidence, duplicates, merchant_reviews = merchant_rows(
+            snapshot, envelope, builder
+        )
+        restricted, restricted_facts, restricted_reviews = restricted_rows_normalizer(
+            snapshot, envelope, builder
+        )
+        public_metrics, exclusions, public_reviews = public_metric_rows(
+            snapshot, envelope, builder
+        )
+        pending, pending_facts, pending_reviews = pending_rows_normalizer(
+            snapshot, envelope, builder
+        )
+        mappings, mapping_evidence, mapping_reviews = handle_mapping_rows(
+            snapshot, envelope, builder
+        )
+        candidates = builder.brand_candidates(
+            (*merchant_evidence, *mapping_evidence)
+        )
+        return builder.batch(
+            merchant_cases=merchants,
+            restricted_denylist=restricted,
+            restricted_facts=restricted_facts,
+            public_metrics=public_metrics,
+            excluded_public_metrics=exclusions,
+            pending_metrics=pending,
+            pending_facts=pending_facts,
+            handle_mappings=mappings,
+            brand_review_candidates=candidates,
+            duplicate_review_facts=duplicates,
+            review_facts=tuple(
+                sorted(
+                    (
+                        *merchant_reviews,
+                        *restricted_reviews,
+                        *public_reviews,
+                        *pending_reviews,
+                        *mapping_reviews,
+                    ),
+                    key=lambda item: (
+                        item.source_ref.source_ref,
+                        item.reason_codes,
+                    ),
+                )
+            ),
+            id_diagnostics=id_diagnostics(builder),
+        )
+
+    return normalize
+
+
+normalize_coverage_proven_batch = _build_normalization_entrypoint()
+del _build_normalization_entrypoint
 
 
 def _sheet(snapshot: SpreadsheetSnapshot, sheet_id: int) -> SheetSnapshot:

@@ -51,7 +51,9 @@ class BrandCandidateReason(str, Enum):
 class SafeSourceRef:
     """A redacted source locator whose digest is a review reference, not an ID."""
 
-    __slots__ = ("_source_class", "_sheet_id", "_source_row", "_source_ref")
+    __slots__ = (
+        "_source_class", "_sheet_id", "_source_row", "_source_ref", "__weakref__",
+    )
 
     def __new__(cls, *args: object, **kwargs: object) -> "SafeSourceRef":
         raise TypeError("SAFE_SOURCE_REF_CONSTRUCTION_FORBIDDEN")
@@ -74,6 +76,12 @@ class SafeSourceRef:
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("SAFE_SOURCE_REF_IMMUTABLE")
+
+    def __reduce__(self) -> object:
+        raise TypeError("SAFE_SOURCE_REF_SERIALIZATION_FORBIDDEN")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        raise TypeError("SAFE_SOURCE_REF_SERIALIZATION_FORBIDDEN")
 
     def __repr__(self) -> str:
         return (
@@ -108,6 +116,7 @@ class BrandReviewCandidate:
         "_website_hosts",
         "_website_refs",
         "_reason_codes",
+        "__weakref__",
     )
 
     def __new__(cls, *args: object, **kwargs: object) -> "BrandReviewCandidate":
@@ -160,6 +169,12 @@ class BrandReviewCandidate:
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("BRAND_REVIEW_CANDIDATE_IMMUTABLE")
 
+    def __reduce__(self) -> object:
+        raise TypeError("BRAND_REVIEW_CANDIDATE_SERIALIZATION_FORBIDDEN")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        raise TypeError("BRAND_REVIEW_CANDIDATE_SERIALIZATION_FORBIDDEN")
+
     def __repr__(self) -> str:
         return (
             "BrandReviewCandidate("
@@ -170,7 +185,9 @@ class BrandReviewCandidate:
 
 
 @dataclass(frozen=True, repr=False)
-class _BrandEvidence:
+class _UntrustedBrandEvidence:
+    """Pure graph input; only the WP3 pipeline may bind it to trusted output."""
+
     source_ref: SafeSourceRef
     normalized_name: Optional[str]
     normalized_handle: Optional[str]
@@ -179,32 +196,68 @@ class _BrandEvidence:
     handle_mapping: bool
     multiple_urls_in_one_cell: bool
 
+    def __post_init__(self) -> None:
+        urls = tuple(sorted(set(self.canonical_urls)))
+        if (
+            type(self.source_ref) is not SafeSourceRef
+            or any(type(url) is not str or not url for url in urls)
+            or (
+                self.normalized_name is not None
+                and (type(self.normalized_name) is not str or not self.normalized_name)
+            )
+            or (
+                self.normalized_handle is not None
+                and (
+                    type(self.normalized_handle) is not str
+                    or not self.normalized_handle
+                )
+            )
+            or any(
+                type(value) is not bool
+                for value in (
+                    self.unsafe_website_evidence,
+                    self.handle_mapping,
+                    self.multiple_urls_in_one_cell,
+                )
+            )
+        ):
+            _fail("BRAND_EVIDENCE_INPUT_INVALID")
+        object.__setattr__(self, "canonical_urls", urls)
+
     def __repr__(self) -> str:
         return (
-            "_BrandEvidence("
+            "_UntrustedBrandEvidence("
             f"source_ref={self.source_ref.source_ref!r}, content=<redacted>)"
         )
 
 
-def _new_safe_source_ref(
-    *,
+@dataclass(frozen=True, repr=False)
+class _UntrustedBrandCandidateProjection:
+    """Pure candidate classification; it carries no construction authority."""
+
+    classification: BrandCandidateClassification
+    source_refs: Tuple[SafeSourceRef, ...]
+    handles: Tuple[str, ...]
+    canonical_urls: Tuple[str, ...]
+    reason_codes: Tuple[str, ...]
+
+    def __repr__(self) -> str:
+        return (
+            "_UntrustedBrandCandidateProjection("
+            f"classification={self.classification.value!r}, "
+            f"source_count={len(self.source_refs)}, content=<redacted>)"
+        )
+
+
+def _safe_source_ref_digest(
     source_class: str,
     sheet_id: int,
     source_row: int,
     target_identity_hash: str,
     source_fingerprint: str,
-) -> SafeSourceRef:
-    if (
-        type(source_class) is not str
-        or not source_class
-        or type(sheet_id) is not int
-        or sheet_id < 0
-        or type(source_row) is not int
-        or source_row <= 0
-        or not _is_hash(target_identity_hash)
-        or not _is_hash(source_fingerprint)
-    ):
-        _fail("SAFE_SOURCE_REF_INPUT_INVALID")
+) -> str:
+    """Compute an untrusted digest; this function cannot mint a source ref."""
+
     payload = _canonical_json(
         {
             "sheet_id": sheet_id,
@@ -214,68 +267,16 @@ def _new_safe_source_ref(
             "target_identity_hash": target_identity_hash,
         }
     )
-    value = object.__new__(SafeSourceRef)
-    object.__setattr__(value, "_source_class", source_class)
-    object.__setattr__(value, "_sheet_id", sheet_id)
-    object.__setattr__(value, "_source_row", source_row)
-    object.__setattr__(
-        value,
-        "_source_ref",
-        "sha256:" + hashlib.sha256(_SOURCE_REF_DOMAIN + payload).hexdigest(),
-    )
-    return value
+    return "sha256:" + hashlib.sha256(_SOURCE_REF_DOMAIN + payload).hexdigest()
 
 
-def _new_brand_evidence(
-    *,
-    source_ref: SafeSourceRef,
-    normalized_name: Optional[str],
-    normalized_handle: Optional[str],
-    canonical_urls: Iterable[str],
-    unsafe_website_evidence: bool,
-    handle_mapping: bool,
-    multiple_urls_in_one_cell: bool,
-) -> _BrandEvidence:
-    if type(source_ref) is not SafeSourceRef:
-        _fail("BRAND_EVIDENCE_SOURCE_REF_INVALID")
-    urls = tuple(sorted(set(canonical_urls)))
-    if any(type(url) is not str or not url for url in urls):
-        _fail("BRAND_EVIDENCE_URL_INVALID")
-    if normalized_name is not None and (
-        type(normalized_name) is not str or not normalized_name
-    ):
-        _fail("BRAND_EVIDENCE_NAME_INVALID")
-    if normalized_handle is not None and (
-        type(normalized_handle) is not str or not normalized_handle
-    ):
-        _fail("BRAND_EVIDENCE_HANDLE_INVALID")
-    if any(
-        type(value) is not bool
-        for value in (
-            unsafe_website_evidence,
-            handle_mapping,
-            multiple_urls_in_one_cell,
-        )
-    ):
-        _fail("BRAND_EVIDENCE_FLAG_INVALID")
-    return _BrandEvidence(
-        source_ref=source_ref,
-        normalized_name=normalized_name,
-        normalized_handle=normalized_handle,
-        canonical_urls=urls,
-        unsafe_website_evidence=unsafe_website_evidence,
-        handle_mapping=handle_mapping,
-        multiple_urls_in_one_cell=multiple_urls_in_one_cell,
-    )
-
-
-def _build_brand_review_candidates(
-    evidence: Iterable[_BrandEvidence],
-) -> Tuple[BrandReviewCandidate, ...]:
-    """Build exact-evidence connected components in deterministic order."""
+def _project_brand_review_candidates(
+    evidence: Iterable[_UntrustedBrandEvidence],
+) -> Tuple[_UntrustedBrandCandidateProjection, ...]:
+    """Classify exact-evidence components without minting trusted candidates."""
 
     records = tuple(evidence)
-    if any(type(item) is not _BrandEvidence for item in records):
+    if any(type(item) is not _UntrustedBrandEvidence for item in records):
         _fail("BRAND_EVIDENCE_TYPE_INVALID")
     if not records:
         return ()
@@ -321,19 +322,19 @@ def _build_brand_review_candidates(
         for index in indexes
     }
 
-    candidates = [
-        _candidate_from_component(
+    projections = [
+        _projection_from_component(
             component,
             name_collision=index in colliding_components,
         )
         for index, component in enumerate(component_records)
     ]
-    return tuple(sorted(candidates, key=lambda item: item.candidate_ref))
+    return tuple(sorted(projections, key=_projection_order_key))
 
 
-def _candidate_from_component(
-    component: Iterable[_BrandEvidence], *, name_collision: bool
-) -> BrandReviewCandidate:
+def _projection_from_component(
+    component: Iterable[_UntrustedBrandEvidence], *, name_collision: bool
+) -> _UntrustedBrandCandidateProjection:
     records = tuple(component)
     handles = tuple(
         sorted({item.normalized_handle for item in records if item.normalized_handle})
@@ -385,28 +386,32 @@ def _candidate_from_component(
         if len(handles) != 1:
             reasons.add(BrandCandidateReason.INSUFFICIENT_IDENTITY_EVIDENCE.value)
 
-    website_refs = tuple(_website_ref(url) for url in urls)
-    hosts = tuple(sorted({_safe_hostname(url) for url in urls}))
+    return _UntrustedBrandCandidateProjection(
+        classification=classification,
+        source_refs=sources,
+        handles=handles,
+        canonical_urls=urls,
+        reason_codes=tuple(sorted(reasons)),
+    )
+
+
+def _candidate_ref_digest(
+    classification: BrandCandidateClassification,
+    handles: Tuple[str, ...],
+    source_refs: Tuple[SafeSourceRef, ...],
+    website_refs: Tuple[str, ...],
+) -> str:
+    """Compute an untrusted review digest; this cannot mint a candidate."""
+
     primitive = {
         "classification": classification.value,
         "handles": handles,
-        "source_refs": [item.source_ref for item in sources],
+        "source_refs": [item.source_ref for item in source_refs],
         "website_refs": website_refs,
     }
-    candidate_ref = "sha256:" + hashlib.sha256(
+    return "sha256:" + hashlib.sha256(
         _CANDIDATE_REF_DOMAIN + _canonical_json(primitive)
     ).hexdigest()
-    candidate = object.__new__(BrandReviewCandidate)
-    object.__setattr__(candidate, "_candidate_ref", candidate_ref)
-    object.__setattr__(candidate, "_classification", classification)
-    object.__setattr__(candidate, "_source_refs", sources)
-    object.__setattr__(
-        candidate, "_normalized_handle", handles[0] if len(handles) == 1 else None
-    )
-    object.__setattr__(candidate, "_website_hosts", hosts)
-    object.__setattr__(candidate, "_website_refs", website_refs)
-    object.__setattr__(candidate, "_reason_codes", tuple(sorted(reasons)))
-    return candidate
 
 
 def _website_ref(canonical_url: str) -> str:
@@ -422,12 +427,25 @@ def _safe_hostname(canonical_url: str) -> str:
     return hostname
 
 
-def _evidence_order_key(item: _BrandEvidence) -> tuple:
+def _evidence_order_key(item: _UntrustedBrandEvidence) -> tuple:
     return (
         item.source_ref._key(),
         item.normalized_handle or "",
         item.canonical_urls,
         item.normalized_name or "",
+    )
+
+
+def _projection_order_key(item: _UntrustedBrandCandidateProjection) -> tuple:
+    website_refs = tuple(_website_ref(url) for url in item.canonical_urls)
+    return (
+        _candidate_ref_digest(
+            item.classification,
+            item.handles,
+            item.source_refs,
+            website_refs,
+        ),
+        tuple(source._key() for source in item.source_refs),
     )
 
 
@@ -439,13 +457,6 @@ def _canonical_json(value: object) -> bytes:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-
-
-def _is_hash(value: object) -> bool:
-    if type(value) is not str or not value.startswith("sha256:"):
-        return False
-    digest = value[7:]
-    return len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
 
 
 def _fail(code: str) -> None:

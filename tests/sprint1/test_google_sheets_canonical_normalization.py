@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from datetime import date
 import json
 import pickle
 import socket
+from types import SimpleNamespace
 from typing import Optional, Union
 
 import pytest
@@ -86,6 +88,16 @@ def formula(display: str, expression: str, *, cached: bool = True) -> dict:
     }
     if cached:
         cell["effectiveValue"] = {"stringValue": display}
+    return cell
+
+
+def numeric_formula(value: Union[int, float], *, formatted: Optional[str] = None) -> dict:
+    cell = {
+        "userEnteredValue": {"formulaValue": "=DATE(2026,8,14)"},
+        "effectiveValue": {"numberValue": value},
+    }
+    if formatted is not None:
+        cell["formattedValue"] = formatted
     return cell
 
 
@@ -322,9 +334,51 @@ def test_date_only_accepts_integral_serial_and_exact_text(date_cell, expected):
     assert metric.maintenance_updated_at == expected
 
 
+@pytest.mark.parametrize("formatted", ["8/14/2026", "2026-08-14", None])
+def test_typed_google_date_serial_has_authority_over_display_format(formatted):
+    rows = full_rows()
+    rows["public_metric"][0][4] = number(46248, formatted=formatted)
+    metric = normalize_coverage_proven_batch(synthetic_context(rows)).public_metrics[0]
+    assert metric.maintenance_updated_at == date(2026, 8, 14)
+
+
+def test_formula_cached_numeric_date_is_accepted_but_formula_without_cache_is_not():
+    rows = full_rows()
+    rows["public_metric"][0][4] = numeric_formula(46248, formatted="8/14/2026")
+    metric = normalize_coverage_proven_batch(synthetic_context(rows)).public_metrics[0]
+    assert metric.maintenance_updated_at == date(2026, 8, 14)
+
+    rows["public_metric"][0][4] = formula("8/14/2026", "=DATE(2026,8,14)", cached=False)
+    batch = normalize_coverage_proven_batch(synthetic_context(rows))
+    assert batch.public_metrics == ()
+    assert "PUBLIC_METRIC_SOURCE_NORMALIZATION_FAILED" in {
+        code for fact in batch.review_facts for code in fact.reason_codes
+    }
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), 10**20])
+def test_non_finite_bool_and_out_of_range_date_serials_fail_closed(value):
+    effective = SimpleNamespace(number_value=value, string_value=None)
+    cell = SimpleNamespace(
+        normalized_value="typed-date",
+        value_cell=SimpleNamespace(effective_value=effective),
+        source_was_formula=False,
+        display_value=None,
+    )
+    with pytest.raises(CanonicalNormalizationError, match="DATE_ONLY_NEEDS_REVIEW"):
+        wp3._date_value(cell)
+
+
 @pytest.mark.parametrize(
     "date_cell",
-    [number(1.5), number(-1), text("2026-08"), text("2026"), text("08/14/2026")],
+    [
+        number(1.5),
+        number(-1),
+        text("2026-08"),
+        text("2026"),
+        text("8/14/2026"),
+        text("08/14/2026"),
+    ],
 )
 def test_ambiguous_or_non_date_values_need_review_without_date_invention(date_cell):
     rows = full_rows()
@@ -588,12 +642,53 @@ def test_trusted_runtime_objects_are_builder_only_and_final_models_are_absent():
     assert not any(isinstance(value, (Brand, BrandIdentityDecision, SourceRecord, PublicMetric)) for value in all_values)
 
 
-def test_arbitrary_object_or_hash_cannot_forge_internal_construction_provenance():
-    for forged in (object(), "sha256:" + "0" * 64):
-        with pytest.raises(CanonicalNormalizationError, match="CONSTRUCTION_PROVENANCE_INVALID"):
-            wp3._new(MerchantCaseStaging, forged, name="forged")
-    with pytest.raises(CanonicalNormalizationError, match="PROVENANCE_ISSUANCE_INVALID"):
-        wp3._issue_wp3_provenance(object(), object(), object())
+def test_trusted_construction_capability_is_not_module_or_output_accessible():
+    batch = normalize_coverage_proven_batch(synthetic_context())
+    merchant = batch.merchant_cases[0]
+
+    assert not hasattr(wp3, "_new")
+    assert not hasattr(wp3, "_issue_wp3_provenance")
+    assert not hasattr(batch, "_provenance")
+    assert not hasattr(merchant, "_provenance")
+    with pytest.raises(TypeError, match="CONSTRUCTION_FORBIDDEN"):
+        MerchantCaseStaging(name="forged")
+    with pytest.raises(TypeError):
+        replace(merchant, name="forged")
+    with pytest.raises(TypeError):
+        copy.copy(merchant)
+    with pytest.raises(TypeError):
+        copy.deepcopy(merchant)
+
+
+def test_cross_context_nested_outputs_have_no_supported_transplant_surface():
+    batch_a = normalize_coverage_proven_batch(synthetic_context())
+    rows = full_rows()
+    rows["merchant_case"][0][2] = text("Context B")
+    rows["merchant_case"][0][3] = text("@context-b")
+    batch_b = normalize_coverage_proven_batch(synthetic_context(rows))
+
+    assert batch_a.merchant_cases[0] is not batch_b.merchant_cases[0]
+    assert batch_a.brand_review_candidates[0] is not batch_b.brand_review_candidates[0]
+    with pytest.raises(TypeError, match="CONSTRUCTION_FORBIDDEN"):
+        CanonicalNormalizationBatch(
+            merchant_cases=(batch_b.merchant_cases[0],),
+            brand_review_candidates=(batch_b.brand_review_candidates[0],),
+        )
+
+
+def test_same_fingerprint_and_source_coordinate_do_not_transfer_construction_authority():
+    batch_a = normalize_coverage_proven_batch(synthetic_context())
+    batch_b = normalize_coverage_proven_batch(synthetic_context())
+
+    assert batch_a.merchant_cases[0].source_ref == batch_b.merchant_cases[0].source_ref
+    assert (
+        batch_a.brand_review_candidates[0].candidate_ref
+        == batch_b.brand_review_candidates[0].candidate_ref
+    )
+    assert batch_a.merchant_cases[0] is not batch_b.merchant_cases[0]
+    assert batch_a.brand_review_candidates[0] is not batch_b.brand_review_candidates[0]
+    assert not hasattr(batch_a, "_provenance")
+    assert not hasattr(batch_b, "_provenance")
 
 
 def test_sensitive_staging_is_immutable_redacted_nonserializable_and_alias_safe():
