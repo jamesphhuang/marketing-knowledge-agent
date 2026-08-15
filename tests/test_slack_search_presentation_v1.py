@@ -246,6 +246,90 @@ def test_entity_or_escape_breakout_url_is_never_rendered_as_a_clickable_link(url
     assert "evil.example" not in text
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        # TAB, LF and CR are the three bytes urlsplit() deletes before parsing, so a URL checked
+        # only in its canonical form would come back "clean" and be rendered as a rewritten link.
+        "https://example.com/a\tb",
+        "https://example.com/a\nb",
+        "https://example.com/a\rb",
+        "https://example.com/p?x=a\tb",
+        "https://example.com/p?x=a\nb",
+        "https://example.com/p?x=a\rb",
+        "https://example.com/p#a\tb",
+        "https://example.com/p#a\nb",
+        "https://example.com/p#a\rb",
+        # The remaining C0 controls and DEL must stay rejected alongside them.
+        "https://example.com/a\x00b",
+        "https://example.com/a\x1fb",
+        "https://example.com/a\x7fb",
+        "https://example.com/p?x=a\x00b",
+        "https://example.com/p#a\x7fb",
+    ],
+)
+def test_raw_control_character_url_is_never_rendered_as_a_clickable_link(url):
+    answer = _answer("query", [_entity("Brand", [_asset("article", "Story", row=32, url=url)])])
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+
+    assert "> *連結：*資料未提供" in text
+    assert "開啟連結" not in text
+
+
+@pytest.mark.parametrize("control", ["\t", "\n", "\r"])
+def test_canonicalization_erasing_a_control_character_is_not_acceptance(control):
+    """The raw value decides safety; normalization must never launder it into a link."""
+    raw = f"https://example.com/a{control}b"
+    erased = "https://example.com/ab"
+
+    # The erased twin is a perfectly renderable URL, so the rejection below is the raw check
+    # doing the work rather than an incidental parse failure.
+    assert canonicalize_url(raw).display == erased
+    control_free = format_slack_reply(
+        _answer("query", [_asset_entity("Brand", erased)]), max_answer_chars=20_000
+    )
+    assert f"> *連結：*<{erased}|開啟連結>" in control_free
+
+    text = format_slack_reply(
+        _answer("query", [_asset_entity("Brand", raw)]), max_answer_chars=20_000
+    )
+
+    assert "> *連結：*資料未提供" in text
+    assert erased not in text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://blog.shopline.tw/merchant-showcase-shanfeng/",
+        "https://www.youtube.com/watch?v=WIMy_AFA0pE",
+    ],
+)
+def test_approved_asset_urls_still_render_as_one_clickable_link(url):
+    answer = _answer("query", [_asset_entity("三風製麵", url)])
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+
+    assert f"> *連結：*<{url}|開啟連結>" in text
+    assert text.count("|開啟連結>") == 1
+
+
+def test_surrounding_whitespace_still_resolves_to_one_clickable_link():
+    """Padding is stripped as before; only characters inside the URL fail closed."""
+    answer = _answer(
+        "query",
+        [_asset_entity("Brand", "  https://blog.shopline.tw/merchant-showcase-shanfeng/  ")],
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+
+    assert (
+        "> *連結：*<https://blog.shopline.tw/merchant-showcase-shanfeng/|開啟連結>" in text
+    )
+    assert text.count("|開啟連結>") == 1
+
+
 def test_legitimate_query_separators_render_as_one_escaped_clickable_link():
     answer = _answer(
         "query",

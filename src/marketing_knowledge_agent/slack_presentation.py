@@ -110,6 +110,21 @@ def canonicalize_url(
     return CanonicalUrl(display=display, identity=identity)
 
 
+def canonicalize_link_target(value: Optional[str]) -> Optional[CanonicalUrl]:
+    """Canonicalize a URL only after the RAW value has passed the mrkdwn safety policy.
+
+    urlsplit() silently removes TAB, LF and CR before parsing, so a value validated only in its
+    canonical form could be rewritten into a different URL and then rendered as a clickable link.
+    Deciding on the raw value first keeps normalization from becoming acceptance. Surrounding
+    whitespace is stripped exactly as canonicalize_url does, so merely padded values still resolve;
+    every other MRKDWN_UNSAFE_CHARS byte, including the C0 controls and DEL, fails closed here.
+    """
+    raw = str(value or "").strip()
+    if not raw or not url_is_mrkdwn_safe(raw):
+        return None
+    return canonicalize_url(raw)
+
+
 def format_structured_slack_reply(answer) -> Optional[str]:
     generated = getattr(answer, "generated", answer)
     structured = getattr(generated, "structured_result", None)
@@ -259,8 +274,9 @@ def _asset_candidate(
     entity_index: int,
     asset_index: int,
 ) -> dict:
-    citation_url = canonicalize_url(citation.canonical_url)
-    asset_url = canonicalize_url(asset.url)
+    # Link targets are validated raw-first; the title is only ever compared, never linked.
+    citation_url = canonicalize_link_target(citation.canonical_url)
+    asset_url = canonicalize_link_target(asset.url)
     title_is_url = canonicalize_url(asset.title)
     url = citation_url or asset_url
     title = asset.title or citation.title
@@ -448,8 +464,9 @@ def _label_value(label: str, value: object) -> str:
 
 
 def _slack_link(value: object) -> str:
-    # Canonicalization runs first so escaping never changes the URL's identity.
-    url = canonicalize_url(str(value or ""))
+    # Raw safety is decided before canonicalization, then re-checked on the canonical form so
+    # escaping never changes the URL's identity.
+    url = canonicalize_link_target(value)
     if url is None or not url_is_mrkdwn_safe(url.display):
         return MISSING
     return f"<{escape_mrkdwn_url(url.display)}|開啟連結>"
