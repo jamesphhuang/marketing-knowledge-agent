@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -16,6 +18,7 @@ from .pipeline import ask_index
 from .query_planning import FIELD_REGISTRY
 from .query_gating import RESTRICTED_QUERY_REFUSAL
 from .slack_output_preview_reports import write_slack_output_preview_reports
+from .slack_presentation import escape_mrkdwn_url, url_is_mrkdwn_safe
 
 
 SAMPLE_QUERIES = (
@@ -36,10 +39,25 @@ ALLOWED_OVERLAY_FIELDS = {"asset_url", "canonical_url"}
 MAX_DISPLAY_ENTITIES = 5
 MAX_DISPLAY_ASSETS = 10
 MAX_TITLE_CHARS = 160
+# The tracked manifest is the only authority for "approved" asset URL artifacts. Writable CSV
+# columns such as reviewer/review_decision/eligibility cannot self-attest without it.
+AUTHORITY_MANIFEST_RELATIVE_PATH = "tests/fixtures/historical_inputs_manifest.json"
+APPROVED_ASSET_URL_APPLY_PREVIEW = "reports/asset_metadata_apply_preview/asset_apply_preview.csv"
+APPROVED_ASSET_URL_BLOCKED_PREVIEW = "reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv"
+APPROVED_ASSET_URL_DECISIONS = "reports/asset_metadata_preview/human_review_template.csv"
+APPROVED_ASSET_URL_INPUTS = (
+    APPROVED_ASSET_URL_APPLY_PREVIEW,
+    APPROVED_ASSET_URL_BLOCKED_PREVIEW,
+    APPROVED_ASSET_URL_DECISIONS,
+)
 
 
 class SlackOutputPreviewError(ValueError):
     """Raised when a Slack output preview cannot be built without unsafe assumptions."""
+
+
+class ApprovedAssetUrlAuthorityError(SlackOutputPreviewError):
+    """Raised when approved asset URL artifacts are not bound to the tracked authority manifest."""
 
 
 @dataclass(frozen=True)
@@ -73,14 +91,140 @@ class SlackPreviewBundle:
     backend_citations: Tuple[dict, ...] = ()
 
 
+def load_pinned_approved_asset_url_overlay() -> AssetUrlOverlay:
+    """Load approved asset URLs from repository-pinned, hash-verified artifacts.
+
+    This is the only entry point the Slack runtime may use. It deliberately takes no arguments:
+    the repository root, the manifest, the artifact paths and the expected hashes are all fixed,
+    so a caller cannot substitute writable CSV files that self-attest as approved. Any failure
+    raises ApprovedAssetUrlAuthorityError, which callers must treat as "no URL enrichment".
+    """
+    apply_bytes, blocked_bytes, decision_bytes = _authorized_asset_url_inputs()
+    # Parsing the verified bytes, rather than re-reading the paths, keeps the artifact that was
+    # hashed and the artifact that is parsed identical even under a concurrent rewrite.
+    return _build_asset_url_overlay(
+        _parse_pinned_csv(apply_bytes),
+        _parse_pinned_csv(blocked_bytes),
+        _parse_pinned_csv(decision_bytes),
+    )
+
+
+def _authorized_asset_url_inputs() -> Tuple[bytes, bytes, bytes]:
+    root = _repository_root()
+    manifest = _verified_authority_manifest(root)
+    payloads = []
+    for relative in APPROVED_ASSET_URL_INPUTS:
+        entry = manifest.get(relative)
+        if entry is None:
+            raise ApprovedAssetUrlAuthorityError(
+                "approved asset URL input is not covered by the tracked authority manifest"
+            )
+        payloads.append(_verified_pinned_bytes(root / relative, entry))
+    return (payloads[0], payloads[1], payloads[2])
+
+
+def _repository_root() -> Path:
+    """Resolve the repository root from the module location, never from the working directory."""
+    root = Path(__file__).resolve().parents[2]
+    if not (root / AUTHORITY_MANIFEST_RELATIVE_PATH).is_file():
+        raise ApprovedAssetUrlAuthorityError(
+            "tracked authority manifest is not reachable from the installed module location"
+        )
+    return root
+
+
+def _verified_authority_manifest(root: Path) -> Dict[str, Mapping[str, object]]:
+    """Parse the tracked manifest using its existing schema and enforce its self-integrity hash."""
+    try:
+        payload = json.loads((root / AUTHORITY_MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApprovedAssetUrlAuthorityError("tracked authority manifest is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise ApprovedAssetUrlAuthorityError("tracked authority manifest is malformed")
+    stored_hash = payload.get("manifest_hash")
+    body = {key: value for key, value in payload.items() if key != "manifest_hash"}
+    if not isinstance(stored_hash, str) or stored_hash != _hash_json(body):
+        raise ApprovedAssetUrlAuthorityError(
+            "tracked authority manifest failed its self-integrity contract"
+        )
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, list):
+        raise ApprovedAssetUrlAuthorityError("tracked authority manifest is malformed")
+    entries: Dict[str, Mapping[str, object]] = {}
+    for entry in inputs:
+        if not isinstance(entry, Mapping):
+            raise ApprovedAssetUrlAuthorityError("tracked authority manifest is malformed")
+        relative = entry.get("relative_path")
+        if not isinstance(relative, str) or not relative:
+            raise ApprovedAssetUrlAuthorityError("tracked authority manifest is malformed")
+        if relative in entries:
+            raise ApprovedAssetUrlAuthorityError(
+                "tracked authority manifest contains a duplicate input"
+            )
+        entries[relative] = entry
+    return entries
+
+
+def _verified_pinned_bytes(path: Path, entry: Mapping[str, object]) -> bytes:
+    expected_sha256 = entry.get("expected_sha256")
+    expected_size = entry.get("expected_size")
+    if (
+        entry.get("input_type") != "file"
+        or not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or not isinstance(expected_size, int)
+        or isinstance(expected_size, bool)
+    ):
+        raise ApprovedAssetUrlAuthorityError(
+            "approved asset URL input has no usable pinned file hash"
+        )
+    if path.is_symlink() or not path.is_file():
+        raise ApprovedAssetUrlAuthorityError("approved asset URL input is missing")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ApprovedAssetUrlAuthorityError("approved asset URL input is unreadable") from exc
+    if len(payload) != expected_size or hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise ApprovedAssetUrlAuthorityError(
+            "approved asset URL input does not match its pinned hash"
+        )
+    return payload
+
+
+def _parse_pinned_csv(payload: bytes) -> List[dict]:
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ApprovedAssetUrlAuthorityError("approved asset URL input is not valid UTF-8") from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if reader.fieldnames is None:
+        raise ApprovedAssetUrlAuthorityError("approved asset URL input has no CSV header")
+    return list(reader)
+
+
+def _hash_json(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def load_asset_url_overlay(
     apply_preview_path: Path,
     blocked_preview_path: Path,
     decisions_path: Path,
 ) -> AssetUrlOverlay:
-    apply_rows = _read_csv(Path(apply_preview_path))
-    blocked_rows = _read_csv(Path(blocked_preview_path))
-    decision_rows = _read_csv(Path(decisions_path))
+    return _build_asset_url_overlay(
+        _read_csv(Path(apply_preview_path)),
+        _read_csv(Path(blocked_preview_path)),
+        _read_csv(Path(decisions_path)),
+    )
+
+
+def _build_asset_url_overlay(
+    apply_rows: Sequence[Mapping[str, object]],
+    blocked_rows: Sequence[Mapping[str, object]],
+    decision_rows: Sequence[Mapping[str, object]],
+) -> AssetUrlOverlay:
     errors: List[dict] = []
     warnings: List[dict] = []
     decisions: Dict[Tuple[str, str, str], dict] = {}
@@ -773,7 +917,9 @@ def _display_title(value: object) -> str:
 
 def _slack_link(url: object, label: str) -> str:
     value = _text(url)
-    return f"<{value}|{_slack_text(label)}>" if value and _safe_slack_url(value) else f"{_slack_text(label)}（連結未提供）"
+    if not value or not _safe_slack_url(value):
+        return f"{_slack_text(label)}（連結未提供）"
+    return f"<{escape_mrkdwn_url(value)}|{_slack_text(label)}>"
 
 
 def _slack_text(value: object) -> str:
@@ -791,7 +937,7 @@ def _unique_sources(entities: Sequence[Mapping[str, object]]) -> List[str]:
 
 
 def _safe_http_url(value: str) -> bool:
-    if not value or re.search(r"[\x00-\x20<>|]", value):
+    if not value or not url_is_mrkdwn_safe(value):
         return False
     try:
         parsed = urlsplit(value)

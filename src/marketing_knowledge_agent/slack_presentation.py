@@ -31,6 +31,24 @@ GOVERNANCE_SILENT_WORDS = (
     "治理",
     "受限制",
 )
+# Literal characters that end a Slack mrkdwn link, plus the backslash Slack uses to escape them.
+MRKDWN_UNSAFE_CHARS = re.compile(r"[\x00-\x20\x7f<>|\\]")
+# Any character reference that could decode into a Slack mrkdwn delimiter. Slack's decode order is
+# undocumented, so a URL that already carries entity syntax is ambiguous and is never rendered.
+MRKDWN_ENTITY_REFERENCE = re.compile(
+    r"&(?:#|[A-Za-z][A-Za-z0-9]*;|(?:amp|lt|gt|quot)\b)",
+    re.IGNORECASE,
+)
+
+
+def url_is_mrkdwn_safe(value: str) -> bool:
+    """Reject URLs that could break out of a Slack mrkdwn link however Slack decodes them."""
+    return not MRKDWN_UNSAFE_CHARS.search(value) and not MRKDWN_ENTITY_REFERENCE.search(value)
+
+
+def escape_mrkdwn_url(value: str) -> str:
+    """Escape the only delimiter-relevant character a mrkdwn-safe URL can still contain."""
+    return value.replace("&", "&amp;")
 
 
 @dataclass(frozen=True)
@@ -430,10 +448,11 @@ def _label_value(label: str, value: object) -> str:
 
 
 def _slack_link(value: object) -> str:
+    # Canonicalization runs first so escaping never changes the URL's identity.
     url = canonicalize_url(str(value or ""))
-    if url is None or re.search(r"[\x00-\x20<>|]", url.display):
+    if url is None or not url_is_mrkdwn_safe(url.display):
         return MISSING
-    return f"<{url.display}|開啟連結>"
+    return f"<{escape_mrkdwn_url(url.display)}|開啟連結>"
 
 
 def _normal_text(value: object) -> str:

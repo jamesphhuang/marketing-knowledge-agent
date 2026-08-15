@@ -1,6 +1,7 @@
 import csv
 import json
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -23,12 +24,19 @@ from marketing_knowledge_agent.models import (
     StructuredEntity,
     StructuredRetrievalResult,
 )
-from marketing_knowledge_agent.slack_output_preview import AssetUrlOverlay, AssetUrlRecord
+from marketing_knowledge_agent.slack_output_preview import (
+    APPROVED_ASSET_URL_INPUTS,
+    AUTHORITY_MANIFEST_RELATIVE_PATH,
+    AssetUrlOverlay,
+    AssetUrlRecord,
+)
 from marketing_knowledge_agent.query_gating import RESTRICTED_QUERY_REFUSAL
 from marketing_knowledge_agent.query_gating import append_denylist_query_audit
 from marketing_knowledge_agent.slack_interface import (
     ANSWER_TRUNCATION_NOTICE,
+    APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE,
     DENIED_CHANNEL_MESSAGE,
+    SLACK_AUDIT_HEADER,
     SlackConfig,
     SlackInterfaceError,
     format_slack_reply,
@@ -405,9 +413,76 @@ def test_opted_in_slack_reply_uses_approved_asset_links_only(monkeypatch, tmp_pa
         }
     )
     monkeypatch.setattr(
-        "marketing_knowledge_agent.slack_interface.load_asset_url_overlay",
-        lambda *args: overlay,
+        "marketing_knowledge_agent.slack_interface.load_pinned_approved_asset_url_overlay",
+        lambda: overlay,
     )
+    audit_path = tmp_path / "audit.csv"
+
+    reply = handle_slack_event(
+        {"text": "Merchant A", "channel": "C123", "user": "U123", "ts": "10"},
+        config=SlackConfig(allowed_channel_ids=["C123"], enable_approved_asset_urls=True),
+        ask_fn=lambda *args, **kwargs: answer,
+        audit_log_path=audit_path,
+    )
+
+    assert "*連結：*<https://example.com/article|開啟連結>" in reply["text"]
+    assert "*連結：*<https://example.com/video|開啟連結>" in reply["text"]
+    assert [asset.url for asset in assets] == ["https://example.com/article", "https://example.com/video"]
+    assert [citation.canonical_url for citation in citations] == ["https://example.com/article", "https://example.com/video"]
+    assert [row[1] for row in _audit_rows(audit_path)] == ["slack_qa"]
+
+
+def test_overlay_authority_failure_fails_closed_without_aborting_the_slack_query(monkeypatch, tmp_path):
+    """F-03: feature ON with unavailable authority must not raise past the Slack response path."""
+    assets, citations, answer = _structured_answer()
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_output_preview._repository_root",
+        lambda: tmp_path / "no-such-repository-root",
+    )
+    audit_path = tmp_path / "audit.csv"
+
+    reply = handle_slack_event(
+        {"text": "Merchant A", "channel": "C123", "user": "U123", "ts": "10"},
+        config=SlackConfig(allowed_channel_ids=["C123"], enable_approved_asset_urls=True),
+        ask_fn=lambda *args, **kwargs: answer,
+        audit_log_path=audit_path,
+    )
+
+    assert "Merchant A" in reply["text"]
+    assert reply["text"].count("*連結：*資料未提供") == 2
+    assert "開啟連結" not in reply["text"]
+    assert [asset.url for asset in assets] == [None, None]
+    assert [citation.canonical_url for citation in citations] == [None, None]
+
+
+@pytest.mark.parametrize("damage", ["missing_artifacts", "missing_manifest", "hash_mismatch", "malformed_artifact"])
+def test_unavailable_overlay_authority_still_runs_the_normal_slack_audit(monkeypatch, tmp_path, damage):
+    _assets, _citations, answer = _structured_answer()
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_output_preview._repository_root",
+        lambda: _damaged_repository_root(tmp_path, damage),
+    )
+    audit_path = tmp_path / "audit.csv"
+
+    reply = handle_slack_event(
+        {"text": "Merchant A", "channel": "C123", "user": "U123", "ts": "10"},
+        config=SlackConfig(allowed_channel_ids=["C123"], enable_approved_asset_urls=True),
+        ask_fn=lambda *args, **kwargs: answer,
+        audit_log_path=audit_path,
+    )
+
+    rows = _audit_rows(audit_path)
+    assert [row[1] for row in rows] == [APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE, "slack_qa"]
+    assert all(len(row) == len(SLACK_AUDIT_HEADER) for row in rows)
+    assert rows[0][-1] == ""
+    assert "開啟連結" not in reply["text"]
+
+
+@pytest.mark.parametrize("damage", ["missing_artifacts", "missing_manifest", "hash_mismatch", "malformed_artifact"])
+def test_overlay_failure_never_leaks_paths_hashes_or_internals_to_slack(monkeypatch, tmp_path, damage):
+    _assets, _citations, answer = _structured_answer()
+    root = _damaged_repository_root(tmp_path, damage)
+    monkeypatch.setattr("marketing_knowledge_agent.slack_output_preview._repository_root", lambda: root)
 
     reply = handle_slack_event(
         {"text": "Merchant A", "channel": "C123", "user": "U123", "ts": "10"},
@@ -416,10 +491,115 @@ def test_opted_in_slack_reply_uses_approved_asset_links_only(monkeypatch, tmp_pa
         audit_log_path=tmp_path / "audit.csv",
     )
 
-    assert "*連結：*<https://example.com/article|開啟連結>" in reply["text"]
-    assert "*連結：*<https://example.com/video|開啟連結>" in reply["text"]
-    assert [asset.url for asset in assets] == ["https://example.com/article", "https://example.com/video"]
-    assert [citation.canonical_url for citation in citations] == ["https://example.com/article", "https://example.com/video"]
+    text = reply["text"]
+    for leak in (str(root), "sha256", "manifest", "asset_apply_preview", "Traceback", "attacker.example"):
+        assert leak not in text
+
+
+def test_feature_off_never_touches_the_approved_url_authority(monkeypatch, tmp_path):
+    _assets, _citations, answer = _structured_answer()
+
+    def fail(*args, **kwargs):
+        raise AssertionError("approved URL authority must not be consulted while the flag is OFF")
+
+    monkeypatch.setattr("marketing_knowledge_agent.slack_interface.load_pinned_approved_asset_url_overlay", fail)
+    audit_path = tmp_path / "audit.csv"
+
+    reply = handle_slack_event(
+        {"text": "Merchant A", "channel": "C123", "user": "U123", "ts": "10"},
+        config=SlackConfig(allowed_channel_ids=["C123"]),
+        ask_fn=lambda *args, **kwargs: answer,
+        audit_log_path=audit_path,
+    )
+
+    assert reply["text"].count("*連結：*資料未提供") == 2
+    assert [row[1] for row in _audit_rows(audit_path)] == ["slack_qa"]
+
+
+@pytest.mark.parametrize("value", ["true", "false", "1", "0", 1, 0, "yes", "on", [], {}, None])
+def test_non_boolean_feature_flag_is_rejected_instead_of_coerced(tmp_path, value):
+    """Mutation M4: replacing the strict isinstance check with bool(value) must be caught."""
+    path = tmp_path / "slack.json"
+    path.write_text(
+        json.dumps({"allowed_channel_ids": ["C123"], "enable_approved_asset_urls": value}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SlackInterfaceError, match="enable_approved_asset_urls"):
+        load_slack_config(path)
+
+
+@pytest.mark.parametrize(("payload", "expected"), [({}, False), ({"enable_approved_asset_urls": False}, False), ({"enable_approved_asset_urls": True}, True)])
+def test_feature_flag_defaults_off_and_only_real_booleans_switch_it(tmp_path, payload, expected):
+    path = tmp_path / "slack.json"
+    path.write_text(json.dumps(dict({"allowed_channel_ids": ["C123"]}, **payload)), encoding="utf-8")
+
+    assert load_slack_config(path).enable_approved_asset_urls is expected
+
+
+def _structured_answer():
+    assets = [
+        StructuredAsset(
+            asset_type=asset_type,
+            title=title,
+            external_usage_status="可對外引用",
+            source_record_id="Sheet:r8",
+            source_sheet="Sheet",
+            source_row=8,
+            citation_label=label,
+        )
+        for asset_type, title, label in (("article", "Article", "[1]"), ("video", "Video", "[2]"))
+    ]
+    citations = [_citation("Article", "[1]"), _citation("Video", "[2]")]
+    for citation, asset_type in zip(citations, ("article", "video")):
+        citation.source_sheet = "Sheet"
+        citation.source_row = 8
+        citation.record_type = "merchant_case"
+        citation.chunk_id = f"chunk-r8:{asset_type}"
+    structured = StructuredRetrievalResult(
+        query_plan={"raw_query": "Merchant A", "supported_constraints": []},
+        matched_entities=[StructuredEntity(entity_type="merchant", entity_name="Merchant A", assets=assets)],
+        total_entities=1,
+        total_assets=2,
+    )
+    answer = GeneratedAnswer(
+        question="Merchant A",
+        answer="unused",
+        citations=citations,
+        warnings=[],
+        governance_checked=True,
+        structured_result=structured,
+    )
+    return assets, citations, answer
+
+
+def _damaged_repository_root(tmp_path, damage):
+    """Build a repository root whose approved URL authority is unusable in one specific way."""
+    root = tmp_path / f"root-{damage}"
+    manifest_source = Path(__file__).resolve().parents[1] / AUTHORITY_MANIFEST_RELATIVE_PATH
+    manifest_path = root / AUTHORITY_MANIFEST_RELATIVE_PATH
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_bytes(manifest_source.read_bytes())
+    if damage == "missing_manifest":
+        manifest_path.unlink()
+        return root
+    if damage == "missing_artifacts":
+        return root
+    for relative in APPROVED_ASSET_URL_INPUTS:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "record_id,asset_id,field\n" if damage == "malformed_artifact" else "tampered",
+            encoding="utf-8",
+        )
+    return root
+
+
+def _audit_rows(path):
+    with Path(path).open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle))
+    assert rows[0] == SLACK_AUDIT_HEADER
+    return rows[1:]
 
 
 class FakeSlackClient:

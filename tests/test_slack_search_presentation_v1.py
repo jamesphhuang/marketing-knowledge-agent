@@ -223,6 +223,63 @@ def test_unsafe_or_malformed_urls_are_not_renderable(value):
     assert canonicalize_url(value) is None
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/a&gt;&lt;https://evil.example&gt;",
+        "https://example.com/a&#62;&#60;https://evil.example",
+        "https://example.com/a&#x3e;&#x3c;https://evil.example",
+        "https://example.com/a&amp;foo=bar",
+        "https://example.com/a\\b",
+        "https://example.com/a&LT;b",
+        "https://example.com/a&#X3E;b",
+        "https://example.com/a&verbar;b",
+    ],
+)
+def test_entity_or_escape_breakout_url_is_never_rendered_as_a_clickable_link(url):
+    answer = _answer("query", [_entity("Brand", [_asset("article", "Story", row=32, url=url)])])
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+
+    assert "> *連結：*資料未提供" in text
+    assert "開啟連結" not in text
+    assert "evil.example" not in text
+
+
+def test_legitimate_query_separators_render_as_one_escaped_clickable_link():
+    answer = _answer(
+        "query",
+        [
+            _asset_entity(
+                "Brand",
+                "https://www.youtube.com/watch?v=X&list=Y&index=1",
+            )
+        ],
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+
+    assert "> *連結：*<https://www.youtube.com/watch?index=1&amp;list=Y&amp;v=X|開啟連結>" in text
+    assert text.count("|開啟連結>") == 1
+    assert text.count("<https://") == 1
+    # Nothing outside the single link construct may carry a raw mrkdwn delimiter.
+    assert "&list=" not in text
+    assert "&index=" not in text
+
+
+def test_rendered_link_construct_never_contains_a_bare_ampersand():
+    answer = _answer(
+        "query",
+        [_asset_entity("Brand", "https://example.com/a?x=1&y=2")],
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+    link = text.split("> *連結：*", 1)[1].splitlines()[0]
+
+    assert link == "<https://example.com/a?x=1&amp;y=2|開啟連結>"
+    assert link.count("<") == 1 and link.count(">") == 1
+
+
 def test_same_canonical_url_from_multiple_allowed_rows_lists_sorted_sources_once():
     answer = _answer(
         "query",
@@ -369,6 +426,10 @@ def _entity(
         interview_year=interview_year,
         assets=assets,
     )
+
+
+def _asset_entity(name, url):
+    return _entity(name, [_asset("article", "Story", row=32, url=url)])
 
 
 def _asset(asset_type, title, *, row, url="https://example.com/content", publish_date="2024-01-01"):

@@ -16,16 +16,16 @@ from .models import SearchFilters
 from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, agent_ask
 from .slack_output_preview import (
     apply_approved_asset_url_overlay,
-    load_asset_url_overlay,
+    load_pinned_approved_asset_url_overlay,
 )
 from .slack_presentation import format_structured_slack_reply
 
 
 DEFAULT_SLACK_CONFIG_PATH = Path(".mka/slack_config.json")
 DEFAULT_SLACK_AUDIT_LOG = Path("reports/audit_log.csv")
-DEFAULT_ASSET_URL_APPLY_PREVIEW_PATH = Path("reports/asset_metadata_apply_preview/asset_apply_preview.csv")
-DEFAULT_ASSET_URL_BLOCKED_PREVIEW_PATH = Path("reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv")
-DEFAULT_ASSET_URL_DECISIONS_PATH = Path("reports/asset_metadata_preview/human_review_template.csv")
+# Payload-free audit code recorded when approved URL authority cannot be verified. It carries no
+# path, hash, exception text or CSV content, and is never shown to the Slack user.
+APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE = "APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE"
 DENIED_CHANNEL_MESSAGE = "此頻道未啟用行銷知識查詢"
 ANSWER_TRUNCATION_NOTICE = "(內容過長已截斷,完整結果請用內部工具查詢)"
 SLACK_NO_RESULTS_MESSAGE = "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
@@ -124,10 +124,23 @@ def handle_slack_event(
         llm_audit_log_path=Path(audit_log_path),
         query_audit_metadata={"channel_id": channel_id, "user_id": user_id},
     )
-    if config.enable_approved_asset_urls:
-        _apply_approved_asset_urls(answer)
     is_denylist_refusal = getattr(getattr(answer, "trace", None), "mode", None) == "refused"
+    overlay_issue = (
+        _apply_approved_asset_urls(answer)
+        if config.enable_approved_asset_urls and not is_denylist_refusal
+        else None
+    )
     if not is_denylist_refusal:
+        if overlay_issue is not None:
+            _append_slack_audit(
+                audit_log_path,
+                event=overlay_issue,
+                channel_id=channel_id,
+                user_id=user_id,
+                citation_count=0,
+                warning_count=0,
+                query="",
+            )
         _append_slack_audit(
             audit_log_path,
             event="slack_qa",
@@ -140,16 +153,19 @@ def handle_slack_event(
     return _reply_dict(channel_id, thread_ts, format_slack_reply(answer, config.max_answer_chars))
 
 
-def _apply_approved_asset_urls(answer) -> None:
+def _apply_approved_asset_urls(answer) -> Optional[str]:
+    """Enrich an already-governed answer with approved asset URLs, or fail closed.
+
+    Missing, malformed, unpinned or hash-mismatched authority never aborts the Slack query: the
+    overlay is simply not applied and a payload-free audit code is returned. ValueError covers
+    SlackOutputPreviewError, json.JSONDecodeError and UnicodeDecodeError.
+    """
     try:
-        overlay = load_asset_url_overlay(
-            DEFAULT_ASSET_URL_APPLY_PREVIEW_PATH,
-            DEFAULT_ASSET_URL_BLOCKED_PREVIEW_PATH,
-            DEFAULT_ASSET_URL_DECISIONS_PATH,
-        )
-    except (OSError, csv.Error):
-        return
-    apply_approved_asset_url_overlay(answer, overlay)
+        overlay = load_pinned_approved_asset_url_overlay()
+        apply_approved_asset_url_overlay(answer, overlay)
+    except (OSError, csv.Error, ValueError):
+        return APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE
+    return None
 
 
 def format_slack_reply(answer, max_answer_chars: int) -> str:

@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,24 @@ from marketing_knowledge_agent.query_planning import (
     build_query_plan,
     metadata_matches_query_plan,
     normalize_query_text,
+)
+from marketing_knowledge_agent.slack_interface import (
+    SlackConfig,
+    format_slack_reply,
+    handle_slack_event,
+)
+from marketing_knowledge_agent.slack_output_preview import (
+    APPROVED_ASSET_URL_APPLY_PREVIEW,
+    APPROVED_ASSET_URL_INPUTS,
+    AUTHORITY_MANIFEST_RELATIVE_PATH,
+    apply_approved_asset_url_overlay,
+    load_pinned_approved_asset_url_overlay,
+)
+
+
+_APPROVED_URL_ARTIFACTS_AVAILABLE = all(
+    (Path(__file__).resolve().parents[1] / relative).is_file()
+    for relative in APPROVED_ASSET_URL_INPUTS
 )
 
 
@@ -393,6 +412,79 @@ def test_structured_renderer_omits_empty_asset_sections_and_preserves_traceabili
     assert "資料來源：商家夥伴案例資料庫 r8" in answer.answer
     assert all(citation.source_sheet and citation.source_row for citation in answer.citations)
     assert all(citation.canonical_url is None for citation in answer.citations)
+
+
+@pytest.mark.skipif(
+    not _APPROVED_URL_ARTIFACTS_AVAILABLE,
+    reason="pinned approved asset URL artifacts are not present in this checkout",
+)
+def test_pinned_approved_urls_give_each_asset_its_own_source_backed_link(tmp_path):
+    """Local acceptance: only the genuine hash-pinned artifacts may produce asset URLs."""
+    db_path = _build_index(tmp_path)
+    answer = ask_index("我要尋找三風製麵的案例", db_path, limit=5)
+
+    applied = apply_approved_asset_url_overlay(answer, load_pinned_approved_asset_url_overlay())
+
+    assets = {
+        asset.asset_type: asset
+        for entity in answer.structured_result.matched_entities
+        for asset in entity.assets
+    }
+    assert applied == 2
+    assert assets["article"].url == "https://blog.shopline.tw/merchant-showcase-shanfeng/"
+    assert assets["video"].url == "https://www.youtube.com/watch?v=WIMy_AFA0pE"
+    assert "merchant-generic" not in assets["article"].url + assets["video"].url
+
+    by_label = {citation.label: citation for citation in answer.citations}
+    for asset in assets.values():
+        assert by_label[asset.citation_label].canonical_url == asset.url
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+    assert "> *連結：*<https://blog.shopline.tw/merchant-showcase-shanfeng/|開啟連結>" in text
+    assert "> *連結：*<https://www.youtube.com/watch?v=WIMy_AFA0pE|開啟連結>" in text
+    assert text.count("|開啟連結>") == 2
+
+
+@pytest.mark.skipif(
+    not _APPROVED_URL_ARTIFACTS_AVAILABLE,
+    reason="pinned approved asset URL artifacts are not present in this checkout",
+)
+def test_one_byte_mutation_of_a_pinned_artifact_removes_every_asset_url(tmp_path, monkeypatch):
+    db_path = _build_index(tmp_path)
+    root = _mutated_pinned_root(tmp_path)
+    monkeypatch.setattr("marketing_knowledge_agent.slack_output_preview._repository_root", lambda: root)
+    answer = ask_index("我要尋找三風製麵的案例", db_path, limit=5)
+    audit_path = tmp_path / "audit.csv"
+
+    reply = handle_slack_event(
+        {"text": "我要尋找三風製麵的案例", "channel": "C123", "user": "U123", "ts": "10"},
+        config=SlackConfig(allowed_channel_ids=["C123"], enable_approved_asset_urls=True),
+        ask_fn=lambda *args, **kwargs: answer,
+        audit_log_path=audit_path,
+    )
+
+    assets = [asset for entity in answer.structured_result.matched_entities for asset in entity.assets]
+    assert assets and all(asset.url is None for asset in assets)
+    assert all(citation.canonical_url is None for citation in answer.citations)
+    assert "三風製麵" in reply["text"]
+    assert "開啟連結" not in reply["text"]
+    assert reply["text"].count("*連結：*資料未提供") == len(assets)
+    assert "slack_qa" in audit_path.read_text(encoding="utf-8")
+
+
+def _mutated_pinned_root(tmp_path):
+    """Copy the pinned artifacts into a scratch root and flip a single byte in one of them."""
+    source = Path(__file__).resolve().parents[1]
+    root = tmp_path / "mutated-root"
+    for relative in (AUTHORITY_MANIFEST_RELATIVE_PATH,) + tuple(APPROVED_ASSET_URL_INPUTS):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((source / relative).read_bytes())
+    target = root / APPROVED_ASSET_URL_APPLY_PREVIEW
+    payload = bytearray(target.read_bytes())
+    payload[-1] = payload[-1] ^ 0x01
+    target.write_bytes(bytes(payload))
+    return root
 
 
 def test_parent_record_status_is_not_copied_to_structured_assets(tmp_path):
