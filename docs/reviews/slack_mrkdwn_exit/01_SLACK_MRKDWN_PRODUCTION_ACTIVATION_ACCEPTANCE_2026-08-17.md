@@ -122,8 +122,11 @@ followed it ever bolded correctly.
 4. In code-span context, a dynamic backtick is replaced with U+02CB (`ˋ`) instead of a
    backslash escape. Slack has no backslash escape, so the previous `` \` `` reached the user
    as a literal backslash while still closing the code span early.
-5. The `資料來源` value now passes through `_normal_text` — the same escaping boundary as
-   every other dynamic value. It was previously rendered unescaped.
+5. The `資料來源` value now passes through `_normal_text` — the normal-text escaping boundary
+   used by the free-form dynamic asset fields. It was previously rendered unescaped. `對外引用`
+   is deliberately not in that group: it renders a fixed string produced by
+   `_external_usage_label`, not free-form dynamic text, so it is not described here as an
+   escaped dynamic value.
 6. `& < >` entity escaping is unchanged, so dynamic text still cannot construct a Slack
    hyperlink.
 
@@ -135,12 +138,31 @@ This count was re-derived here by reading the added parametrize lists, and match
 recorded by the independent review.
 
 The four parametrized URL cases pin exactly the four approved asset URLs later exercised by
-the production smokes in sections 9 and 10.
+the production smokes in sections 9 and 10, with article and video pinned separately for each
+merchant.
 
-The edits to `tests/test_slack_interface.py` and `tests/test_typed_query_retrieval.py` are
-label-expectation realignments only. The surrounding assertions — occurrence counts, the
-absence of `開啟連結`, resolved URL lists, citation URLs, and audit rows — are unchanged
-(class A, confirmed by reading both diffs). No existing assertion was weakened or removed.
+**All three** test files carry label-expectation realignments matching the new formatter
+output — `tests/test_slack_search_presentation_v1.py` as well as
+`tests/test_slack_interface.py` and `tests/test_typed_query_retrieval.py`. The realignments
+are of the same kind in every file (`> *連結：*` → `> 連結：`, and the code-span backtick
+expectation from the previous backslash form to U+02CB).
+`tests/test_slack_search_presentation_v1.py` is the only one that *also* carries the new
+regression coverage described above; its pre-existing assertions were realigned alongside.
+
+Confirmed by reading all three diffs (class A):
+
+| Property | State |
+| --- | --- |
+| Existing assertion weakened or removed | NONE |
+| Test deleted | NONE |
+| `xfail` added | NONE |
+| `skipif` added | NONE — the two in `tests/test_typed_query_retrieval.py` are pre-existing and untouched |
+| Surrounding assertions — occurrence counts, absence of `開啟連結`, resolved URL lists, citation URLs, audit rows | UNCHANGED |
+| Article / video URL separation assertions | PRESERVED |
+
+One assertion was strengthened rather than weakened: alongside the realigned backtick
+expectation, a guard was added that no literal backslash-backtick sequence survives in the
+rendered output.
 
 ## 5. Independent Review Disposition
 
@@ -389,9 +411,22 @@ candidate.
 DYNAMIC_INLINE_MRKDWN_STYLING = KNOWN_NON_BLOCKING_RESIDUAL
 ```
 
-A dynamic value containing `*`, `_` or `~` can still apply inline styling to its own value
-line. Per the independent review (class B), this cannot forge a new field, cannot create an
-attacker-controlled Slack hyperlink, and cannot alter subsequent formatter-owned content.
+Dynamic mrkdwn-sensitive characters such as `*`, `_`, `~`, and the backtick may still affect
+the presentation of their own dynamic value in contexts where they are not structurally
+neutralized. `_mrkdwn_escape` neutralizes `& < >` and collapses line breaks and control
+characters, but it does not neutralize `*`, `_`, `~`, or a backtick; `_inline` additionally
+normalizes a backtick to U+02CB, so that one character is neutralized only in code-span
+context.
+
+Per the independent review (class B), a dynamic `*`, `_` or `~` cannot forge a new field,
+cannot create an attacker-controlled Slack hyperlink, and cannot alter subsequent
+formatter-owned content.
+
+The backtick is enumerated here for completeness of the residual list. It is **not** a
+security defect introduced by this candidate: the predecessor emitted a backslash-escaped
+form that left the backtick mrkdwn-active and merely added a visible backslash, so the
+candidate changes the visible artifact and not the character's reach. Like the rest of this
+residual, it is pre-existing and non-blocking, and it is not fixed here.
 
 ### 12.2 `merchant_handle` schema has no delimiter constraint
 
@@ -406,21 +441,47 @@ HANDLE_SALES_CATEGORY_FORMATTING = KNOWN_NON_BLOCKING_RESIDUAL
 ```
 
 The operator observed emphasis markers still visible around the merchant metadata lines in
-production output (class C), reported as:
+production output (class C). The operator's report represented those lines as:
 
 ```text
-Handle：shanfeng
-Sales Category LV1：美食
-Sales Category LV2：食品/飲料
+*Handle：shanfeng*
+*Sales Category LV1：美食*
+*Sales Category LV2：食品/飲料*
 ```
 
 and the corresponding 怡和家電 lines.
 
 Repository inspection (class A) shows these three lines are emitted at
-`src/marketing_knowledge_agent/slack_presentation.py:177-179` wrapped in `_ … _` italic
-markers via `_label_value(...)`, not in the `*` bold markers this sprint removed. The exact
-marker character transcribed in the operator report and the marker character the formatter
-emits therefore differ; the disposition is unaffected either way.
+`src/marketing_knowledge_agent/slack_presentation.py:177-179` via `_label_value(...)`, wrapped
+in `_ … _` italic markers rather than the `*` bold markers this sprint removed:
+
+```text
+_Handle：…_
+_Sales Category LV1：…_
+_Sales Category LV2：…_
+```
+
+These are two different kinds of evidence. They are recorded side by side, and neither is
+rewritten into the other:
+
+| Evidence | Marker as recorded | Class |
+| --- | --- | --- |
+| Operator transcript representation | `* … *` | C — operator-observed production |
+| Repository formatter source | `_ … _` | A — repository-verified |
+
+The marker character in the operator's transcript and the marker character the formatter
+emits therefore differ.
+
+```text
+HANDLE_METADATA_MARKER_DISCREPANCY = NON_BLOCKING_DOCUMENTED_DISCREPANCY
+```
+
+This record does **not** resolve that difference, and it does **not** claim which marker Slack
+finally renders to the user — neither `*` nor `_` is asserted here as the runtime-rendered
+form. The transcript may have normalized the emphasis it displayed, or the representation may
+have changed anywhere between the formatter and the operator's report; no evidence in this
+record settles which. The discrepancy is disclosed and left open, not adjudicated, and the
+disposition below is unaffected either way.
 
 This is a **separate, pre-existing merchant-metadata presentation boundary**. It is not one
 of the seven asset field labels in this sprint's scope, and it is **not** a regression
@@ -542,9 +603,10 @@ PRODUCTION_BOT_SINGLE_PROCESS_AFTER_RESTART = PASS
 
 SECRETS_EXPOSED = NO
 
-HANDLE_SALES_CATEGORY_FORMATTING = KNOWN_NON_BLOCKING_RESIDUAL
-DYNAMIC_INLINE_MRKDWN_STYLING    = KNOWN_NON_BLOCKING_RESIDUAL
-MERCHANT_HANDLE_DELIMITER_SCHEMA = KNOWN_NON_BLOCKING_RESIDUAL
+HANDLE_SALES_CATEGORY_FORMATTING   = KNOWN_NON_BLOCKING_RESIDUAL
+HANDLE_METADATA_MARKER_DISCREPANCY = NON_BLOCKING_DOCUMENTED_DISCREPANCY
+DYNAMIC_INLINE_MRKDWN_STYLING      = KNOWN_NON_BLOCKING_RESIDUAL
+MERCHANT_HANDLE_DELIMITER_SCHEMA   = KNOWN_NON_BLOCKING_RESIDUAL
 
 PREVIOUS_P3_FOLLOW_UP_ITEM_5 = CLOSED
 
