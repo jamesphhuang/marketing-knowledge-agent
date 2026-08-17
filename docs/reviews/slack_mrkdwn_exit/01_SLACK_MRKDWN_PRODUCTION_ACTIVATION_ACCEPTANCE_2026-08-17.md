@@ -141,13 +141,19 @@ The four parametrized URL cases pin exactly the four approved asset URLs later e
 the production smokes in sections 9 and 10, with article and video pinned separately for each
 merchant.
 
-**All three** test files carry label-expectation realignments matching the new formatter
-output — `tests/test_slack_search_presentation_v1.py` as well as
-`tests/test_slack_interface.py` and `tests/test_typed_query_retrieval.py`. The realignments
-are of the same kind in every file (`> *連結：*` → `> 連結：`, and the code-span backtick
-expectation from the previous backslash form to U+02CB).
-`tests/test_slack_search_presentation_v1.py` is the only one that *also* carries the new
-regression coverage described above; its pre-existing assertions were realigned alongside.
+**All three** test files carry label-expectation realignments corresponding to the formatter
+output change — `tests/test_slack_search_presentation_v1.py` as well as
+`tests/test_slack_interface.py` and `tests/test_typed_query_retrieval.py`. Those
+realignments drop the bold markers from the label, for example `*連結：*` → `連結：`. The
+surrounding assertion forms differ, and the `> ` blockquote prefix appears in some of the
+realigned assertions but not all, so it is not a universal property of them.
+
+`tests/test_slack_search_presentation_v1.py` additionally carries the code-span backtick
+expectation realignment, from the previous backslash form to U+02CB, together with a
+strengthened guard asserting that the old backslash-backtick form is absent from the
+rendered output. The other two test files carry no backtick-specific realignment. That file
+is also the only one that carries the new regression coverage described above; its
+pre-existing assertions were realigned alongside.
 
 Confirmed by reading all three diffs (class A):
 
