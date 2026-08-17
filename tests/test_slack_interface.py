@@ -24,9 +24,10 @@ from marketing_knowledge_agent.models import (
     StructuredEntity,
     StructuredRetrievalResult,
 )
+from marketing_knowledge_agent import slack_output_preview
 from marketing_knowledge_agent.slack_output_preview import (
     APPROVED_ASSET_URL_INPUTS,
-    AUTHORITY_MANIFEST_RELATIVE_PATH,
+    AUTHORITY_MANIFEST_FILENAME,
     AssetUrlOverlay,
     AssetUrlRecord,
 )
@@ -413,8 +414,8 @@ def test_opted_in_slack_reply_uses_approved_asset_links_only(monkeypatch, tmp_pa
         }
     )
     monkeypatch.setattr(
-        "marketing_knowledge_agent.slack_interface.load_pinned_approved_asset_url_overlay",
-        lambda: overlay,
+        "marketing_knowledge_agent.slack_interface.load_index_bound_approved_asset_url_overlay",
+        lambda _db_path: overlay,
     )
     audit_path = tmp_path / "audit.csv"
 
@@ -436,7 +437,7 @@ def test_overlay_authority_failure_fails_closed_without_aborting_the_slack_query
     """F-03: feature ON with unavailable authority must not raise past the Slack response path."""
     assets, citations, answer = _structured_answer()
     monkeypatch.setattr(
-        "marketing_knowledge_agent.slack_output_preview._repository_root",
+        "marketing_knowledge_agent.slack_output_preview._authority_root",
         lambda: tmp_path / "no-such-repository-root",
     )
     audit_path = tmp_path / "audit.csv"
@@ -459,8 +460,8 @@ def test_overlay_authority_failure_fails_closed_without_aborting_the_slack_query
 def test_unavailable_overlay_authority_still_runs_the_normal_slack_audit(monkeypatch, tmp_path, damage):
     _assets, _citations, answer = _structured_answer()
     monkeypatch.setattr(
-        "marketing_knowledge_agent.slack_output_preview._repository_root",
-        lambda: _damaged_repository_root(tmp_path, damage),
+        "marketing_knowledge_agent.slack_output_preview._authority_root",
+        lambda: _damaged_authority_root(tmp_path, damage),
     )
     audit_path = tmp_path / "audit.csv"
 
@@ -481,8 +482,8 @@ def test_unavailable_overlay_authority_still_runs_the_normal_slack_audit(monkeyp
 @pytest.mark.parametrize("damage", ["missing_artifacts", "missing_manifest", "hash_mismatch", "malformed_artifact"])
 def test_overlay_failure_never_leaks_paths_hashes_or_internals_to_slack(monkeypatch, tmp_path, damage):
     _assets, _citations, answer = _structured_answer()
-    root = _damaged_repository_root(tmp_path, damage)
-    monkeypatch.setattr("marketing_knowledge_agent.slack_output_preview._repository_root", lambda: root)
+    root = _damaged_authority_root(tmp_path, damage)
+    monkeypatch.setattr("marketing_knowledge_agent.slack_output_preview._authority_root", lambda: root)
 
     reply = handle_slack_event(
         {"text": "Merchant A", "channel": "C123", "user": "U123", "ts": "10"},
@@ -502,7 +503,9 @@ def test_feature_off_never_touches_the_approved_url_authority(monkeypatch, tmp_p
     def fail(*args, **kwargs):
         raise AssertionError("approved URL authority must not be consulted while the flag is OFF")
 
-    monkeypatch.setattr("marketing_knowledge_agent.slack_interface.load_pinned_approved_asset_url_overlay", fail)
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_interface.load_index_bound_approved_asset_url_overlay", fail
+    )
     audit_path = tmp_path / "audit.csv"
 
     reply = handle_slack_event(
@@ -573,11 +576,15 @@ def _structured_answer():
     return assets, citations, answer
 
 
-def _damaged_repository_root(tmp_path, damage):
-    """Build a repository root whose approved URL authority is unusable in one specific way."""
+def _damaged_authority_root(tmp_path, damage):
+    """Build an authority directory whose approved URL authority is unusable in one specific way."""
     root = tmp_path / f"root-{damage}"
-    manifest_source = Path(__file__).resolve().parents[1] / AUTHORITY_MANIFEST_RELATIVE_PATH
-    manifest_path = root / AUTHORITY_MANIFEST_RELATIVE_PATH
+    manifest_source = (
+        Path(slack_output_preview.__file__).resolve().parent
+        / slack_output_preview.AUTHORITY_PACKAGE_RELATIVE_DIR
+        / AUTHORITY_MANIFEST_FILENAME
+    )
+    manifest_path = root / AUTHORITY_MANIFEST_FILENAME
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_bytes(manifest_source.read_bytes())
     if damage == "missing_manifest":
@@ -589,7 +596,7 @@ def _damaged_repository_root(tmp_path, damage):
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
-            "record_id,asset_id,field\n" if damage == "malformed_artifact" else "tampered",
+            "asset_identity,field,url\n" if damage == "malformed_artifact" else "tampered",
             encoding="utf-8",
         )
     return root

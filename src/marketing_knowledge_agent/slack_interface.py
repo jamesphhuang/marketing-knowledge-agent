@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ from .models import SearchFilters
 from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, agent_ask
 from .slack_output_preview import (
     apply_approved_asset_url_overlay,
-    load_pinned_approved_asset_url_overlay,
+    load_index_bound_approved_asset_url_overlay,
 )
 from .slack_presentation import format_structured_slack_reply
 
@@ -126,7 +127,7 @@ def handle_slack_event(
     )
     is_denylist_refusal = getattr(getattr(answer, "trace", None), "mode", None) == "refused"
     overlay_issue = (
-        _apply_approved_asset_urls(answer)
+        _apply_approved_asset_urls(answer, db_path)
         if config.enable_approved_asset_urls and not is_denylist_refusal
         else None
     )
@@ -153,17 +154,20 @@ def handle_slack_event(
     return _reply_dict(channel_id, thread_ts, format_slack_reply(answer, config.max_answer_chars))
 
 
-def _apply_approved_asset_urls(answer) -> Optional[str]:
+def _apply_approved_asset_urls(answer, db_path) -> Optional[str]:
     """Enrich an already-governed answer with approved asset URLs, or fail closed.
 
-    Missing, malformed, unpinned or hash-mismatched authority never aborts the Slack query: the
-    overlay is simply not applied and a payload-free audit code is returned. ValueError covers
-    SlackOutputPreviewError, json.JSONDecodeError and UnicodeDecodeError.
+    Missing, malformed, unpinned or hash-mismatched authority never aborts the Slack query, and
+    neither does an authority that no longer binds to the content index it was built against: the
+    overlay is simply not applied and one payload-free audit code is returned. The causes are
+    deliberately not distinguished here -- the distinction is a diagnostic detail, not something a
+    Slack channel should learn. ValueError covers SlackOutputPreviewError (including
+    ApprovedAssetUrlIndexBindingError), json.JSONDecodeError and UnicodeDecodeError.
     """
     try:
-        overlay = load_pinned_approved_asset_url_overlay()
+        overlay = load_index_bound_approved_asset_url_overlay(Path(db_path))
         apply_approved_asset_url_overlay(answer, overlay)
-    except (OSError, csv.Error, ValueError):
+    except (OSError, csv.Error, ValueError, sqlite3.Error):
         return APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE
     return None
 

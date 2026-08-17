@@ -5,6 +5,8 @@ import hashlib
 import io
 import json
 import re
+import sqlite3
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +21,7 @@ from .query_planning import FIELD_REGISTRY
 from .query_gating import RESTRICTED_QUERY_REFUSAL
 from .slack_output_preview_reports import write_slack_output_preview_reports
 from .slack_presentation import escape_mrkdwn_url, url_is_mrkdwn_safe
+from .structured_results import ASSET_FIELDS
 
 
 SAMPLE_QUERIES = (
@@ -39,17 +42,96 @@ ALLOWED_OVERLAY_FIELDS = {"asset_url", "canonical_url"}
 MAX_DISPLAY_ENTITIES = 5
 MAX_DISPLAY_ASSETS = 10
 MAX_TITLE_CHARS = 160
-# The tracked manifest is the only authority for "approved" asset URL artifacts. Writable CSV
-# columns such as reviewer/review_decision/eligibility cannot self-attest without it.
-AUTHORITY_MANIFEST_RELATIVE_PATH = "tests/fixtures/historical_inputs_manifest.json"
-APPROVED_ASSET_URL_APPLY_PREVIEW = "reports/asset_metadata_apply_preview/asset_apply_preview.csv"
-APPROVED_ASSET_URL_BLOCKED_PREVIEW = "reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv"
-APPROVED_ASSET_URL_DECISIONS = "reports/asset_metadata_preview/human_review_template.csv"
-APPROVED_ASSET_URL_INPUTS = (
-    APPROVED_ASSET_URL_APPLY_PREVIEW,
-    APPROVED_ASSET_URL_BLOCKED_PREVIEW,
-    APPROVED_ASSET_URL_DECISIONS,
-)
+# The tracked manifest is the only authority for "approved" asset URL artifacts. A row that says
+# "approve" is never sufficient on its own: authority comes from the tracked manifest identity, the
+# cryptographic binding of each artifact, the recorded provenance of the human-reviewed sources the
+# bundle was derived from, and the runtime governance still enforced on every asset.
+#
+# The bundle is runtime package data, not a test fixture: it ships inside the installed package, so
+# a wheel/non-editable deployment carries the same authority a source checkout does.
+#
+# It is a deliberately sanitized projection, never a copy of the human-review source. The reviewed
+# reports stay local and ignored; only the minimum needed to attach an approved URL to one asset is
+# packaged. tools/build_approved_asset_url_authority.py derives it.
+AUTHORITY_PACKAGE_RELATIVE_DIR = "authority/approved_asset_urls"
+AUTHORITY_MANIFEST_FILENAME = "manifest.json"
+APPROVED_ASSET_URL_VALUES = "approved_urls.csv"
+# The packaged authority carries approved URLs only. A blocked-asset inventory is deliberately NOT
+# shipped: it is redundant for URL enrichment (an approved URL and a blocked asset are disjoint by
+# construction, enforced at build time) and its identities would be the only payload those rows
+# carry, which makes them a pure disclosure of which assets are restricted. Blocked assets stay
+# excluded at build time and remain governed at runtime by the external-use contract below.
+APPROVED_ASSET_URL_INPUTS = (APPROVED_ASSET_URL_VALUES,)
+# Strict positive allowlist. Runtime rejects any artifact whose header is not exactly this, so a
+# new authority column cannot reach a deployment without being reviewed first.
+APPROVED_ASSET_URL_VALUE_COLUMNS = ("asset_identity", "field", "url")
+# Domain-separated join identity, derived ONLY from fields that are already published to the same
+# external audience as the URL itself: the entity's public name, the asset's public title and the
+# asset type. All three are rendered next to the link in the Slack reply for exactly the assets that
+# receive one, so the identity discloses nothing the approved link does not already disclose.
+#
+# This is PSEUDONYMOUS_PUBLIC_DERIVED, not anonymous. It is enumerable by anyone who already holds
+# the same public brand/title/type triple -- and that is the point: recovering a preimage teaches
+# the holder nothing they did not have to know in order to attempt it. It deliberately excludes the
+# source workbook sheet, the source row, record_id and source_location, whose tiny, highly
+# structured domain made the previous derivation recoverable by brute force.
+APPROVED_ASSET_IDENTITY_NAMESPACE = "mka:approved-asset-url:v2:public"
+ASSET_IDENTITY_LENGTH = 32
+
+# --- index binding -------------------------------------------------------------------------
+#
+# The identity above is a pure function of mutable index content, so a static authority read
+# against a drifted index can attach the WRONG asset's URL: if one asset's indexed title becomes
+# another already-approved asset's title, it computes that asset's identity and inherits its link.
+# Omitting a link when the authority is stale is acceptable; attaching someone else's is not.
+#
+# The authority is therefore valid only against the exact content-identity surface it was built
+# against. The build records one aggregate digest over that surface; the runtime recomputes it from
+# the live index and refuses all enrichment on mismatch.
+#
+# Surface scope: every asset in the index whose public identity appears in the approved authority
+# (option B). Restricting it to authority-relevant assets keeps unrelated index churn from
+# switching links off, and costs nothing in safety -- an asset whose identity is not in the
+# authority cannot receive a URL, and the moment it drifts into an approved identity it joins the
+# surface and changes the digest. An approved asset absent from the index (r30) is simply never in
+# the surface, at build or at runtime, so it stays deterministic and harmless.
+INDEX_BINDING_NAMESPACE = "mka:approved-asset-url-index-binding:v1"
+INDEX_BINDING_SURFACE = "indexed_approved_assets"
+# Each input earns its place by a failure it alone detects:
+#   source_record_id  two assets swapping titles leaves the multiset of public triples unchanged;
+#                     only the coordinate->identity mapping reveals the reassignment.
+#   entity_name       part of the join identity; a rename must invalidate.
+#   title             part of the join identity; the mutable field that caused this regression.
+#   asset_type        part of the join identity; a type change must not resolve cross-type.
+INDEX_BINDING_INPUTS = ("source_record_id", "entity_name", "title", "asset_type")
+
+
+def approved_asset_identity(entity_name: object, title: object, asset_type: object) -> str:
+    """Derive the runtime join identity from the asset's externally published fields.
+
+    Returns "" when any component is missing, so an incomplete asset fails closed into "no URL"
+    instead of colliding with the identity of a differently-shaped one.
+    """
+    components = [
+        _identity_component(entity_name),
+        _identity_component(title),
+        _identity_component(asset_type),
+    ]
+    if not all(components):
+        return ""
+    payload = ":".join([APPROVED_ASSET_IDENTITY_NAMESPACE, *components]).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:ASSET_IDENTITY_LENGTH]
+
+
+def _identity_component(value: object) -> str:
+    """Normalise one identity component and make the separator unambiguous.
+
+    NFC only: two spellings of the same string must join, but case and width differences must not
+    be folded together, because a false join attaches one asset's approved URL to another asset.
+    Escaping ":" and "\\" keeps ("a:b", "c") distinct from ("a", "b:c").
+    """
+    text = unicodedata.normalize("NFC", _text(value))
+    return text.replace("\\", "\\\\").replace(":", "\\:")
 
 
 class SlackOutputPreviewError(ValueError):
@@ -60,14 +142,111 @@ class ApprovedAssetUrlAuthorityError(SlackOutputPreviewError):
     """Raised when approved asset URL artifacts are not bound to the tracked authority manifest."""
 
 
+class ApprovedAssetUrlIndexBindingError(ApprovedAssetUrlAuthorityError):
+    """Raised when the packaged authority is not bound to the live content index."""
+
+
+def index_asset_surface(db_path: Path) -> List[Tuple[str, str, str, str]]:
+    """Read the canonical (record, entity, title, type) surface straight from the content index.
+
+    Deliberately re-derived from the stored document metadata rather than from a retrieval result:
+    the binding must cover the whole index, not whatever one query happened to match, and it must
+    be reproducible identically by the build tool and by the runtime.
+    """
+    path = Path(db_path)
+    if path.is_symlink() or not path.is_file():
+        raise ApprovedAssetUrlIndexBindingError("content index is not available for binding")
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise ApprovedAssetUrlIndexBindingError("content index cannot be opened") from exc
+    try:
+        rows = connection.execute("SELECT id, title, metadata_json FROM documents").fetchall()
+    except sqlite3.Error as exc:
+        raise ApprovedAssetUrlIndexBindingError("content index cannot be read") from exc
+    finally:
+        connection.close()
+
+    surface: List[Tuple[str, str, str, str]] = []
+    for document_id, document_title, metadata_json in rows:
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise ApprovedAssetUrlIndexBindingError("content index metadata is unreadable") from exc
+        if not isinstance(metadata, Mapping) or metadata.get("record_type") != "merchant_case":
+            continue
+        source_sheet = metadata.get("source_sheet")
+        source_row = metadata.get("source_row")
+        record_id = (
+            f"{source_sheet}:r{source_row}"
+            if source_sheet and source_row is not None
+            else _text(document_id)
+        )
+        entity_name = _text(
+            metadata.get("brand_name")
+            or metadata.get("metric_name")
+            or metadata.get("title")
+            or document_title
+        )
+        for asset_type, field_name, _label in ASSET_FIELDS:
+            title = _text(metadata.get(field_name))
+            if title:
+                surface.append((record_id, entity_name, title, asset_type))
+    return surface
+
+
+def compute_index_binding_digest(
+    db_path: Path, approved_identities: Iterable[str]
+) -> Tuple[str, int]:
+    """Return the aggregate binding digest and the number of bound assets.
+
+    One digest over the whole sorted surface, never a per-record hash: recovering any single
+    source coordinate would require guessing every other record's coordinate and free-text title
+    simultaneously, so this cannot be dictionary-attacked the way per-row hashes could.
+    """
+    approved = set(approved_identities)
+    bound = sorted(
+        row
+        for row in index_asset_surface(db_path)
+        if approved_asset_identity(row[1], row[2], row[3]) in approved
+    )
+    digest = hashlib.sha256()
+    digest.update(f"{INDEX_BINDING_NAMESPACE}:{INDEX_BINDING_SURFACE}:{len(bound)}\n".encode("utf-8"))
+    for record_id, entity_name, title, asset_type in bound:
+        line = ":".join(
+            _identity_component(part) for part in (record_id, entity_name, title, asset_type)
+        )
+        digest.update(line.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest(), len(bound)
+
+
 @dataclass(frozen=True)
 class AssetUrlRecord:
     record_id: str
     asset_id: str
     field: str
     proposed_value: str
-    reviewer: str
-    reviewed_at: str
+    # Review attestation exists only on the local governance path. The packaged authority proves
+    # human review through manifest provenance instead of carrying reviewer identity.
+    reviewer: str = ""
+    reviewed_at: str = ""
+
+
+@dataclass(frozen=True)
+class AssetLookup:
+    """Everything a URL lookup may use, split by whether it is safe to publish.
+
+    ``record_id``/``asset_id`` are internal source coordinates: the local governance overlay joins
+    on them, and the packaged authority must never see them. ``entity_name``/``title``/``asset_type``
+    are published alongside the link itself, and are what the packaged authority joins on.
+    """
+
+    record_id: str
+    asset_id: str
+    entity_name: str
+    title: str
+    asset_type: str
 
 
 @dataclass
@@ -76,10 +255,41 @@ class AssetUrlOverlay:
     blocked_asset_ids: Set[str] = field(default_factory=set)
     errors: List[dict] = field(default_factory=list)
     warnings: List[dict] = field(default_factory=list)
+    # True when this overlay came from the packaged authority, which is keyed on the public-derived
+    # identity. The local governance overlay keeps joining on its own source coordinates.
+    identity_hashed: bool = False
+
+    def url(self, lookup: "AssetLookup", field_name: str) -> Optional[str]:
+        """Resolve one approved URL for one asset, under whichever identity this overlay uses."""
+        if self.identity_hashed:
+            identity = approved_asset_identity(
+                lookup.entity_name, lookup.title, lookup.asset_type
+            )
+            if not identity:
+                return None
+            key = (identity, identity, field_name)
+        else:
+            key = (lookup.record_id, lookup.asset_id, field_name)
+        record = self.values.get(key)
+        return record.proposed_value if record else None
 
     def value(self, record_id: str, asset_id: str, field_name: str) -> Optional[str]:
+        """Source-coordinate lookup, for the local governance overlay only."""
+        if self.identity_hashed:
+            raise SlackOutputPreviewError(
+                "the packaged authority has no source-coordinate identity; use url(AssetLookup, ...)"
+            )
         record = self.values.get((record_id, asset_id, field_name))
         return record.proposed_value if record else None
+
+    def is_blocked(self, asset_id: str) -> bool:
+        """Local governance blocking. The packaged authority ships no blocked inventory.
+
+        It does not need one: a blocked asset never carries an approved URL (enforced when the
+        bundle is built), so it simply has nothing to resolve, and every asset still passes the
+        external-use governance contract before any URL is attached.
+        """
+        return asset_id in self.blocked_asset_ids
 
 
 @dataclass
@@ -94,23 +304,91 @@ class SlackPreviewBundle:
 def load_pinned_approved_asset_url_overlay() -> AssetUrlOverlay:
     """Load approved asset URLs from repository-pinned, hash-verified artifacts.
 
-    This is the only entry point the Slack runtime may use. It deliberately takes no arguments:
-    the repository root, the manifest, the artifact paths and the expected hashes are all fixed,
-    so a caller cannot substitute writable CSV files that self-attest as approved. Any failure
-    raises ApprovedAssetUrlAuthorityError, which callers must treat as "no URL enrichment".
+    It deliberately takes no arguments: the packaged authority directory, the manifest, the artifact
+    names and the expected hashes are all fixed, so a caller cannot substitute writable CSV files
+    that self-attest as approved. Any failure raises ApprovedAssetUrlAuthorityError.
+
+    The packaged rows carry no approval columns to trust: a row is present only because the build
+    tool proved it satisfied the whole eligibility contract against hash-verified reviewed sources,
+    and the manifest records those source hashes. Adding a row means breaking an artifact hash,
+    which means editing the tracked manifest, which changes its bytes and self-integrity hash.
+
+    This checks the authority artifacts only. It does NOT check that the authority still matches the
+    content index, so the Slack runtime must not call it directly -- use
+    load_index_bound_approved_asset_url_overlay, which adds that check.
     """
-    apply_bytes, blocked_bytes, decision_bytes = _authorized_asset_url_inputs()
+    (approved_bytes,) = _authorized_asset_url_inputs()
     # Parsing the verified bytes, rather than re-reading the paths, keeps the artifact that was
     # hashed and the artifact that is parsed identical even under a concurrent rewrite.
-    return _build_asset_url_overlay(
-        _parse_pinned_csv(apply_bytes),
-        _parse_pinned_csv(blocked_bytes),
-        _parse_pinned_csv(decision_bytes),
+    return _build_packaged_asset_url_overlay(
+        _parse_pinned_csv(approved_bytes, APPROVED_ASSET_URL_VALUE_COLUMNS),
     )
 
 
-def _authorized_asset_url_inputs() -> Tuple[bytes, bytes, bytes]:
-    root = _repository_root()
+def load_index_bound_approved_asset_url_overlay(db_path: Path) -> AssetUrlOverlay:
+    """Load the packaged authority and refuse it unless it still binds to this content index.
+
+    This is the only entry point the Slack runtime may use. The authority itself is still not
+    caller-supplied; the single argument is the content index the answer was produced from, which
+    the caller already holds. A substituted index cannot forge approvals -- it can only fail the
+    binding, which fails enrichment closed.
+    """
+    overlay = load_pinned_approved_asset_url_overlay()
+    _verify_index_binding(Path(db_path), overlay)
+    return overlay
+
+
+def _verify_index_binding(db_path: Path, overlay: AssetUrlOverlay) -> None:
+    """Recompute the binding digest for this index and compare it with the pinned one.
+
+    WHEN_BINDING_IS_VERIFIED   on every feature-ON enrichment attempt, with no exceptions. There is
+                               deliberately no memo: a previously successful verification never
+                               lets a later request skip this check.
+    WHY_NO_CACHE               any cache must be keyed on something cheaper than the content it
+                               stands for, and no such key is sound here. A stat fingerprint of the
+                               main database file is stable across a WAL commit -- the writer
+                               appends to "-wal" and the main file's size and mtime do not move --
+                               so a memo keyed on it serves a stale "verified" answer while
+                               retrieval already sees the new content, which is exactly how one
+                               asset ends up wearing another asset's approved URL. Recomputing
+                               costs a few milliseconds; getting this wrong costs a wrong link.
+    HOW_INDEX_CHANGE_IS_SEEN   the digest is recomputed from the effective committed content on
+                               each attempt, through a fresh read-only connection that observes
+                               WAL-visible commits, so any change is seen the moment it is
+                               committed rather than when the file's metadata happens to move.
+    FAILURE_BEHAVIOR           ApprovedAssetUrlIndexBindingError, which the Slack path already
+                               treats as "no URL enrichment, normal answer, payload-free audit".
+    """
+    expected = _pinned_index_binding_digest()
+    actual, _bound = compute_index_binding_digest(db_path, {key[0] for key in overlay.values})
+    if actual != expected:
+        # Deliberately carries no digest, path or index detail: callers audit a stable code only.
+        raise ApprovedAssetUrlIndexBindingError(
+            "packaged authority is not bound to the current content index"
+        )
+
+
+def _pinned_index_binding_digest() -> str:
+    """Read the binding digest out of the self-integrity-checked manifest."""
+    manifest = _verified_authority_manifest_payload(_authority_root())
+    binding = manifest.get("index_binding")
+    if not isinstance(binding, Mapping):
+        raise ApprovedAssetUrlIndexBindingError("tracked authority manifest has no index binding")
+    digest = binding.get("digest")
+    if (
+        binding.get("namespace") != INDEX_BINDING_NAMESPACE
+        or binding.get("surface") != INDEX_BINDING_SURFACE
+        or list(binding.get("inputs") or ()) != list(INDEX_BINDING_INPUTS)
+        or not isinstance(digest, str)
+        or len(digest) != 64
+    ):
+        raise ApprovedAssetUrlIndexBindingError("tracked authority index binding is malformed")
+    return digest
+
+
+
+def _authorized_asset_url_inputs() -> Tuple[bytes, ...]:
+    root = _authority_root()
     manifest = _verified_authority_manifest(root)
     payloads = []
     for relative in APPROVED_ASSET_URL_INPUTS:
@@ -120,23 +398,74 @@ def _authorized_asset_url_inputs() -> Tuple[bytes, bytes, bytes]:
                 "approved asset URL input is not covered by the tracked authority manifest"
             )
         payloads.append(_verified_pinned_bytes(root / relative, entry))
-    return (payloads[0], payloads[1], payloads[2])
+    return tuple(payloads)
 
 
-def _repository_root() -> Path:
-    """Resolve the repository root from the module location, never from the working directory."""
-    root = Path(__file__).resolve().parents[2]
-    if not (root / AUTHORITY_MANIFEST_RELATIVE_PATH).is_file():
+def _build_packaged_asset_url_overlay(
+    approved_rows: Sequence[Mapping[str, object]],
+) -> AssetUrlOverlay:
+    """Project the sanitized packaged rows onto the overlay the Slack runtime already consumes."""
+    values: Dict[Tuple[str, str, str], AssetUrlRecord] = {}
+    for row in approved_rows:
+        identity = _text(row.get("asset_identity"))
+        field_name = _text(row.get("field"))
+        url = _text(row.get("url"))
+        if not _valid_identity(identity):
+            raise ApprovedAssetUrlAuthorityError("approved asset identity is malformed")
+        if field_name not in ALLOWED_OVERLAY_FIELDS:
+            raise ApprovedAssetUrlAuthorityError("approved URL row is outside the URL contract")
+        if not _safe_http_url(url):
+            raise ApprovedAssetUrlAuthorityError("approved URL is not safe for Slack")
+        key = (identity, identity, field_name)
+        if key in values:
+            raise ApprovedAssetUrlAuthorityError("approved URL rows contain a duplicate identity")
+        values[key] = AssetUrlRecord(
+            record_id=identity,
+            asset_id=identity,
+            field=field_name,
+            proposed_value=url,
+        )
+    return AssetUrlOverlay(values=values, identity_hashed=True)
+
+
+def _valid_identity(value: str) -> bool:
+    return len(value) == ASSET_IDENTITY_LENGTH and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _asset_lookup(entity, asset) -> AssetLookup:
+    """Collect both identity shapes for one asset, so either overlay can resolve it."""
+    record_id = _text(getattr(asset, "source_record_id", ""))
+    return AssetLookup(
+        record_id=record_id,
+        asset_id=f"{record_id}:{_text(getattr(asset, 'asset_type', ''))}",
+        entity_name=_text(getattr(entity, "entity_name", "")),
+        title=_text(getattr(asset, "title", "")),
+        asset_type=_text(getattr(asset, "asset_type", "")),
+    )
+
+
+def _authority_root() -> Path:
+    """Resolve the packaged authority directory from the module location, never from the CWD.
+
+    The bundle sits inside the installed package, so this resolves identically for a source
+    checkout, an editable install and an unpacked wheel. A deployment that shipped without the
+    package data fails closed here rather than falling back to any writable location.
+    """
+    root = Path(__file__).resolve().parent / AUTHORITY_PACKAGE_RELATIVE_DIR
+    manifest = root / AUTHORITY_MANIFEST_FILENAME
+    if manifest.is_symlink() or not manifest.is_file():
         raise ApprovedAssetUrlAuthorityError(
-            "tracked authority manifest is not reachable from the installed module location"
+            "packaged authority manifest is not installed with the module"
         )
     return root
 
 
-def _verified_authority_manifest(root: Path) -> Dict[str, Mapping[str, object]]:
-    """Parse the tracked manifest using its existing schema and enforce its self-integrity hash."""
+def _verified_authority_manifest_payload(root: Path) -> Dict[str, object]:
+    """Read the tracked manifest and enforce its self-integrity hash before anything reads it."""
     try:
-        payload = json.loads((root / AUTHORITY_MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8"))
+        payload = json.loads((root / AUTHORITY_MANIFEST_FILENAME).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ApprovedAssetUrlAuthorityError("tracked authority manifest is unreadable") from exc
     if not isinstance(payload, dict):
@@ -147,6 +476,12 @@ def _verified_authority_manifest(root: Path) -> Dict[str, Mapping[str, object]]:
         raise ApprovedAssetUrlAuthorityError(
             "tracked authority manifest failed its self-integrity contract"
         )
+    return payload
+
+
+def _verified_authority_manifest(root: Path) -> Dict[str, Mapping[str, object]]:
+    """Parse the tracked manifest using its existing schema and enforce its self-integrity hash."""
+    payload = _verified_authority_manifest_payload(root)
     inputs = payload.get("inputs")
     if not isinstance(inputs, list):
         raise ApprovedAssetUrlAuthorityError("tracked authority manifest is malformed")
@@ -191,7 +526,7 @@ def _verified_pinned_bytes(path: Path, entry: Mapping[str, object]) -> bytes:
     return payload
 
 
-def _parse_pinned_csv(payload: bytes) -> List[dict]:
+def _parse_pinned_csv(payload: bytes, expected_columns: Sequence[str]) -> List[dict]:
     try:
         text = payload.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -199,6 +534,11 @@ def _parse_pinned_csv(payload: bytes) -> List[dict]:
     reader = csv.DictReader(io.StringIO(text, newline=""))
     if reader.fieldnames is None:
         raise ApprovedAssetUrlAuthorityError("approved asset URL input has no CSV header")
+    # Strict allowlist: an unreviewed extra column must fail closed, not ride along unnoticed.
+    if tuple(reader.fieldnames) != tuple(expected_columns):
+        raise ApprovedAssetUrlAuthorityError(
+            "approved asset URL input header is not the reviewed authority schema"
+        )
     return list(reader)
 
 
@@ -318,9 +658,7 @@ def apply_approved_asset_url_overlay(answer, overlay: AssetUrlOverlay) -> int:
     applied = 0
     for entity in structured.matched_entities:
         for asset in entity.assets:
-            record_id = asset.source_record_id
-            asset_id = f"{record_id}:{asset.asset_type}"
-            if asset_id in overlay.blocked_asset_ids:
+            if overlay.is_blocked(f"{asset.source_record_id}:{asset.asset_type}"):
                 continue
             citation = citations.get(asset.citation_label)
             if (
@@ -331,9 +669,12 @@ def apply_approved_asset_url_overlay(answer, overlay: AssetUrlOverlay) -> int:
                 or citation.chunk_id.rsplit(":", 1)[-1] != asset.asset_type
             ):
                 continue
+            # Only now, once this asset's citation has passed the full external-use contract, may
+            # its published fields be used to derive the packaged authority's join identity.
+            lookup = _asset_lookup(entity, asset)
             value = (
-                overlay.value(record_id, asset_id, "canonical_url")
-                or overlay.value(record_id, asset_id, "asset_url")
+                overlay.url(lookup, "canonical_url")
+                or overlay.url(lookup, "asset_url")
             )
             if not value or not _safe_http_url(value):
                 continue
@@ -379,7 +720,7 @@ def build_slack_preview_payload(
             record_id = asset.source_record_id
             asset_id = f"{record_id}:{asset.asset_type}"
             identity = (record_id, asset_id, asset.asset_type)
-            if asset_id in overlay.blocked_asset_ids:
+            if overlay.is_blocked(asset_id):
                 _issue(
                     warnings,
                     "governance_blocked_asset",
@@ -408,8 +749,9 @@ def build_slack_preview_payload(
                     query=query,
                 )
                 continue
-            display_url = overlay.value(record_id, asset_id, "asset_url")
-            canonical_url = overlay.value(record_id, asset_id, "canonical_url")
+            lookup = _asset_lookup(entity, asset)
+            display_url = overlay.url(lookup, "asset_url")
+            canonical_url = overlay.url(lookup, "canonical_url")
             if display_url is None:
                 _issue(
                     warnings,

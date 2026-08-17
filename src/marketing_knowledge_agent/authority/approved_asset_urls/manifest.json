@@ -1,0 +1,63 @@
+{
+  "approved_asset_count": 206,
+  "approved_value_count": 412,
+  "authority": "approved_asset_urls",
+  "blocked_inventory_packaged": false,
+  "blocked_source_asset_count": 16,
+  "columns": {
+    "approved_urls.csv": [
+      "asset_identity",
+      "field",
+      "url"
+    ]
+  },
+  "derivation_version": "approved-asset-urls/4-index-bound",
+  "identity": "PSEUDONYMOUS_PUBLIC_DERIVED: sha256 over the asset's published entity name, published title and asset type, truncated to 32 hex characters. Not anonymous, and enumerable by anyone already holding that public triple; enumeration therefore discloses nothing beyond the fields published next to the approved link itself. No source workbook sheet, source row, record_id, asset_id or source_location takes part.",
+  "identity_source_columns": [
+    "brand_name",
+    "asset_title",
+    "asset_type"
+  ],
+  "index_binding": {
+    "algorithm": "sha256 over the sorted canonical surface of indexed assets whose public identity appears in this authority; one aggregate digest, never a per-record hash",
+    "bound_asset_count": 205,
+    "digest": "68e11a365a61ae22bb5c7026cd3d957e0bdcd99fb5212d269407c99498f7a929",
+    "inputs": [
+      "source_record_id",
+      "entity_name",
+      "title",
+      "asset_type"
+    ],
+    "namespace": "mka:approved-asset-url-index-binding:v1",
+    "surface": "indexed_approved_assets"
+  },
+  "inputs": [
+    {
+      "expected_sha256": "49931038e93069c6b52336f93b0d729ef7d22382f6e74201a465e2551680bad1",
+      "expected_size": 41439,
+      "input_type": "file",
+      "relative_path": "approved_urls.csv"
+    }
+  ],
+  "manifest_hash": "9b8b8d065cf7ebc50edd3d1a2bde44bd458bdbb2cf5558b9d67e3099978fd8c6",
+  "schema_version": 4,
+  "source_authority_manifest": "tests/fixtures/historical_inputs_manifest.json",
+  "source_authority_manifest_sha256": "11d16ad4ec08d31e7c15fa29e74b781307abe090b9cfddb9cc847872f6bc38c6",
+  "source_governance_artifacts": [
+    {
+      "packaged": false,
+      "relative_path": "reports/asset_metadata_apply_preview/asset_apply_preview.csv",
+      "sha256": "da6b325cb751c2bef55fbacd98808e28d6d9625754238af729d88f357dabcb3f"
+    },
+    {
+      "packaged": false,
+      "relative_path": "reports/asset_metadata_apply_preview/asset_apply_preview_blocked.csv",
+      "sha256": "fc846fba4879152f02356d0bf2c05e1c2b17e594f6ada76aad46d121ec81dc62"
+    },
+    {
+      "packaged": false,
+      "relative_path": "reports/asset_metadata_preview/human_review_template.csv",
+      "sha256": "ab779a69669c83e931745cd0456097600852b36827d537d799153ae3880d5e18"
+    }
+  ]
+}

@@ -25,18 +25,35 @@ from marketing_knowledge_agent.slack_interface import (
     format_slack_reply,
     handle_slack_event,
 )
+from marketing_knowledge_agent import slack_output_preview
 from marketing_knowledge_agent.slack_output_preview import (
-    APPROVED_ASSET_URL_APPLY_PREVIEW,
     APPROVED_ASSET_URL_INPUTS,
-    AUTHORITY_MANIFEST_RELATIVE_PATH,
+    APPROVED_ASSET_URL_VALUES,
+    AUTHORITY_MANIFEST_FILENAME,
     apply_approved_asset_url_overlay,
     load_pinned_approved_asset_url_overlay,
 )
 
 
+SANFENG_ARTICLE_TITLE = "傳統製麵廠的數位轉型之路！《三風製麵》如何透過 SHOPLINE 提升客單價超過兩成"
+SANFENG_VIDEO_TITLE = (
+    "傳統製麵廠的數位轉型之路！《三風製麵》如何透過 SHOPLINE 提升客單價超過兩成"
+    "｜SHOPLINE TALKS 聊品牌 EP 89"
+)
+
+
+def _packaged_authority_dir():
+    """Locate the real runtime authority bundle that ships inside the installed package."""
+    return (
+        Path(slack_output_preview.__file__).resolve().parent
+        / slack_output_preview.AUTHORITY_PACKAGE_RELATIVE_DIR
+    )
+
+
+# The authority now ships as package data, so these artifacts are present in every checkout and
+# every install. The guard is kept so a deliberately stripped deployment skips rather than fails.
 _APPROVED_URL_ARTIFACTS_AVAILABLE = all(
-    (Path(__file__).resolve().parents[1] / relative).is_file()
-    for relative in APPROVED_ASSET_URL_INPUTS
+    (_packaged_authority_dir() / relative).is_file() for relative in APPROVED_ASSET_URL_INPUTS
 )
 
 
@@ -342,9 +359,14 @@ def test_category_and_article_return_only_article_assets(tmp_path):
 
 
 def test_exact_asset_title_returns_only_that_asset_type(tmp_path):
+    """Anchored on a record with short synthetic titles.
+
+    三風製麵 now carries its real published titles, which embed the brand name and the 數位轉型
+    tag, so a query for one of them resolves as an entity+tag search rather than an exact title.
+    """
     db_path = _build_index(tmp_path)
 
-    answer = ask_index("三風製麵數位轉型影片", db_path, limit=10)
+    answer = ask_index("大春煉皂影片", db_path, limit=10)
 
     assets = [asset for entity in answer.structured_result.matched_entities for asset in entity.assets]
     assert len(assets) == 1
@@ -452,7 +474,7 @@ def test_pinned_approved_urls_give_each_asset_its_own_source_backed_link(tmp_pat
 def test_one_byte_mutation_of_a_pinned_artifact_removes_every_asset_url(tmp_path, monkeypatch):
     db_path = _build_index(tmp_path)
     root = _mutated_pinned_root(tmp_path)
-    monkeypatch.setattr("marketing_knowledge_agent.slack_output_preview._repository_root", lambda: root)
+    monkeypatch.setattr("marketing_knowledge_agent.slack_output_preview._authority_root", lambda: root)
     answer = ask_index("我要尋找三風製麵的案例", db_path, limit=5)
     audit_path = tmp_path / "audit.csv"
 
@@ -474,13 +496,13 @@ def test_one_byte_mutation_of_a_pinned_artifact_removes_every_asset_url(tmp_path
 
 def _mutated_pinned_root(tmp_path):
     """Copy the pinned artifacts into a scratch root and flip a single byte in one of them."""
-    source = Path(__file__).resolve().parents[1]
+    source = _packaged_authority_dir()
     root = tmp_path / "mutated-root"
-    for relative in (AUTHORITY_MANIFEST_RELATIVE_PATH,) + tuple(APPROVED_ASSET_URL_INPUTS):
+    for relative in (AUTHORITY_MANIFEST_FILENAME,) + tuple(APPROVED_ASSET_URL_INPUTS):
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((source / relative).read_bytes())
-    target = root / APPROVED_ASSET_URL_APPLY_PREVIEW
+    target = root / APPROVED_ASSET_URL_VALUES
     payload = bytearray(target.read_bytes())
     payload[-1] = payload[-1] ^ 0x01
     target.write_bytes(bytes(payload))
@@ -649,13 +671,16 @@ def _build_index(tmp_path):
             video="大春煉皂影片",
             podcast="大春煉皂 Podcast",
         ),
+        # The packaged authority joins on the asset's published entity name, title and type, so
+        # this fixture must carry the real published titles or the acceptance anchor below is
+        # testing a record the authority has never heard of.
         _record(
             "三風製麵",
             "shanfeng",
             "美食",
             2026,
-            article="三風製麵數位轉型文章",
-            video="三風製麵數位轉型影片",
+            article=SANFENG_ARTICLE_TITLE,
+            video=SANFENG_VIDEO_TITLE,
             source_row=8,
             canonical_url="https://example.com/merchant-generic",
         ),

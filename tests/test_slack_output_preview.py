@@ -15,12 +15,12 @@ from marketing_knowledge_agent.models import (
 )
 from marketing_knowledge_agent import slack_output_preview
 from marketing_knowledge_agent.slack_output_preview import (
-    APPROVED_ASSET_URL_APPLY_PREVIEW,
-    APPROVED_ASSET_URL_BLOCKED_PREVIEW,
-    APPROVED_ASSET_URL_DECISIONS,
     APPROVED_ASSET_URL_INPUTS,
-    AUTHORITY_MANIFEST_RELATIVE_PATH,
+    APPROVED_ASSET_URL_VALUES,
+    AUTHORITY_MANIFEST_FILENAME,
     ApprovedAssetUrlAuthorityError,
+    AssetLookup,
+    approved_asset_identity,
     AssetUrlOverlay,
     AssetUrlRecord,
     apply_approved_asset_url_overlay,
@@ -219,13 +219,18 @@ def test_pinned_overlay_loader_accepts_no_caller_supplied_authority():
     assert inspect.signature(load_pinned_approved_asset_url_overlay).parameters == {}
 
 
-def test_repository_root_is_module_relative_and_ignores_the_working_directory(tmp_path, monkeypatch):
-    expected = Path(slack_output_preview.__file__).resolve().parents[2]
+def test_authority_root_is_module_relative_and_ignores_the_working_directory(tmp_path, monkeypatch):
+    """The authority lives inside the installed package, so it never depends on the CWD or repo."""
+    expected = (
+        Path(slack_output_preview.__file__).resolve().parent
+        / slack_output_preview.AUTHORITY_PACKAGE_RELATIVE_DIR
+    )
 
     monkeypatch.chdir(tmp_path)
 
-    assert slack_output_preview._repository_root() == expected
-    assert (expected / AUTHORITY_MANIFEST_RELATIVE_PATH).is_file()
+    assert slack_output_preview._authority_root() == expected
+    assert (expected / AUTHORITY_MANIFEST_FILENAME).is_file()
+    assert expected.is_relative_to(Path(slack_output_preview.__file__).resolve().parent)
 
 
 def test_correctly_pinned_artifacts_produce_the_approved_overlay(tmp_path, monkeypatch):
@@ -234,8 +239,9 @@ def test_correctly_pinned_artifacts_produce_the_approved_overlay(tmp_path, monke
     overlay = _load_pinned(monkeypatch, root)
 
     assert overlay.errors == []
-    assert overlay.value("Sheet:r8", "Sheet:r8:article", "canonical_url")
-    assert overlay.blocked_asset_ids == {"Sheet:r9:video"}
+    assert overlay.url(_packaged_lookup(), "canonical_url")
+    # The packaged authority ships no blocked inventory; blocking stays a build-time exclusion.
+    assert overlay.blocked_asset_ids == set()
 
 
 def test_pinned_overlay_parses_the_verified_bytes_instead_of_re_reading_the_path(tmp_path, monkeypatch):
@@ -247,40 +253,33 @@ def test_pinned_overlay_parses_the_verified_bytes_instead_of_re_reading_the_path
 
     monkeypatch.setattr(slack_output_preview, "_read_csv", fail)
 
-    assert _load_pinned(monkeypatch, root).value("Sheet:r8", "Sheet:r8:article", "canonical_url")
+    assert _load_pinned(monkeypatch, root).url(_packaged_lookup(), "canonical_url")
 
 
-def test_forged_writable_csv_pair_cannot_self_attest_as_approved(tmp_path, monkeypatch):
-    """The independent review attack: writable CSVs that agree with each other are still rejected."""
+def test_forged_writable_csv_cannot_self_attest_as_approved(tmp_path, monkeypatch):
+    """The independent review attack: a perfectly well-formed forged artifact is still rejected.
+
+    The sanitized rows carry no approval columns to argue with, so this is the whole trust question:
+    only the tracked manifest pin decides which bytes are authoritative.
+    """
     root = _pinned_root(tmp_path)
-    forged = [
-        _apply_row("Sheet:r8", "Sheet:r8:article", field, proposed_value="https://attacker.example/pwn")
-        for field in ("asset_url", "canonical_url")
-    ]
-    _write_approved_artifacts(root, forged, _blocked_rows(), [_decision_row(row) for row in forged])
+    forged = _approved_url_rows(url="https://attacker.example/pwn")
+    _write_approved_artifacts(root, forged)
 
-    # Without the tracked pin the forged pair is internally consistent and would be accepted.
-    unpinned = load_asset_url_overlay(
-        root / APPROVED_ASSET_URL_APPLY_PREVIEW,
-        root / APPROVED_ASSET_URL_BLOCKED_PREVIEW,
-        root / APPROVED_ASSET_URL_DECISIONS,
-    )
-    assert unpinned.errors == []
-    assert unpinned.value("Sheet:r8", "Sheet:r8:article", "canonical_url") == "https://attacker.example/pwn"
+    # Parsed on its own the forged artifact is schema-valid and would produce an overlay.
+    unpinned = slack_output_preview._build_packaged_asset_url_overlay(forged)
+    assert unpinned.url(_packaged_lookup(), "canonical_url") == "https://attacker.example/pwn"
 
+    # Against the pin it is rejected, because its hash no longer matches the manifest.
     with pytest.raises(ApprovedAssetUrlAuthorityError):
         _load_pinned(monkeypatch, root)
 
 
 def test_forged_pair_is_rejected_against_the_real_tracked_manifest(tmp_path, monkeypatch):
     root = tmp_path / "repo"
-    tracked = Path(__file__).resolve().parents[1] / AUTHORITY_MANIFEST_RELATIVE_PATH
+    tracked = _packaged_authority_dir() / AUTHORITY_MANIFEST_FILENAME
     _copy_manifest(tracked, root)
-    forged = [
-        _apply_row("Sheet:r8", "Sheet:r8:article", field, proposed_value="https://attacker.example/pwn")
-        for field in ("asset_url", "canonical_url")
-    ]
-    _write_approved_artifacts(root, forged, _blocked_rows(), [_decision_row(row) for row in forged])
+    _write_approved_artifacts(root, _approved_url_rows(url="https://attacker.example/pwn"))
 
     with pytest.raises(ApprovedAssetUrlAuthorityError):
         _load_pinned(monkeypatch, root)
@@ -288,7 +287,7 @@ def test_forged_pair_is_rejected_against_the_real_tracked_manifest(tmp_path, mon
 
 def test_single_byte_mutation_of_a_pinned_artifact_is_rejected(tmp_path, monkeypatch):
     root = _pinned_root(tmp_path)
-    target = root / APPROVED_ASSET_URL_APPLY_PREVIEW
+    target = root / APPROVED_ASSET_URL_VALUES
     payload = bytearray(target.read_bytes())
     payload[-1] = payload[-1] ^ 0x01
     target.write_bytes(bytes(payload))
@@ -318,16 +317,12 @@ def test_missing_manifest_entry_is_rejected(tmp_path, monkeypatch, relative):
 def test_manifest_self_integrity_failure_is_rejected(tmp_path, monkeypatch):
     """Re-pointing an entry at forged bytes without recomputing manifest_hash must fail closed."""
     root = _pinned_root(tmp_path)
-    forged = [
-        _apply_row("Sheet:r8", "Sheet:r8:article", field, proposed_value="https://attacker.example/pwn")
-        for field in ("asset_url", "canonical_url")
-    ]
-    _write_csv(root / APPROVED_ASSET_URL_APPLY_PREVIEW, forged)
-    manifest_path = root / AUTHORITY_MANIFEST_RELATIVE_PATH
+    _write_csv(root / APPROVED_ASSET_URL_VALUES, _approved_url_rows(url="https://attacker.example/pwn"))
+    manifest_path = root / AUTHORITY_MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    entry = next(item for item in manifest["inputs"] if item["relative_path"] == APPROVED_ASSET_URL_APPLY_PREVIEW)
-    entry["expected_sha256"] = _hash(root / APPROVED_ASSET_URL_APPLY_PREVIEW)
-    entry["expected_size"] = (root / APPROVED_ASSET_URL_APPLY_PREVIEW).stat().st_size
+    entry = next(item for item in manifest["inputs"] if item["relative_path"] == APPROVED_ASSET_URL_VALUES)
+    entry["expected_sha256"] = _hash(root / APPROVED_ASSET_URL_VALUES)
+    entry["expected_size"] = (root / APPROVED_ASSET_URL_VALUES).stat().st_size
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
 
     with pytest.raises(ApprovedAssetUrlAuthorityError):
@@ -338,14 +333,10 @@ def test_repinning_the_manifest_changes_its_tracked_bytes(tmp_path):
     """Documents the design limit: re-pinning forged artifacts is only possible by editing the
     version-controlled manifest, which changes its bytes and its self-integrity hash."""
     root = _pinned_root(tmp_path)
-    before = (root / AUTHORITY_MANIFEST_RELATIVE_PATH).read_bytes()
-    forged = [
-        _apply_row("Sheet:r8", "Sheet:r8:article", field, proposed_value="https://attacker.example/pwn")
-        for field in ("asset_url", "canonical_url")
-    ]
-    _write_approved_artifacts(root, forged, _blocked_rows(), [_decision_row(row) for row in forged])
+    before = (root / AUTHORITY_MANIFEST_FILENAME).read_bytes()
+    _write_approved_artifacts(root, _approved_url_rows(url="https://attacker.example/pwn"))
     _write_manifest(root, APPROVED_ASSET_URL_INPUTS)
-    after = (root / AUTHORITY_MANIFEST_RELATIVE_PATH).read_bytes()
+    after = (root / AUTHORITY_MANIFEST_FILENAME).read_bytes()
 
     assert after != before
     assert json.loads(after)["manifest_hash"] != json.loads(before)["manifest_hash"]
@@ -362,7 +353,7 @@ def test_repinning_the_manifest_changes_its_tracked_bytes(tmp_path):
 )
 def test_malformed_manifest_is_rejected(tmp_path, monkeypatch, payload):
     root = _pinned_root(tmp_path)
-    (root / AUTHORITY_MANIFEST_RELATIVE_PATH).write_text(payload, encoding="utf-8")
+    (root / AUTHORITY_MANIFEST_FILENAME).write_text(payload, encoding="utf-8")
 
     with pytest.raises(ApprovedAssetUrlAuthorityError):
         _load_pinned(monkeypatch, root)
@@ -370,48 +361,63 @@ def test_malformed_manifest_is_rejected(tmp_path, monkeypatch, payload):
 
 def test_unreachable_manifest_is_rejected(tmp_path, monkeypatch):
     root = _pinned_root(tmp_path)
-    (root / AUTHORITY_MANIFEST_RELATIVE_PATH).unlink()
+    (root / AUTHORITY_MANIFEST_FILENAME).unlink()
 
     with pytest.raises(ApprovedAssetUrlAuthorityError):
         _load_pinned(monkeypatch, root)
 
 
-def test_hash_authorized_rows_still_pass_through_row_level_governance(tmp_path, monkeypatch):
-    """Integrity pinning does not replace the eligibility contract (mutation M7)."""
-    ineligible = [
-        _apply_row("Sheet:r8", "Sheet:r8:article", field, eligibility="needs_human_review")
-        for field in ("asset_url", "canonical_url")
-    ]
-    root = _pinned_root(tmp_path, apply_rows=ineligible)
+def test_ineligible_rows_cannot_be_expressed_in_the_packaged_authority(tmp_path, monkeypatch):
+    """Mutation M7, relocated.
 
+    The eligibility contract now runs in the build tool against reviewed sources, so the packaged
+    schema has no eligibility column an attacker could set. What the runtime still refuses is a row
+    outside the URL contract or carrying an unusable URL, and it refuses it by failing closed.
+    """
+    identity = approved_asset_identity(PACKAGED_BRAND, PACKAGED_TITLE, PACKAGED_TYPE)
+    outside_contract = [
+        {"asset_identity": identity, "field": "review_status", "url": "https://example.com/a"}
+    ]
+    root = _pinned_root(tmp_path, approved_rows=outside_contract)
+
+    with pytest.raises(ApprovedAssetUrlAuthorityError):
+        _load_pinned(monkeypatch, root)
+
+    unusable = [{"asset_identity": identity, "field": "asset_url", "url": "javascript:alert(1)"}]
+    root = _pinned_root(tmp_path / "unusable", approved_rows=unusable)
+
+    with pytest.raises(ApprovedAssetUrlAuthorityError):
+        _load_pinned(monkeypatch, root)
+
+
+def test_a_blocked_asset_has_no_packaged_row_to_resolve(tmp_path, monkeypatch):
+    """Mutation M10, relocated: blocking is enforced by absence, not by a shipped inventory.
+
+    The build tool proves no blocked asset reaches the approved mapping, so at runtime a blocked
+    asset presents its published fields and finds nothing. That is the whole protection, and it
+    needs no list of restricted identities in the distributed package.
+    """
+    root = _pinned_root(tmp_path, approved_rows=_approved_url_rows(title="Story A"))
     overlay = _load_pinned(monkeypatch, root)
 
-    assert [item["code"] for item in overlay.errors] == ["ineligible_apply_row", "ineligible_apply_row"]
-    assert overlay.values == {}
+    assert overlay.blocked_asset_ids == set()
+    assert overlay.url(_packaged_lookup(title="Story A"), "asset_url")
+    for blocked_title in ("Blocked Story", "Story A (restricted)", ""):
+        assert overlay.url(_packaged_lookup(title=blocked_title), "asset_url") is None
 
-    asset = _asset("article", "Story A", "r8", "[1]")
+
+def test_blocked_asset_receives_no_url_through_the_answer_path(tmp_path, monkeypatch):
+    root = _pinned_root(tmp_path, approved_rows=_approved_url_rows(title="Story A"))
+    overlay = _load_pinned(monkeypatch, root)
+
+    asset = _asset("article", "Blocked Story", "r8", "[1]")
     answer = _answer([_entity("Merchant A", "a", [asset])])
     asset.url = None
     answer.citations[0].canonical_url = None
+
     assert apply_approved_asset_url_overlay(answer, overlay) == 0
     assert asset.url is None
-
-
-def test_hash_authorized_blocked_asset_still_cannot_receive_a_url(tmp_path, monkeypatch):
-    """Integrity pinning does not replace blocked-asset protection (mutation M10)."""
-    apply_rows = [
-        _apply_row("Sheet:r9", "Sheet:r9:video", field) for field in ("asset_url", "canonical_url")
-    ]
-    root = _pinned_root(tmp_path, apply_rows=apply_rows)
-
-    overlay = _load_pinned(monkeypatch, root)
-
-    assert "Sheet:r9:video" in overlay.blocked_asset_ids
-    assert [item["code"] for item in overlay.errors] == [
-        "blocked_asset_in_apply_preview",
-        "blocked_asset_in_apply_preview",
-    ]
-    assert overlay.values == {}
+    assert answer.citations[0].canonical_url is None
 
 
 @pytest.mark.parametrize(
@@ -845,20 +851,54 @@ def _blocked_rows():
     return [_apply_row("Sheet:r9", "Sheet:r9:video", "asset_url", action="blocked", eligibility="governance_blocked")]
 
 
-def _write_approved_artifacts(root, apply_rows, blocked_rows, decision_rows):
-    _write_csv(root / APPROVED_ASSET_URL_APPLY_PREVIEW, apply_rows)
-    _write_csv(root / APPROVED_ASSET_URL_BLOCKED_PREVIEW, blocked_rows)
-    _write_csv(root / APPROVED_ASSET_URL_DECISIONS, decision_rows)
+def _packaged_authority_dir():
+    """Locate the real runtime authority bundle that ships inside the installed package."""
+    return (
+        Path(slack_output_preview.__file__).resolve().parent
+        / slack_output_preview.AUTHORITY_PACKAGE_RELATIVE_DIR
+    )
 
 
-def _pinned_root(tmp_path, *, apply_rows=None, pinned_inputs=APPROVED_ASSET_URL_INPUTS):
-    """Build a repository root whose approved artifacts are pinned by a correctly hashed manifest."""
-    root = Path(tmp_path) / "repo"
-    if apply_rows is None:
-        apply_rows = [
-            _apply_row("Sheet:r8", "Sheet:r8:article", field) for field in ("asset_url", "canonical_url")
-        ]
-    _write_approved_artifacts(root, apply_rows, _blocked_rows(), [_decision_row(row) for row in apply_rows])
+PACKAGED_BRAND = "Merchant A"
+PACKAGED_TITLE = "Story A"
+PACKAGED_TYPE = "article"
+
+
+def _packaged_lookup(entity_name=PACKAGED_BRAND, title=PACKAGED_TITLE, asset_type=PACKAGED_TYPE):
+    return AssetLookup(
+        record_id="Sheet:r8",
+        asset_id=f"Sheet:r8:{asset_type}",
+        entity_name=entity_name,
+        title=title,
+        asset_type=asset_type,
+    )
+
+
+def _approved_url_rows(
+    entity_name=PACKAGED_BRAND,
+    title=PACKAGED_TITLE,
+    asset_type=PACKAGED_TYPE,
+    url="https://example.com/story-a",
+):
+    """Sanitized packaged rows: public-derived identity, contract field, approved URL. Nothing else."""
+    return [
+        {
+            "asset_identity": approved_asset_identity(entity_name, title, asset_type),
+            "field": field,
+            "url": url,
+        }
+        for field in ("asset_url", "canonical_url")
+    ]
+
+
+def _write_approved_artifacts(root, approved_rows):
+    _write_csv(root / APPROVED_ASSET_URL_VALUES, approved_rows)
+
+
+def _pinned_root(tmp_path, *, approved_rows=None, pinned_inputs=APPROVED_ASSET_URL_INPUTS):
+    """Build an authority directory whose artifacts are pinned by a correctly hashed manifest."""
+    root = Path(tmp_path) / "authority"
+    _write_approved_artifacts(root, _approved_url_rows() if approved_rows is None else approved_rows)
     _write_manifest(root, pinned_inputs)
     return root
 
@@ -888,7 +928,7 @@ def _copy_manifest(source, root):
 
 
 def _copy_manifest_payload(root, payload):
-    path = Path(root) / AUTHORITY_MANIFEST_RELATIVE_PATH
+    path = Path(root) / AUTHORITY_MANIFEST_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(payload, encoding="utf-8")
 
@@ -900,7 +940,7 @@ def _hash_json(value):
 
 
 def _load_pinned(monkeypatch, root):
-    monkeypatch.setattr(slack_output_preview, "_repository_root", lambda: Path(root))
+    monkeypatch.setattr(slack_output_preview, "_authority_root", lambda: Path(root))
     return load_pinned_approved_asset_url_overlay()
 
 

@@ -24,6 +24,19 @@ mka = "marketing_knowledge_agent.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The approved asset URL authority is runtime data, not a test fixture: it must ship in the wheel
+# so a non-editable deployment resolves the same authority a source checkout does.
+# Named exactly, never globbed: a glob would also sweep up macOS AppleDouble sidecars ("._*.csv")
+# from a developer working tree, and any future file dropped in this directory would ship unreviewed.
+[tool.setuptools.package-data]
+marketing_knowledge_agent = [
+    "authority/approved_asset_urls/manifest.json",
+    "authority/approved_asset_urls/approved_urls.csv",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "slow: builds a distributable artifact; slower than a normal unit test",
+]
