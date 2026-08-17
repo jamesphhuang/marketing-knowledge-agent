@@ -462,8 +462,8 @@ def test_pinned_approved_urls_give_each_asset_its_own_source_backed_link(tmp_pat
         assert by_label[asset.citation_label].canonical_url == asset.url
 
     text = format_slack_reply(answer, max_answer_chars=20_000)
-    assert "> *連結：*<https://blog.shopline.tw/merchant-showcase-shanfeng/|開啟連結>" in text
-    assert "> *連結：*<https://www.youtube.com/watch?v=WIMy_AFA0pE|開啟連結>" in text
+    assert "> 連結：<https://blog.shopline.tw/merchant-showcase-shanfeng/|開啟連結>" in text
+    assert "> 連結：<https://www.youtube.com/watch?v=WIMy_AFA0pE|開啟連結>" in text
     assert text.count("|開啟連結>") == 2
 
 
@@ -490,7 +490,7 @@ def test_one_byte_mutation_of_a_pinned_artifact_removes_every_asset_url(tmp_path
     assert all(citation.canonical_url is None for citation in answer.citations)
     assert "三風製麵" in reply["text"]
     assert "開啟連結" not in reply["text"]
-    assert reply["text"].count("*連結：*資料未提供") == len(assets)
+    assert reply["text"].count("連結：資料未提供") == len(assets)
     assert "slack_qa" in audit_path.read_text(encoding="utf-8")
 
 

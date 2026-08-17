@@ -33,6 +33,9 @@ GOVERNANCE_SILENT_WORDS = (
 )
 # Literal characters that end a Slack mrkdwn link, plus the backslash Slack uses to escape them.
 MRKDWN_UNSAFE_CHARS = re.compile(r"[\x00-\x20\x7f<>|\\]")
+# Everything that would split a rendered line apart: C0/C1 controls, DEL, and the Unicode line and
+# paragraph separators. A run collapses to a single space so field text stays on one line.
+MRKDWN_LINE_BREAKS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
 # Any character reference that could decode into a Slack mrkdwn delimiter. Slack's decode order is
 # undocumented, so a URL that already carries entity syntax is ambiguous and is never rendered.
 MRKDWN_ENTITY_REFERENCE = re.compile(
@@ -179,18 +182,23 @@ def format_structured_slack_reply(answer) -> Optional[str]:
         for asset in entity["assets"]:
             asset["number"] = number
             number += 1
+            # Slack only closes a bold run when the trailing "*" sits on a delimiter boundary, so a
+            # label whose "*" is immediately followed by the value is shown to the user verbatim
+            # whenever that value starts with a word character (CJK and digits both count). The
+            # asset header below keeps its bold because its closing "*" ends the line; the field
+            # labels carry none, so their rendering can never depend on the dynamic value.
             lines.extend(
                 [
                     "> • *"
                     + f"{ASSET_LABELS.get(asset['asset_type'], '其他')} [{asset['number']}]"
                     + "*",
-                    f"> *標題：*{_normal_text(asset['title'])}",
-                    f"> *連結：*{_slack_link(asset['url']) if asset['url'] else MISSING}",
-                    f"> *上線日期：*{_normal_text(asset['published_at']) or MISSING}",
-                    f"> *採訪年份：*{_normal_text(asset.get('interview_year') or entity.get('interview_year')) or MISSING}",
-                    f"> *狀態：*{_status_label(asset['status'])}",
-                    f"> *對外引用：*{asset['external_usage']}",
-                    f"> *資料來源：*{asset['source'] or MISSING}",
+                    f"> 標題：{_normal_text(asset['title'])}",
+                    f"> 連結：{_slack_link(asset['url']) if asset['url'] else MISSING}",
+                    f"> 上線日期：{_normal_text(asset['published_at']) or MISSING}",
+                    f"> 採訪年份：{_normal_text(asset.get('interview_year') or entity.get('interview_year')) or MISSING}",
+                    f"> 狀態：{_status_label(asset['status'])}",
+                    f"> 對外引用：{asset['external_usage']}",
+                    f"> 資料來源：{_normal_text(asset['source']) or MISSING}",
                 ]
             )
             if asset is not entity["assets"][-1]:
@@ -479,11 +487,20 @@ def _normal_text(value: object) -> str:
 
 
 def _inline(value: object) -> str:
-    return _mrkdwn_escape(str(value))
+    # This value is placed inside a code span the formatter opens, and a raw backtick would close
+    # that span early. Slack has no escape for it, so the character itself is swapped for a grave
+    # accent that carries no mrkdwn meaning.
+    return _mrkdwn_escape(str(value)).replace("`", "ˋ")
 
 
 def _mrkdwn_escape(value: str) -> str:
-    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("`", "\\`")
+    # Slack decodes exactly these three entity forms and offers no backslash escape, so they are
+    # the only delimiters that can be neutralised in place. A backslash written in front of any
+    # other marker reaches the user as a literal backslash.
+    escaped = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Dynamic text must not leave the line the formatter put it on: a raw newline would drop out of
+    # the blockquote and the next line would read as a field the formatter never wrote.
+    return MRKDWN_LINE_BREAKS.sub(" ", escaped)
 
 
 def _identity_text(value: object) -> str:

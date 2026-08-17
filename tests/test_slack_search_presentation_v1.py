@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import pytest
@@ -26,8 +27,11 @@ def test_plain_query_conditions_use_one_inline_code_tag_and_escape_mrkdwn():
 
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
-    assert "已套用搜尋條件：`SLP \\`&lt;&gt; &amp;`" in text
-    assert "`Brand \\`&lt;&gt; &amp;`" in text
+    # Slack has no backslash escape, so a "\`" would reach the user as a visible backslash while
+    # still closing the code span the formatter opened. The backtick is replaced instead.
+    assert "已套用搜尋條件：`SLP ˋ&lt;&gt; &amp;`" in text
+    assert "`Brand ˋ&lt;&gt; &amp;`" in text
+    assert "\\`" not in text
     assert "📚 來源" not in text
 
 
@@ -72,10 +76,10 @@ def test_brand_metadata_and_assets_use_requested_mrkdwn_shape():
     assert "_Handle：資料未提供_" in text
     assert "_Sales Category LV1：其他_" in text
     assert "> • *文章 [1]*" in text
-    assert "> *標題：*完整標題" in text
-    assert "> *連結：*<https://example.com/a|開啟連結>" in text
-    assert "> *採訪年份：*2024" in text
-    assert "> *資料來源：*商家夥伴案例資料庫 r32" in text
+    assert "> 標題：完整標題" in text
+    assert "> 連結：<https://example.com/a|開啟連結>" in text
+    assert "> 採訪年份：2024" in text
+    assert "> 資料來源：商家夥伴案例資料庫 r32" in text
     assert "📚 來源" not in text
 
 
@@ -241,7 +245,7 @@ def test_entity_or_escape_breakout_url_is_never_rendered_as_a_clickable_link(url
 
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
-    assert "> *連結：*資料未提供" in text
+    assert "> 連結：資料未提供" in text
     assert "開啟連結" not in text
     assert "evil.example" not in text
 
@@ -273,7 +277,7 @@ def test_raw_control_character_url_is_never_rendered_as_a_clickable_link(url):
 
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
-    assert "> *連結：*資料未提供" in text
+    assert "> 連結：資料未提供" in text
     assert "開啟連結" not in text
 
 
@@ -289,13 +293,13 @@ def test_canonicalization_erasing_a_control_character_is_not_acceptance(control)
     control_free = format_slack_reply(
         _answer("query", [_asset_entity("Brand", erased)]), max_answer_chars=20_000
     )
-    assert f"> *連結：*<{erased}|開啟連結>" in control_free
+    assert f"> 連結：<{erased}|開啟連結>" in control_free
 
     text = format_slack_reply(
         _answer("query", [_asset_entity("Brand", raw)]), max_answer_chars=20_000
     )
 
-    assert "> *連結：*資料未提供" in text
+    assert "> 連結：資料未提供" in text
     assert erased not in text
 
 
@@ -311,7 +315,7 @@ def test_approved_asset_urls_still_render_as_one_clickable_link(url):
 
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
-    assert f"> *連結：*<{url}|開啟連結>" in text
+    assert f"> 連結：<{url}|開啟連結>" in text
     assert text.count("|開啟連結>") == 1
 
 
@@ -325,7 +329,7 @@ def test_surrounding_whitespace_still_resolves_to_one_clickable_link():
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
     assert (
-        "> *連結：*<https://blog.shopline.tw/merchant-showcase-shanfeng/|開啟連結>" in text
+        "> 連結：<https://blog.shopline.tw/merchant-showcase-shanfeng/|開啟連結>" in text
     )
     assert text.count("|開啟連結>") == 1
 
@@ -343,7 +347,7 @@ def test_legitimate_query_separators_render_as_one_escaped_clickable_link():
 
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
-    assert "> *連結：*<https://www.youtube.com/watch?index=1&amp;list=Y&amp;v=X|開啟連結>" in text
+    assert "> 連結：<https://www.youtube.com/watch?index=1&amp;list=Y&amp;v=X|開啟連結>" in text
     assert text.count("|開啟連結>") == 1
     assert text.count("<https://") == 1
     # Nothing outside the single link construct may carry a raw mrkdwn delimiter.
@@ -358,7 +362,7 @@ def test_rendered_link_construct_never_contains_a_bare_ampersand():
     )
 
     text = format_slack_reply(answer, max_answer_chars=20_000)
-    link = text.split("> *連結：*", 1)[1].splitlines()[0]
+    link = text.split("> 連結：", 1)[1].splitlines()[0]
 
     assert link == "<https://example.com/a?x=1&amp;y=2|開啟連結>"
     assert link.count("<") == 1 and link.count(">") == 1
@@ -387,8 +391,8 @@ def test_title_url_and_link_url_conflict_does_not_guess_a_link():
 
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
-    assert "標題：*資料不一致" in text
-    assert "連結：*資料未提供" in text
+    assert "標題：資料不一致" in text
+    assert "連結：資料未提供" in text
 
 
 def test_explicit_domain_policy_controls_www_https_and_path_case_merges():
@@ -416,8 +420,8 @@ def test_title_url_never_becomes_an_asset_link_without_approved_url_evidence():
     )
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
-    assert "> *標題：*資料未提供" in text
-    assert "> *連結：*資料未提供" in text
+    assert "> 標題：資料未提供" in text
+    assert "> 連結：資料未提供" in text
     assert "<https://example.com/a|開啟連結>" not in text
     assert "Brand B" in text
 
@@ -529,3 +533,218 @@ def _asset(asset_type, title, *, row, url="https://example.com/content", publish
         source_row=row,
         citation_label="",
     )
+
+
+# --- Slack mrkdwn label rendering ---------------------------------------------------------------
+#
+# Slack closes a bold run only when the character after the trailing "*" is a delimiter boundary.
+# A label written as "*標題：*" immediately in front of its value therefore reached the user
+# verbatim whenever the value started with a word character -- which CJK text and digits both are.
+# Only the asset header, whose closing "*" ends the line, ever rendered. These tests pin the shape
+# of every standard label and the separation between formatter-owned markup and dynamic text.
+
+ASSET_FIELD_LABELS = ("標題", "連結", "上線日期", "採訪年份", "狀態", "對外引用", "資料來源")
+
+# A bold run whose closing "*" is followed by something other than whitespace or end of line.
+# Slack's exact boundary rule is undocumented, so those two are the only ones treated as certain.
+UNCLOSED_BOLD_RUN = re.compile(r"\*[^*\n]+\*(?!\s|$)", re.MULTILINE)
+
+
+def _shanfeng_answer():
+    return _answer(
+        "三風製麵",
+        [
+            _entity(
+                "三風製麵",
+                [
+                    _asset(
+                        "article",
+                        "傳統製麵廠的數位轉型之路！",
+                        row=8,
+                        url="https://blog.shopline.tw/merchant-showcase-shanfeng/",
+                        publish_date="2026-07-10",
+                    ),
+                    _asset(
+                        "video",
+                        "三風製麵品牌故事",
+                        row=8,
+                        url="https://www.youtube.com/watch?v=WIMy_AFA0pE",
+                        publish_date="2026-07-10",
+                    ),
+                ],
+                interview_year=2026,
+            )
+        ],
+    )
+
+
+def _yihe_answer():
+    return _answer(
+        "怡和家電",
+        [
+            _entity(
+                "怡和家電",
+                [
+                    _asset(
+                        "article",
+                        "老牌家電行的電商突圍",
+                        row=12,
+                        url="https://blog.shopline.tw/merchant-showcase-yh/",
+                        publish_date="2026-06-02",
+                    ),
+                    _asset(
+                        "video",
+                        "怡和家電專訪",
+                        row=12,
+                        url="https://youtu.be/7nVLtH5iW20",
+                        publish_date="2026-06-02",
+                    ),
+                ],
+                interview_year=2026,
+            )
+        ],
+    )
+
+
+def test_standard_asset_labels_show_no_raw_formatting_markers():
+    text = format_slack_reply(_shanfeng_answer(), max_answer_chars=20_000)
+    label_lines = [
+        line
+        for line in text.splitlines()
+        if any(line.startswith(f"> {label}：") for label in ASSET_FIELD_LABELS)
+    ]
+
+    assert len(label_lines) == 2 * len(ASSET_FIELD_LABELS)
+    for line in label_lines:
+        assert "*" not in line
+        assert "\\" not in line
+        assert "`" not in line
+
+
+def test_no_bold_run_depends_on_the_value_that_follows_it():
+    """The root-cause guard: every "*" the formatter emits must close on a boundary."""
+    for text in (
+        format_slack_reply(_shanfeng_answer(), max_answer_chars=20_000),
+        format_slack_reply(_yihe_answer(), max_answer_chars=20_000),
+    ):
+        assert UNCLOSED_BOLD_RUN.search(text) is None
+        assert "> • *文章 [1]*" in text.splitlines()
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        "> 標題：傳統製麵廠的數位轉型之路！",
+        "> 上線日期：2026-07-10",
+        "> 採訪年份：2026",
+        "> 狀態：已上線",
+        "> 對外引用：可對外引用",
+        "> 資料來源：商家夥伴案例資料庫 r8",
+    ],
+)
+def test_each_standard_label_renders_as_plain_text_next_to_its_value(expected):
+    text = format_slack_reply(_shanfeng_answer(), max_answer_chars=20_000)
+
+    assert expected in text.splitlines()
+
+
+@pytest.mark.parametrize(
+    "answer_factory,url",
+    [
+        ("_shanfeng_answer", "https://blog.shopline.tw/merchant-showcase-shanfeng/"),
+        ("_shanfeng_answer", "https://www.youtube.com/watch?v=WIMy_AFA0pE"),
+        ("_yihe_answer", "https://blog.shopline.tw/merchant-showcase-yh/"),
+        ("_yihe_answer", "https://youtu.be/7nVLtH5iW20"),
+    ],
+)
+def test_accepted_asset_urls_remain_clickable_after_the_label_change(answer_factory, url):
+    text = format_slack_reply(globals()[answer_factory](), max_answer_chars=20_000)
+
+    assert f"> 連結：<{url}|開啟連結>" in text.splitlines()
+
+
+def test_missing_url_still_renders_the_missing_marker():
+    answer = _answer("query", [_entity("Brand", [_asset("article", "沒有連結", row=3, url=None)])])
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+
+    assert "> 連結：資料未提供" in text.splitlines()
+    assert "|開啟連結>" not in text
+
+
+def test_asterisks_inside_a_title_cannot_break_the_surrounding_labels():
+    answer = _answer(
+        "query",
+        [_entity("Brand", [_asset("article", "測試 *星號* 標題", row=4, url="https://example.com/a")])],
+    )
+
+    lines = format_slack_reply(answer, max_answer_chars=20_000).splitlines()
+
+    # The asterisks stay inside the title's own line; no label around it is consumed by them.
+    assert "> 標題：測試 *星號* 標題" in lines
+    assert "> 連結：<https://example.com/a|開啟連結>" in lines
+    assert "> 狀態：已上線" in lines
+    assert "> 資料來源：商家夥伴案例資料庫 r4" in lines
+
+
+def test_angle_brackets_and_ampersands_in_dynamic_text_stay_escaped():
+    answer = _answer(
+        "query",
+        [_entity("A <b> & c", [_asset("article", "標題 <x> & <y>", row=5, url=None)])],
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+
+    assert "> 標題：標題 &lt;x&gt; &amp; &lt;y&gt;" in text.splitlines()
+    assert "`A &lt;b&gt; &amp; c`" in text
+    assert "<b>" not in text
+    assert "<x>" not in text
+
+
+def test_dynamic_text_cannot_inject_a_slack_hyperlink():
+    answer = _answer(
+        "query",
+        [
+            _entity(
+                "Brand",
+                [_asset("article", "<https://evil.example/pwn|點我>", row=6, url=None)],
+            )
+        ],
+    )
+
+    text = format_slack_reply(answer, max_answer_chars=20_000)
+
+    assert "> 標題：&lt;https://evil.example/pwn|點我&gt;" in text.splitlines()
+    # The hostile text is displayed inert: no link construct is produced anywhere in the message.
+    assert "evil.example" in text
+    assert "<https://" not in text
+    assert "|開啟連結>" not in text
+
+
+def test_multiline_dynamic_text_cannot_forge_a_following_label():
+    answer = _answer(
+        "query",
+        [
+            _entity(
+                "Brand",
+                [
+                    _asset(
+                        "article",
+                        "第一行\n> 連結：<https://evil.example/pwn|點我>\n第二行",
+                        row=7,
+                        url=None,
+                    )
+                ],
+            )
+        ],
+    )
+
+    lines = format_slack_reply(answer, max_answer_chars=20_000).splitlines()
+
+    assert (
+        "> 標題：第一行 &gt; 連結：&lt;https://evil.example/pwn|點我&gt; 第二行" in lines
+    )
+    # Exactly one 連結 line exists and it is the one the formatter wrote.
+    assert [line for line in lines if line.startswith("> 連結：")] == ["> 連結：資料未提供"]
+    assert "第二行" not in [line.strip() for line in lines]
+    assert "<https://" not in "\n".join(lines)
