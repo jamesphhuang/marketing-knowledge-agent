@@ -25,6 +25,7 @@ from marketing_knowledge_agent.slack_interface import (
     SlackConfig,
     format_slack_reply,
     handle_slack_event,
+    run_slack_bot,
 )
 from marketing_knowledge_agent.slack_pagination import (
     SlackPaginationStore,
@@ -34,6 +35,9 @@ from marketing_knowledge_agent.slack_presentation import (
     BRAND_PAGE_SIZE,
     PAGE_CHAR_BUDGET,
     SHOW_MORE_COMMAND,
+    SHOW_MORE_MENTION,
+    SHOW_MORE_REPLY,
+    SLACK_SEARCH_PARENT_CAP,
     build_structured_slack_pages,
 )
 
@@ -373,7 +377,8 @@ def test_sixteen_brands_split_fifteen_then_one():
     assert len(_brand_headings(pages[0])) == 15
     assert len(_brand_headings(pages[1])) == 1
     assert "尚有 1 個品牌／夥伴未顯示。" in pages[0]
-    assert f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_COMMAND}」。" in pages[0]
+    # The notice quotes the mention form: a bare 「顯示更多」 reply raises no app_mention event.
+    assert f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_REPLY}」。" in pages[0]
     assert "未顯示" not in pages[1]
 
 
@@ -727,3 +732,207 @@ def test_a_restart_simply_loses_every_continuation():
     first.start(key, ("first", "second"))
 
     assert SlackPaginationStore().next_page(key) is None
+
+
+# --- remediation R1: the instruction on screen is the one that actually works --------------------
+
+
+def test_the_continuation_notice_quotes_the_mention_form():
+    pages = _pages(_brands(16))
+
+    assert f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_REPLY}」。" in pages[0]
+    assert SHOW_MORE_MENTION in pages[0]
+
+
+@pytest.mark.parametrize("count", [16, 17, 31])
+def test_no_notice_ever_quotes_the_bare_command_as_the_whole_action(count):
+    """「顯示更多」 on its own is not a followable instruction.
+
+    production subscribes to app_mention only, so a thread reply without the mention never
+    reaches the handler -- it is dropped with no reply, no error and no expiry message. Quoting
+    the bare command would send every reader of this notice down exactly that path.
+    """
+    for page in _pages(_brands(count)):
+        for line in page.splitlines():
+            if "請在此討論串回覆" in line:
+                assert f"「{SHOW_MORE_REPLY}」" in line
+                assert f"回覆「{SHOW_MORE_COMMAND}」" not in line
+
+
+def test_the_quoted_reply_is_exactly_what_the_handler_continues_on(tmp_path):
+    """Round trip: type what the notice says, get the next page.
+
+    Slack delivers a typed mention as a user id token rather than the display name, so the event
+    text carries `<@U0BOT>` where the notice showed `@Marketing Knowledge Agent`. What has to
+    match is the rest of the reply -- and that is what the handler matches on.
+    """
+    store = SlackPaginationStore()
+    audit = tmp_path / "audit.csv"
+    answer = _answer(_brands(17))
+
+    first = _handle(_event("品牌", ts="30.1"), answer, store, audit)
+    quoted = first["text"].split("請在此討論串回覆「", 1)[1].split("」", 1)[0]
+
+    assert quoted == SHOW_MORE_REPLY
+    # rsplit, not split: the display name itself contains spaces; the command never does.
+    mention, command = quoted.rsplit(" ", 1)
+    assert mention == SHOW_MORE_MENTION and command == SHOW_MORE_COMMAND
+
+    reply = _handle(_event(f"<@U0BOT> {command}", ts="30.2", thread_ts="30.1"), answer, store, audit)
+
+    assert "`品牌16`" in reply["text"]
+
+
+def test_the_bot_still_subscribes_to_app_mention_and_nothing_else(tmp_path):
+    """R1 changed wording, not the event surface. Pagination must not widen what the bot hears."""
+    registered = []
+    config_path = tmp_path / "slack.json"
+    config_path.write_text('{"allowed_channel_ids": ["C123"]}', encoding="utf-8")
+
+    class _App:
+        def __init__(self, token):
+            self.token = token
+
+        def event(self, name):
+            registered.append(name)
+            return lambda handler: handler
+
+    class _Handler:
+        def __init__(self, app, token):
+            self.app = app
+
+        def start(self):
+            return None
+
+    run_slack_bot(
+        config_path=config_path,
+        environ={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"},
+        app_factory=_App,
+        socket_mode_handler_factory=_Handler,
+    )
+
+    assert registered == ["app_mention"]
+
+
+def test_no_message_history_subscription_or_scope_is_referenced():
+    source = open("src/marketing_knowledge_agent/slack_interface.py", encoding="utf-8").read()
+
+    for forbidden in (
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+    ):
+        assert forbidden not in source
+    assert source.count("@app.event(") == 1
+    assert '@app.event("app_mention")' in source
+
+
+def test_pagination_writes_to_no_search_analytics_surface():
+    for path in (
+        "src/marketing_knowledge_agent/slack_pagination.py",
+        "src/marketing_knowledge_agent/slack_presentation.py",
+    ):
+        source = open(path, encoding="utf-8").read()
+        for forbidden in ("search_analytics", "SearchAnalytics", "analytics_event", "sqlite3"):
+            assert forbidden not in source
+
+
+# --- remediation R2: a capped result is disclosed as a ceiling, never as a complete total --------
+
+
+def test_below_the_ceiling_the_total_reads_as_a_complete_result():
+    pages = _pages(_brands(SLACK_SEARCH_PARENT_CAP - 1))
+
+    assert "共找到 59 個品牌／夥伴、59 筆內容。" in pages[0]
+    assert "目前顯示最多" not in "\n".join(pages)
+    assert "已顯示目前最多可提供的" not in "\n".join(pages)
+
+
+def test_at_the_ceiling_the_total_reads_as_a_display_maximum():
+    """60 is where the Slack ceiling stopped admitting brands, so it cannot be called a total.
+
+    The count is taken after the ceiling has already bound and no pre-cap total is kept, so
+    「共找到 60」 would state something the system does not know.
+    """
+    pages = _pages(_brands(SLACK_SEARCH_PARENT_CAP))
+
+    assert "目前顯示最多 60 個品牌／夥伴，共 60 筆內容。" in pages[0]
+    assert "共找到 60" not in "\n".join(pages)
+
+
+def test_the_ceiling_notice_closes_the_last_page_of_a_capped_result():
+    pages = _pages(_brands(SLACK_SEARCH_PARENT_CAP))
+
+    assert "已顯示目前最多可提供的 60 個品牌／夥伴。" in pages[-1]
+    assert "若想查看更多可能結果，請縮小或調整搜尋條件後重新搜尋。" in pages[-1]
+    assert "未顯示" not in pages[-1]
+    assert sum("已顯示目前最多可提供的" in page for page in pages) == 1
+
+
+def test_a_capped_result_still_paginates_normally_in_between():
+    pages = _pages(_brands(SLACK_SEARCH_PARENT_CAP))
+    headings = [heading for page in pages for heading in _brand_headings(page)]
+
+    assert [len(_brand_headings(page)) for page in pages] == [15, 15, 15, 15]
+    assert "尚有 45 個品牌／夥伴未顯示。" in pages[0]
+    assert "尚有 30 個品牌／夥伴未顯示。" in pages[1]
+    assert "尚有 15 個品牌／夥伴未顯示。" in pages[2]
+    assert "繼續顯示搜尋結果（第 16–30 個品牌／夥伴）" in pages[1]
+    assert "繼續顯示搜尋結果（第 46–60 個品牌／夥伴）" in pages[3]
+    assert len(headings) == 60 and len(set(headings)) == 60
+
+
+@pytest.mark.parametrize("count", [59, SLACK_SEARCH_PARENT_CAP])
+def test_no_page_claims_that_results_exist_beyond_what_was_retrieved(count):
+    """Without a pre-cap total, any 「還有更多」 would be a claim the system cannot support."""
+    text = "\n".join(_pages(_brands(count)))
+
+    for claim in ("還有更多", "尚有更多", "共有超過", "超過 60", "至少還有"):
+        assert claim not in text
+
+
+def test_the_ceiling_page_offers_an_action_rather_than_a_promise():
+    last = _pages(_brands(SLACK_SEARCH_PARENT_CAP))[-1]
+
+    assert "若想查看更多可能結果" in last  # "可能" -- an invitation, not an assertion
+    assert "還有更多" not in last
+
+
+@pytest.mark.parametrize("count", [0, 1, 15, 16, 30, 45, 59])
+def test_the_ceiling_wording_never_fires_below_the_ceiling(count):
+    text = "\n".join(_pages(_brands(count)))
+
+    assert "目前顯示最多" not in text
+    assert "已顯示目前最多可提供的" not in text
+
+
+def test_a_capped_result_reaches_its_ceiling_notice_through_the_real_handler(tmp_path):
+    store = SlackPaginationStore()
+    audit = tmp_path / "audit.csv"
+    answer = _answer(_brands(SLACK_SEARCH_PARENT_CAP))
+
+    first = _handle(_event("品牌", ts="31.1"), answer, store, audit)
+    assert "目前顯示最多 60 個品牌／夥伴，共 60 筆內容。" in first["text"]
+
+    seen = list(_brand_headings(first["text"]))
+    pages = [first["text"]]
+    for index in range(3):
+        reply = _handle(
+            _event(f"<@U0BOT> {SHOW_MORE_COMMAND}", ts=f"31.{index + 2}", thread_ts="31.1"),
+            answer,
+            store,
+            audit,
+        )
+        pages.append(reply["text"])
+        seen.extend(_brand_headings(reply["text"]))
+
+    assert len(seen) == 60 and len(set(seen)) == 60
+    assert "已顯示目前最多可提供的 60 個品牌／夥伴。" in pages[-1]
+    assert _handle(
+        _event(f"<@U0BOT> {SHOW_MORE_COMMAND}", ts="31.9", thread_ts="31.1"), answer, store, audit
+    )["text"] == PAGINATION_EXPIRED_MESSAGE

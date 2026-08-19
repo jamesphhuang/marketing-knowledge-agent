@@ -29,9 +29,19 @@ BRAND_PAGE_SIZE = 15
 # and a brand group is never split across two messages. The budget sits far below the API limit:
 # it only binds on pathologically large brand groups, where one extra page is the safe outcome.
 PAGE_CHAR_BUDGET = 12000
-# The literal reply that continues a paginated result set, quoted to the user in the notice below
-# and matched by the Slack event handler. One definition so the two can never drift apart.
+# What the Slack event handler matches on, once it has stripped the app mention from the reply.
 SHOW_MORE_COMMAND = "顯示更多"
+# What the notice actually asks the user to type. The bot subscribes to app_mention and nothing
+# else, so a thread reply that does not mention it never reaches the handler at all -- quoting the
+# bare command would walk the user into a reply that is silently dropped. One definition of each
+# half, so the matcher and the instruction can never drift apart.
+SHOW_MORE_MENTION = "@Marketing Knowledge Agent"
+SHOW_MORE_REPLY = f"{SHOW_MORE_MENTION} {SHOW_MORE_COMMAND}"
+# How many brand groups the Slack surface materialises for one search before it stops admitting
+# new ones. It is display capacity, not ranking -- slack_interface asks pipeline.agent_ask for
+# exactly this much. The renderer owns the number because a result that reaches the ceiling has to
+# be described to the user as a ceiling rather than as a complete total.
+SLACK_SEARCH_PARENT_CAP = 60
 GENERAL_NO_RESULT_MESSAGE = "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
 GOVERNANCE_SILENT_WORDS = (
     "restricted",
@@ -256,13 +266,20 @@ def _render_page(
     total_assets: int,
     remaining: int,
 ) -> str:
+    # A result that fills the display ceiling is not known to be a complete result: the count is
+    # taken after the ceiling has already stopped admitting brands, and no pre-cap total exists to
+    # compare it against. Below the ceiling the count is the whole result and says so; at the
+    # ceiling the wording states only what is provable -- how much is being shown.
+    at_ceiling = total_entities >= SLACK_SEARCH_PARENT_CAP
     if page_index == 0:
-        # The totals describe the whole result, not this page: a user who reads "共找到 23" and
-        # sees 15 brands is told below exactly how many are still waiting.
+        # Either wording describes the whole retrieved result rather than this page: a user who
+        # reads 23 and sees 15 brands is told below exactly how many are still waiting.
         lines = [
             f"已套用搜尋條件：{conditions}",
             "",
-            f"共找到 {total_entities} 個品牌／夥伴、{total_assets} 筆內容。",
+            f"目前顯示最多 {total_entities} 個品牌／夥伴，共 {total_assets} 筆內容。"
+            if at_ceiling
+            else f"共找到 {total_entities} 個品牌／夥伴、{total_assets} 筆內容。",
         ]
     else:
         lines = [f"繼續顯示搜尋結果（第 {first_rank}–{last_rank} 個品牌／夥伴）"]
@@ -274,7 +291,18 @@ def _render_page(
             [
                 "",
                 f"尚有 {remaining} 個品牌／夥伴未顯示。",
-                f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_COMMAND}」。",
+                f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_REPLY}」。",
+            ]
+        )
+    elif at_ceiling:
+        # The last page of a ceiling-limited result. It discloses the ceiling without asserting
+        # that anything lies beyond it -- that is exactly what cannot be known here -- and points
+        # at the one action that could surface more.
+        lines.extend(
+            [
+                "",
+                f"已顯示目前最多可提供的 {total_entities} 個品牌／夥伴。",
+                "若想查看更多可能結果，請縮小或調整搜尋條件後重新搜尋。",
             ]
         )
     return "\n".join(lines)

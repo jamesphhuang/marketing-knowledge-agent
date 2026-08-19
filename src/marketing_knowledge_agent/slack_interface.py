@@ -26,6 +26,7 @@ from .slack_pagination import (
 )
 from .slack_presentation import (
     SHOW_MORE_COMMAND,
+    SLACK_SEARCH_PARENT_CAP,
     build_structured_slack_pages,
     format_structured_slack_reply,
 )
@@ -43,8 +44,9 @@ PAGINATION_EXPIRED_MESSAGE = "此搜尋工作階段已失效，請重新執行�
 # How much of a structured result the Slack surface materialises before paging over it. These are
 # display capacity, not ranking: the ordered candidate set and every governance gate in front of
 # it are unchanged, and raising the ceiling only lets Slack show more of the same ranked result.
-# Four pages of BRAND_PAGE_SIZE brands bounds the work and the continuation held in memory.
-SLACK_SEARCH_PARENT_CAP = 60
+# Four pages of BRAND_PAGE_SIZE brands bounds the work and the continuation held in memory. The
+# parent ceiling is defined with the renderer, which has to describe it to the user when a result
+# reaches it; re-exported here because this is the module that spends it.
 # One merchant record contributes at most one asset per supported type, so a parent-proportional
 # asset budget can never exhaust mid-brand -- which is what keeps a brand group whole on its page.
 SLACK_SEARCH_ASSET_CAP = SLACK_SEARCH_PARENT_CAP * 4

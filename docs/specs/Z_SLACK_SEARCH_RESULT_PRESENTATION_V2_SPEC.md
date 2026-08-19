@@ -15,7 +15,7 @@
 | A | Slack 使用者可見輸出不再顯示:上線日期、採訪年份、狀態、對外引用、資料來源 |
 | B | 不再另外顯示「連結：開啟連結」,改成標題本身直接可點擊 |
 | C | 一次最多展示的品牌／夥伴數由 5 提高到 15 |
-| D | 超過 15 個時顯示明確提示,並支援在同一 thread 回覆「顯示更多」繼續查看 |
+| D | 超過 15 個時顯示明確提示,並支援在同一 thread 回覆「@Marketing Knowledge Agent 顯示更多」繼續查看 |
 
 ## 2. Old vs New Output Contract
 
@@ -106,13 +106,40 @@ title 進入 `<url|label>` 前一律走既有 `_mrkdwn_escape`,沒有第二套 e
 - **Char budget**:`PAGE_CHAR_BUDGET = 12000`。Slack `chat.postMessage` 的 text 上限是
   40,000 字元,遠高於此。頁面逐品牌填充,下一個品牌會超過預算時提前收頁。
   單一品牌本身就超過預算時仍獨佔一頁完整輸出 —— **atomicity 優先於預算,絕不靜默截斷**。
-- **Totals**:第一頁的「共找到 X 個品牌／夥伴、Y 筆內容」是**整份結果**的總數,不是本頁數量。
+- **Totals**:第一頁的總數行描述的是**這次搜尋取得的整份結果**,不是本頁數量 —— 但它是否
+  等於「符合條件的全部結果」,取決於是否觸及 Slack 的顯示上限
+  (`SLACK_SEARCH_PARENT_CAP`,見下節)。因此有兩種措辭:
+
+  | 情況 | 措辭 |
+  | --- | --- |
+  | 品牌數 < 60 | `共找到 {n} 個品牌／夥伴、{m} 筆內容。` |
+  | 品牌數 = 60(觸及上限) | `目前顯示最多 60 個品牌／夥伴，共 {m} 筆內容。` |
+
+  **為什麼上限情況不能說「共找到 60」**:品牌數是在上限已經停止收錄新品牌**之後**才計算的,
+  而系統不保留 pre-cap 總數,因此無從得知 60 究竟是完整結果還是被上限切齊的結果。
+  「共找到 60」會把後者說成前者。措辭因此只陳述可證明的事:**目前顯示了多少**。
+
+  同理,系統**不會**說「還有更多結果」——— 沒有 pre-cap 總數就無法確定這件事。
+  這是 display-ceiling disclosure,不是 more-results claim。
+
 - **More-results notice**(僅在還有剩餘品牌時出現,最後一頁不出現):
 
   ```text
   尚有 {n} 個品牌／夥伴未顯示。
-  若要繼續查看，請在此討論串回覆「顯示更多」。
+  若要繼續查看，請在此討論串回覆「@Marketing Knowledge Agent 顯示更多」。
   ```
+
+  提示中一定帶 mention。Bot 只訂閱 `app_mention`,thread 內沒有 mention 的一般訊息
+  **不會進入 handler**;若提示只寫「顯示更多」,使用者照做會得到完全沒有回應的靜默失敗。
+
+- **Ceiling notice**(僅在觸及顯示上限的結果的**最後一頁**出現,取代 more-results notice):
+
+  ```text
+  已顯示目前最多可提供的 60 個品牌／夥伴。
+  若想查看更多可能結果，請縮小或調整搜尋條件後重新搜尋。
+  ```
+
+  它揭露上限,但不主張上限之外一定還有結果,並指向唯一能真正取得更多結果的動作。
 
 - **Page 2+ header**:不重複 query condition 與總數,改為
   `繼續顯示搜尋結果（第 16–30 個品牌／夥伴）`。
@@ -121,6 +148,9 @@ title 進入 `<url|label>` 前一律走既有 `_mrkdwn_escape`,沒有第二套 e
 
 Slack 端以 `SLACK_SEARCH_PARENT_CAP = 60`、`SLACK_SEARCH_ASSET_CAP = 240`
 呼叫既有 `pipeline.agent_ask`,讓 renderer 拿得到分頁所需的完整 candidate set(4 頁 × 15)。
+
+`SLACK_SEARCH_PARENT_CAP` 定義在 `slack_presentation`,因為 renderer 必須知道這個數字才能在
+結果觸及上限時如實描述它;`slack_interface` 匯入後用來向 `agent_ask` 要這麼多資料。
 
 這是 **display capacity,不是 ranking**:
 
@@ -176,8 +206,13 @@ ordered snapshot 的文字。理由是重新查詢可能因 index 更新、ranki
 
 ### 「顯示更多」的辨識
 
-訊息去除 app mention 與前後空白、去除結尾標點(`. 。 ! ！ ~ ～`)後,**完全等於**「顯示更多」
-才視為續頁請求;其餘一律當普通查詢(例如「顯示更多品牌」「更多」仍是搜尋)。
+續頁請求**必須 mention bot**:正式指令是「@Marketing Knowledge Agent 顯示更多」。
+production 只訂閱 `app_mention`,thread 內未 mention 的一般訊息根本不會送到 handler,
+因此沒有 mention 的「顯示更多」不是「未被辨識」,而是**從未抵達**。使用者可見的提示
+(上節 More-results notice)因此一律引用含 mention 的完整寫法。
+
+抵達 handler 之後:訊息去除 app mention 與前後空白、去除結尾標點(`. 。 ! ！ ~ ～`)後,
+**完全等於**「顯示更多」才視為續頁請求;其餘一律當普通查詢(例如「顯示更多品牌」「更多」仍是搜尋)。
 續頁請求不呼叫 retrieval、不做治理判斷、不寫 audit —— 因為沒有任何新的查詢或揭露發生。
 頻道白名單檢查仍在最前面,非白名單頻道連 continuation 都讀不到。
 
