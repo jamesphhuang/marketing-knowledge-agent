@@ -44,7 +44,11 @@ from .search_aliases import (
     merge_rank_and_cap_alias_results,
     resolve_exact_alias_parent_ids,
 )
-from .structured_results import generate_structured_answer
+from .structured_results import (
+    DEFAULT_ASSET_CAP,
+    DEFAULT_PARENT_CAP,
+    generate_structured_answer,
+)
 from .query_gating import (
     DEFAULT_QUERY_AUDIT_LOG,
     apply_intent_gating,
@@ -129,6 +133,8 @@ def ask_index(
     dry_run_llm: bool = False,
     llm_audit_log_path: Path = Path("reports/audit_log.csv"),
     query_plan: Optional[TypedQueryPlan] = None,
+    parent_cap: int = DEFAULT_PARENT_CAP,
+    asset_cap: int = DEFAULT_ASSET_CAP,
 ) -> GeneratedAnswer:
     filters = filters or SearchFilters()
     governance_index, load_warning = resolve_governance_index(governance_index, restricted_customers_path)
@@ -178,6 +184,8 @@ def ask_index(
             results,
             query_plan,
             governance_index=governance_index,
+            parent_cap=parent_cap,
+            asset_cap=asset_cap,
         )
     else:
         answer = generate_answer_with_llm(
@@ -217,6 +225,8 @@ def agent_ask(
     dry_run_llm: bool = False,
     llm_audit_log_path: Path = Path("reports/audit_log.csv"),
     query_audit_metadata: Optional[Mapping[str, str]] = None,
+    parent_cap: int = DEFAULT_PARENT_CAP,
+    asset_cap: int = DEFAULT_ASSET_CAP,
 ) -> AgenticAnswer:
     filters = filters or SearchFilters()
     governance_index, load_warning = resolve_governance_index(governance_index, restricted_customers_path)
@@ -256,6 +266,8 @@ def agent_ask(
             dry_run_llm=dry_run_llm,
             llm_audit_log_path=llm_audit_log_path,
             query_plan=query_plan,
+            parent_cap=parent_cap,
+            asset_cap=asset_cap,
         )
 
     def configured_search(question, db_path, filters, limit, mode):

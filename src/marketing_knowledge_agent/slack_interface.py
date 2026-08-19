@@ -19,7 +19,16 @@ from .slack_output_preview import (
     apply_approved_asset_url_overlay,
     load_index_bound_approved_asset_url_overlay,
 )
-from .slack_presentation import format_structured_slack_reply
+from .slack_pagination import (
+    SlackPaginationStore,
+    default_pagination_store,
+    pagination_key,
+)
+from .slack_presentation import (
+    SHOW_MORE_COMMAND,
+    build_structured_slack_pages,
+    format_structured_slack_reply,
+)
 
 
 DEFAULT_SLACK_CONFIG_PATH = Path(".mka/slack_config.json")
@@ -30,6 +39,18 @@ APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE = "APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE
 DENIED_CHANNEL_MESSAGE = "此頻道未啟用行銷知識查詢"
 ANSWER_TRUNCATION_NOTICE = "(內容過長已截斷,完整結果請用內部工具查詢)"
 SLACK_NO_RESULTS_MESSAGE = "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
+PAGINATION_EXPIRED_MESSAGE = "此搜尋工作階段已失效，請重新執行原搜尋。"
+# How much of a structured result the Slack surface materialises before paging over it. These are
+# display capacity, not ranking: the ordered candidate set and every governance gate in front of
+# it are unchanged, and raising the ceiling only lets Slack show more of the same ranked result.
+# Four pages of BRAND_PAGE_SIZE brands bounds the work and the continuation held in memory.
+SLACK_SEARCH_PARENT_CAP = 60
+# One merchant record contributes at most one asset per supported type, so a parent-proportional
+# asset budget can never exhaust mid-brand -- which is what keeps a brand group whole on its page.
+SLACK_SEARCH_ASSET_CAP = SLACK_SEARCH_PARENT_CAP * 4
+# Trailing punctuation a person may add to the continuation reply; stripped before matching so
+# "顯示更多。" and "顯示更多!" continue the thread, while anything else stays an ordinary query.
+SHOW_MORE_TRAILING = " \t\u3000.。!！~～"
 SLACK_AUDIT_HEADER = [
     "timestamp",
     "event",
@@ -94,6 +115,7 @@ def handle_slack_event(
     restricted_customers_path: Path = DEFAULT_RESTRICTED_CUSTOMERS_PATH,
     llm_config_path: Path = DEFAULT_LLM_CONFIG_PATH,
     audit_log_path: Path = DEFAULT_SLACK_AUDIT_LOG,
+    pagination_store: Optional[SlackPaginationStore] = None,
 ) -> dict:
     channel_id = str(event.get("channel") or "")
     user_id = str(event.get("user") or "")
@@ -113,11 +135,21 @@ def handle_slack_event(
         return _reply_dict(channel_id, thread_ts, DENIED_CHANNEL_MESSAGE)
 
     question = _strip_app_mention(raw_question)
+    store = pagination_store if pagination_store is not None else default_pagination_store()
+    thread_key = pagination_key(channel_id, thread_ts)
+    if _is_show_more_request(question):
+        # A continuation replays text this thread's own search already produced: no retrieval, no
+        # governance decision and no audit row, because nothing new is being queried or disclosed.
+        page = store.next_page(thread_key)
+        return _reply_dict(channel_id, thread_ts, page or PAGINATION_EXPIRED_MESSAGE)
+
     llm_config = load_llm_config(llm_config_path)
     answer = ask_fn(
         question,
         db_path=Path(db_path),
         filters=SearchFilters(intent="external"),
+        parent_cap=SLACK_SEARCH_PARENT_CAP,
+        asset_cap=SLACK_SEARCH_ASSET_CAP,
         restricted_customers_path=Path(restricted_customers_path),
         audit_log_path=Path(audit_log_path),
         provider_name=llm_config.provider,
@@ -151,7 +183,20 @@ def handle_slack_event(
             warning_count=len(answer.warnings),
             query=question,
         )
-    return _reply_dict(channel_id, thread_ts, format_slack_reply(answer, config.max_answer_chars))
+    pages = build_structured_slack_pages(answer)
+    if pages is None:
+        # Any earlier continuation in this thread is superseded even when the new query is not a
+        # structured search: 「顯示更多」 must never resume a result the user has moved on from.
+        store.discard(thread_key)
+        return _reply_dict(
+            channel_id, thread_ts, _format_unstructured_slack_reply(answer, config.max_answer_chars)
+        )
+    store.start(thread_key, pages.pages)
+    return _reply_dict(channel_id, thread_ts, pages.pages[0])
+
+
+def _is_show_more_request(question: str) -> bool:
+    return question.strip().rstrip(SHOW_MORE_TRAILING).strip() == SHOW_MORE_COMMAND
 
 
 def _apply_approved_asset_urls(answer, db_path) -> Optional[str]:
@@ -173,10 +218,14 @@ def _apply_approved_asset_urls(answer, db_path) -> Optional[str]:
 
 
 def format_slack_reply(answer, max_answer_chars: int) -> str:
+    """The single message for this answer -- the first page when the result is paginated."""
     structured_body = format_structured_slack_reply(answer)
     if structured_body is not None:
-        # Structured search owns its complete one-message presentation; pagination is a separate sprint.
         return structured_body
+    return _format_unstructured_slack_reply(answer, max_answer_chars)
+
+
+def _format_unstructured_slack_reply(answer, max_answer_chars: int) -> str:
     body = SLACK_NO_RESULTS_MESSAGE if _is_slack_abstention(answer) else _slackify_markdown(answer.answer)
     if len(body) > max_answer_chars:
         body = f"{body[:max_answer_chars].rstrip()}\n{ANSWER_TRUNCATION_NOTICE}"
@@ -245,6 +294,7 @@ def run_slack_bot(
         socket_mode_handler_factory = SocketModeHandler
 
     app = app_factory(token=bot_token)
+    pagination_store = default_pagination_store()
 
     @app.event("app_mention")
     def receive_app_mention(event, client):
@@ -255,6 +305,7 @@ def run_slack_bot(
             restricted_customers_path=restricted_customers_path,
             llm_config_path=llm_config_path,
             audit_log_path=audit_log_path,
+            pagination_store=pagination_store,
         )
         post_slack_reply(client, reply)
 

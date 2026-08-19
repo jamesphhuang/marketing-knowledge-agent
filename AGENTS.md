@@ -62,6 +62,7 @@ Final response format:
 - Query gating（已完成 2026-07-10,ROADMAP Stage 2）：`docs/specs/P_QUERY_GATING_SPEC.md`。
 - 外部 LLM 接入（已完成 2026-07-11,政策鑰匙關閉中）：`docs/specs/Q_LLM_INTEGRATION_SPEC.md`。
 - Slack 介面（下一個 sprint,ROADMAP Stage 4 終點）：`docs/specs/S_SLACK_INTERFACE_SPEC.md`。
+- Slack 搜尋結果呈現 v2(2026-08-19 Human UAT:隱藏五欄位、標題可點擊、15 品牌分頁)：`docs/specs/Z_SLACK_SEARCH_RESULT_PRESENTATION_V2_SPEC.md`。
 - retrieval / citation 精準度：`docs/governance/L_RETRIEVAL_CITATION_ACCURACY_REVIEW.md`。
 - 修改制度文件本身、踩坑教訓寫回：`docs/governance/F_MAINTENANCE_PROTOCOL.md`、`docs/governance/LESSONS.md`。
 - 接手新 session、不知從何開始：`docs/governance/G_LETTER_TO_FUTURE_SESSIONS.md`、`docs/governance/Z_ONE_PAGE_SUMMARY.md`。

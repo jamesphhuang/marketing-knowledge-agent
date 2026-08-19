@@ -388,8 +388,14 @@ def test_sanfeng_assets_reach_slack_with_their_own_links(tmp_path):
 
     assert [asset.url for asset in assets] == [SANFENG_ARTICLE_URL, SANFENG_VIDEO_URL]
     assert [citation.canonical_url for citation in citations] == [SANFENG_ARTICLE_URL, SANFENG_VIDEO_URL]
-    assert f"<{SANFENG_ARTICLE_URL}|開啟連結>" in reply["text"]
-    assert f"<{SANFENG_VIDEO_URL}|開啟連結>" in reply["text"]
+    # OLD: an anonymous "開啟連結" label proved only that each url reached the message.
+    # NEW: the url carries the asset's own title, so the same two assertions now also pin the
+    # article url to the article title and the video url to the video title.
+    lines = reply["text"].splitlines()
+    assert f"> <{SANFENG_ARTICLE_URL}|{SANFENG_ARTICLE_TITLE}>" in lines
+    assert f"> <{SANFENG_VIDEO_URL}|{SANFENG_VIDEO_TITLE}>" in lines
+    assert f"<{SANFENG_VIDEO_URL}|{SANFENG_ARTICLE_TITLE}>" not in reply["text"]
+    assert f"<{SANFENG_ARTICLE_URL}|{SANFENG_VIDEO_TITLE}>" not in reply["text"]
 
 
 def test_no_merchant_parent_or_sibling_url_is_inherited():

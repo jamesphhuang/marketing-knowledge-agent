@@ -426,8 +426,9 @@ def test_opted_in_slack_reply_uses_approved_asset_links_only(monkeypatch, tmp_pa
         audit_log_path=audit_path,
     )
 
-    assert "連結：<https://example.com/article|開啟連結>" in reply["text"]
-    assert "連結：<https://example.com/video|開啟連結>" in reply["text"]
+    # OLD: "連結：<url|開啟連結>".  NEW: the same approved url, on that asset's own title.
+    assert "> <https://example.com/article|Article>" in reply["text"].splitlines()
+    assert "> <https://example.com/video|Video>" in reply["text"].splitlines()
     assert [asset.url for asset in assets] == ["https://example.com/article", "https://example.com/video"]
     assert [citation.canonical_url for citation in citations] == ["https://example.com/article", "https://example.com/video"]
     assert [row[1] for row in _audit_rows(audit_path)] == ["slack_qa"]
@@ -450,8 +451,10 @@ def test_overlay_authority_failure_fails_closed_without_aborting_the_slack_query
     )
 
     assert "Merchant A" in reply["text"]
-    assert reply["text"].count("連結：資料未提供") == 2
-    assert "開啟連結" not in reply["text"]
+    assert ["> Article", "> Video"] == [
+        line for line in reply["text"].splitlines() if line in ("> Article", "> Video")
+    ]
+    assert "<http" not in reply["text"]
     assert [asset.url for asset in assets] == [None, None]
     assert [citation.canonical_url for citation in citations] == [None, None]
 
@@ -476,7 +479,7 @@ def test_unavailable_overlay_authority_still_runs_the_normal_slack_audit(monkeyp
     assert [row[1] for row in rows] == [APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE, "slack_qa"]
     assert all(len(row) == len(SLACK_AUDIT_HEADER) for row in rows)
     assert rows[0][-1] == ""
-    assert "開啟連結" not in reply["text"]
+    assert "<http" not in reply["text"]
 
 
 @pytest.mark.parametrize("damage", ["missing_artifacts", "missing_manifest", "hash_mismatch", "malformed_artifact"])
@@ -515,7 +518,10 @@ def test_feature_off_never_touches_the_approved_url_authority(monkeypatch, tmp_p
         audit_log_path=audit_path,
     )
 
-    assert reply["text"].count("連結：資料未提供") == 2
+    assert ["> Article", "> Video"] == [
+        line for line in reply["text"].splitlines() if line in ("> Article", "> Video")
+    ]
+    assert "<http" not in reply["text"]
     assert [row[1] for row in _audit_rows(audit_path)] == ["slack_qa"]
 
 

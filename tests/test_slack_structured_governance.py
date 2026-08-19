@@ -20,6 +20,8 @@ from marketing_knowledge_agent.slack_interface import (
     SLACK_NO_RESULTS_MESSAGE,
     SlackConfig,
     format_slack_reply,
+    SLACK_SEARCH_ASSET_CAP,
+    SLACK_SEARCH_PARENT_CAP,
     handle_slack_event,
 )
 
@@ -162,13 +164,21 @@ def test_shopline_payments_keeps_r32_and_legal_organic_results(
 def test_formal_shopline_caps_apply_after_asset_expansion(
     formal_slack_snapshot,
 ):
+    """OLD: the Slack shaping cap clamped this exact-alias result to 5 parents and 10 assets.
+
+    NEW (Slack Search Result Presentation v2): the parent side is unchanged -- the frozen alias
+    merge contract in pipeline.search_index still caps this query at 5 parents -- but the Slack
+    shaping cap no longer truncates asset expansion inside them, so each parent that survives the
+    merge keeps every asset it expands into. That is what lets a brand group stay whole on one
+    page. Every governance assertion below is unchanged.
+    """
     _, answer = _slack_query(formal_slack_snapshot, "SHOPLINE Payments")
     structured = answer.generated.structured_result
 
     assert structured is not None
     assert structured.total_entities == 5
-    assert structured.total_assets == 10
-    assert len(answer.citations) == 10
+    assert structured.total_assets == 11
+    assert len(answer.citations) == structured.total_assets
     assert len({entity.entity_name for entity in structured.matched_entities}) == 5
     assert all(entity.assets for entity in structured.matched_entities)
     assert _structured_asset_identities(answer) == set(_citation_asset_identities(answer))
@@ -199,10 +209,13 @@ def test_alias_loader_failure_preserves_governed_structured_caps(
     structured = answer.generated.structured_result
 
     assert structured is not None
-    assert 0 < structured.total_entities <= 5
-    assert 0 < structured.total_assets <= 10
+    # OLD: <= 5 parents and <= 10 assets, both from the Slack shaping cap. NEW: a broken alias
+    # projection drops this query out of the alias merge entirely, so the Slack display capacity
+    # is what bounds it. The bound moved; what the bound protects did not -- every governance
+    # assertion below still holds over the wider result.
+    assert 0 < structured.total_entities <= SLACK_SEARCH_PARENT_CAP
+    assert 0 < structured.total_assets <= SLACK_SEARCH_ASSET_CAP
     assert len(answer.citations) == structured.total_assets
-    assert len(answer.citations) <= 10
     assert "累計總GMV" not in reply["text"]
     assert not _has_source(answer, R15_SHEET, 15)
     assert _structured_asset_identities(answer) == set(_citation_asset_identities(answer))

@@ -128,7 +128,10 @@ def test_alias_only_candidate_reaches_structured_slack_renderer(slack_alias_runt
 
     assert answer.generated.structured_result is not None
     assert "聊心茶室" in reply["text"]
-    assert "商家夥伴案例資料庫 r32" in reply["text"]
+    # OLD: the r32 source line proved the alias owner reached the renderer. That line left the
+    # Slack surface in v2, so the same fact is read where it still lives -- the result payload.
+    assert "商家夥伴案例資料庫" not in reply["text"]
+    assert R32_ID in _parent_ids(answer)
 
 
 def test_shopline_payments_merge_ranking_and_caps_remain_stable(slack_alias_runtime):

@@ -22,6 +22,16 @@ ASSET_LABELS = {
 ASSET_ORDER = {"article": 0, "video": 1, "podcast": 2, "news": 3, "other": 4}
 MISSING = "資料未提供"
 DATA_CONFLICT = "資料不一致"
+# One Slack message shows at most this many brand groups; the rest continue in the same thread.
+BRAND_PAGE_SIZE = 15
+# chat.postMessage accepts 40,000 characters of text. A page is filled brand by brand and stops
+# early once the next brand group would cross this budget, so a page is never silently truncated
+# and a brand group is never split across two messages. The budget sits far below the API limit:
+# it only binds on pathologically large brand groups, where one extra page is the safe outcome.
+PAGE_CHAR_BUDGET = 12000
+# The literal reply that continues a paginated result set, quoted to the user in the notice below
+# and matched by the Slack event handler. One definition so the two can never drift apart.
+SHOW_MORE_COMMAND = "顯示更多"
 GENERAL_NO_RESULT_MESSAGE = "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
 GOVERNANCE_SILENT_WORDS = (
     "restricted",
@@ -128,7 +138,29 @@ def canonicalize_link_target(value: Optional[str]) -> Optional[CanonicalUrl]:
     return canonicalize_url(raw)
 
 
+@dataclass(frozen=True)
+class SlackSearchPages:
+    """One search result, already rendered into the messages that will carry it.
+
+    Paging over rendered text keeps the continuation deterministic: the ordered result is
+    formatted once, and every later page is the text this same search produced, never a second
+    retrieval that a changed index could answer differently. It is also the least data a
+    continuation can hold -- user-facing output that has already passed the governance,
+    external-use and mrkdwn contracts, carrying no query plan, citation, provenance or identity.
+    """
+
+    pages: Tuple[str, ...]
+    total_entities: int
+    total_assets: int
+
+
 def format_structured_slack_reply(answer) -> Optional[str]:
+    """The first Slack message for a structured search, or None when this is not one."""
+    pages = build_structured_slack_pages(answer)
+    return pages.pages[0] if pages is not None else None
+
+
+def build_structured_slack_pages(answer) -> Optional[SlackSearchPages]:
     generated = getattr(answer, "generated", answer)
     structured = getattr(generated, "structured_result", None)
     if structured is None:
@@ -136,12 +168,12 @@ def format_structured_slack_reply(answer) -> Optional[str]:
     if structured.unsupported_constraints:
         return None
     if structured.abstain_reason in {"no_constraint_intersection", "unresolved_structured_lookup"}:
-        return GENERAL_NO_RESULT_MESSAGE
+        return SlackSearchPages(pages=(GENERAL_NO_RESULT_MESSAGE,), total_entities=0, total_assets=0)
 
     entities = _presentation_entities(structured, getattr(generated, "citations", []))
     conditions = _render_conditions(getattr(generated, "question", ""), structured.query_plan)
     if not entities:
-        return "\n".join(
+        empty = "\n".join(
             [
                 f"已套用搜尋條件：{conditions}",
                 "",
@@ -153,57 +185,147 @@ def format_structured_slack_reply(answer) -> Optional[str]:
                 "• 移除年份或內容類型限制",
             ]
         )
+        return SlackSearchPages(pages=(empty,), total_entities=0, total_assets=0)
 
-    displayed_entities = entities[:5]
-    displayed_assets: List[dict] = []
-    for entity in displayed_entities:
-        remaining = 10 - len(displayed_assets)
-        if remaining <= 0:
-            break
-        entity["assets"] = entity["assets"][:remaining]
-        displayed_assets.extend(entity["assets"])
-    displayed_entities = [entity for entity in displayed_entities if entity["assets"]]
-
-    lines = [
-        f"已套用搜尋條件：{conditions}",
-        "",
-        f"共找到 {len(displayed_entities)} 個品牌／夥伴、{len(displayed_assets)} 筆內容。",
-    ]
+    total_assets = sum(len(entity["assets"]) for entity in entities)
+    blocks = []
     number = 1
-    for entity_index, entity in enumerate(displayed_entities):
-        lines.extend(["", f"`{_inline(entity['entity_name'])}`"])
+    for entity in entities:
+        block, number = _entity_block(entity, number)
+        blocks.append(block)
+
+    pages = []
+    shown = 0
+    grouped = _paginate_blocks(blocks)
+    for page_index, page_blocks in enumerate(grouped):
+        first_rank = shown + 1
+        shown += len(page_blocks)
+        pages.append(
+            _render_page(
+                page_blocks,
+                conditions=conditions,
+                page_index=page_index,
+                first_rank=first_rank,
+                last_rank=shown,
+                total_entities=len(entities),
+                total_assets=total_assets,
+                remaining=len(entities) - shown,
+            )
+        )
+    return SlackSearchPages(
+        pages=tuple(pages), total_entities=len(entities), total_assets=total_assets
+    )
+
+
+def _paginate_blocks(blocks: Sequence[List[str]]) -> List[List[List[str]]]:
+    """Split rendered brand blocks into pages, in rank order, without ever splitting a block.
+
+    A page closes when it already holds BRAND_PAGE_SIZE brands or when the next brand would push
+    it past the character budget. The ``current`` guard means a single oversized brand group still
+    gets its own page rather than being dropped or cut: brand atomicity outranks the budget.
+    """
+    pages: List[List[List[str]]] = []
+    current: List[List[str]] = []
+    current_chars = 0
+    for block in blocks:
+        size = _block_chars(block)
+        if current and (len(current) >= BRAND_PAGE_SIZE or current_chars + size > PAGE_CHAR_BUDGET):
+            pages.append(current)
+            current = []
+            current_chars = 0
+        current.append(block)
+        current_chars += size
+    if current:
+        pages.append(current)
+    return pages
+
+
+def _block_chars(block: Sequence[str]) -> int:
+    # Every line costs its own newline, plus the blank line that separates blocks on a page.
+    return sum(len(line) + 1 for line in block) + 1
+
+
+def _render_page(
+    page_blocks: Sequence[Sequence[str]],
+    *,
+    conditions: str,
+    page_index: int,
+    first_rank: int,
+    last_rank: int,
+    total_entities: int,
+    total_assets: int,
+    remaining: int,
+) -> str:
+    if page_index == 0:
+        # The totals describe the whole result, not this page: a user who reads "共找到 23" and
+        # sees 15 brands is told below exactly how many are still waiting.
+        lines = [
+            f"已套用搜尋條件：{conditions}",
+            "",
+            f"共找到 {total_entities} 個品牌／夥伴、{total_assets} 筆內容。",
+        ]
+    else:
+        lines = [f"繼續顯示搜尋結果（第 {first_rank}–{last_rank} 個品牌／夥伴）"]
+    for block in page_blocks:
+        lines.append("")
+        lines.extend(block)
+    if remaining > 0:
         lines.extend(
             [
-                f"_{_label_value('Handle', entity['merchant_handle'])}_",
-                f"_{_label_value('Sales Category LV1', entity['sales_category_lv1'])}_",
-                f"_{_label_value('Sales Category LV2', entity['sales_category_lv2'])}_",
+                "",
+                f"尚有 {remaining} 個品牌／夥伴未顯示。",
+                f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_COMMAND}」。",
             ]
         )
-        for asset in entity["assets"]:
-            asset["number"] = number
-            number += 1
-            # Slack only closes a bold run when the trailing "*" sits on a delimiter boundary, so a
-            # label whose "*" is immediately followed by the value is shown to the user verbatim
-            # whenever that value starts with a word character (CJK and digits both count). The
-            # asset header below keeps its bold because its closing "*" ends the line; the field
-            # labels carry none, so their rendering can never depend on the dynamic value.
-            lines.extend(
-                [
-                    "> • *"
-                    + f"{ASSET_LABELS.get(asset['asset_type'], '其他')} [{asset['number']}]"
-                    + "*",
-                    f"> 標題：{_normal_text(asset['title'])}",
-                    f"> 連結：{_slack_link(asset['url']) if asset['url'] else MISSING}",
-                    f"> 上線日期：{_normal_text(asset['published_at']) or MISSING}",
-                    f"> 採訪年份：{_normal_text(asset.get('interview_year') or entity.get('interview_year')) or MISSING}",
-                    f"> 狀態：{_status_label(asset['status'])}",
-                    f"> 對外引用：{asset['external_usage']}",
-                    f"> 資料來源：{_normal_text(asset['source']) or MISSING}",
-                ]
-            )
-            if asset is not entity["assets"][-1]:
-                lines.append(">")
     return "\n".join(lines)
+
+
+def _entity_block(entity: Mapping[str, object], number: int) -> Tuple[List[str], int]:
+    lines = [
+        f"`{_inline(entity['entity_name'])}`",
+        f"_{_label_value('Handle', entity['merchant_handle'])}_",
+        f"_{_label_value('Sales Category LV1', entity['sales_category_lv1'])}_",
+        f"_{_label_value('Sales Category LV2', entity['sales_category_lv2'])}_",
+    ]
+    assets = entity["assets"]
+    for asset in assets:
+        asset["number"] = number
+        number += 1
+        # Slack only closes a bold run when the trailing "*" sits on a delimiter boundary, so a
+        # label whose "*" is immediately followed by the value is shown to the user verbatim
+        # whenever that value starts with a word character (CJK and digits both count). The asset
+        # header below keeps its bold because its closing "*" ends the line; the title beneath it
+        # carries no formatter-owned marker at all, so its rendering cannot depend on the value.
+        lines.extend(
+            [
+                "> • *" + f"{ASSET_LABELS.get(asset['asset_type'], '其他')} [{asset['number']}]" + "*",
+                f"> {_asset_title(asset)}",
+            ]
+        )
+        if asset is not assets[-1]:
+            lines.append(">")
+    return lines, number
+
+
+def _asset_title(asset: Mapping[str, object]) -> str:
+    """The asset title, clickable only when this asset's own approved URL resolves safely.
+
+    No URL is derived, guessed or borrowed here. ``asset["url"]`` is whatever the approved URL
+    authority already attached to this asset -- an authority keyed on the asset's own type, so an
+    article link can only ever reach an article and a video link only a video. Anything that is
+    not a mrkdwn-safe absolute URL (absent, conflicting, malformed, hostile) leaves the title as
+    plain text; the title is never allowed to supply a link of its own.
+    """
+    title = _normal_text(asset["title"])
+    if not title:
+        return MISSING
+    url = canonicalize_link_target(asset["url"])
+    if url is None or not url_is_mrkdwn_safe(url.display):
+        return title
+    # The title reaches here already escaped: "<" and ">" are entity references, so it cannot
+    # close this link construct or open another, and control characters have collapsed to spaces
+    # so it cannot leave the line. A "|" inside the label is inert -- Slack splits on the first.
+    return f"<{escape_mrkdwn_url(url.display)}|{title}>"
 
 
 def _presentation_entities(
@@ -458,26 +580,8 @@ def _source_value(sheet: Optional[str], row: Optional[int]) -> Optional[str]:
     return f"{sheet} r{row}" if row is not None else sheet
 
 
-def _status_label(value: Optional[str]) -> str:
-    return {
-        "published": "已上線",
-        "draft": "草稿",
-        "archived": "已封存",
-        "deprecated": "已棄用",
-    }.get(str(value or ""), _normal_text(value) or MISSING)
-
-
 def _label_value(label: str, value: object) -> str:
     return f"{label}：{_normal_text(value) or MISSING}"
-
-
-def _slack_link(value: object) -> str:
-    # Raw safety is decided before canonicalization, then re-checked on the canonical form so
-    # escaping never changes the URL's identity.
-    url = canonicalize_link_target(value)
-    if url is None or not url_is_mrkdwn_safe(url.display):
-        return MISSING
-    return f"<{escape_mrkdwn_url(url.display)}|開啟連結>"
 
 
 def _normal_text(value: object) -> str:
