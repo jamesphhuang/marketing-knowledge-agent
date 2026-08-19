@@ -112,12 +112,26 @@ title 進入 `<url|label>` 前一律走既有 `_mrkdwn_escape`,沒有第二套 e
 
   | 情況 | 措辭 |
   | --- | --- |
-  | 品牌數 < 60 | `共找到 {n} 個品牌／夥伴、{m} 筆內容。` |
-  | 品牌數 = 60(觸及上限) | `目前顯示最多 60 個品牌／夥伴，共 {m} 筆內容。` |
+  | 取得的 structured records < 60 | `共找到 {n} 個品牌／夥伴、{m} 筆內容。` |
+  | 取得的 structured records 已觸及 `SLACK_SEARCH_PARENT_CAP` | `目前顯示最多 {n} 個品牌／夥伴，共 {m} 筆內容。` |
 
-  **為什麼上限情況不能說「共找到 60」**:品牌數是在上限已經停止收錄新品牌**之後**才計算的,
-  而系統不保留 pre-cap 總數,因此無從得知 60 究竟是完整結果還是被上限切齊的結果。
-  「共找到 60」會把後者說成前者。措辭因此只陳述可證明的事:**目前顯示了多少**。
+  **判定依據是 records,不是畫面上的品牌數**。上限是在 `structured_results` 消耗的,以
+  `(entity_type, source_record_id)` 為單位 —— 也就是 `structured_result.matched_entities`
+  的長度;renderer 端的品牌數是**再往後**一層的結果,只會更少而不會更多:
+
+  - 同一品牌可能有多筆 source records(例如兩年各採訪一次),grouping 後併成一個品牌;
+  - handle 衝突的品牌整組不顯示;
+  - 治理過濾後沒有任何可對外資產的品牌整組不顯示。
+
+  因此 60 筆 records 可能只呈現 59 或 58 個品牌。**這仍然是觸及上限的結果**,
+  必須沿用上限措辭(數字用實際品牌數),不得因為「不是剛好 60」就說成
+  `共找到 59`,那會把被切齊的結果講成完整 universe。反向也成立:59 筆 records
+  併成 58 個品牌時**不是**上限,仍用 `共找到`。
+
+  **為什麼上限情況不能說「共找到」**:records 是在上限已經停止收錄新記錄**之後**才計算的,
+  而系統不保留 pre-cap 總數,因此無從得知它究竟是完整結果還是被上限切齊的結果。
+  措辭因此只陳述可證明的事:**目前顯示了多少**。(records 剛好等於 60 的完整結果與被切齊的
+  結果在資料模型上無法區分,一律揭露上限 —— 這是主張較少的那一邊。)
 
   同理,系統**不會**說「還有更多結果」——— 沒有 pre-cap 總數就無法確定這件事。
   這是 display-ceiling disclosure,不是 more-results claim。
@@ -140,6 +154,8 @@ title 進入 `<url|label>` 前一律走既有 `_mrkdwn_escape`,沒有第二套 e
   ```
 
   它揭露上限,但不主張上限之外一定還有結果,並指向唯一能真正取得更多結果的動作。
+  觸發條件與 Totals 相同(records 觸及上限),數字同樣用實際品牌數 —— grouping 後只剩
+  59 個品牌時就是「已顯示目前最多可提供的 59 個品牌／夥伴。」。
 
 - **Page 2+ header**:不重複 query condition 與總數,改為
   `繼續顯示搜尋結果（第 16–30 個品牌／夥伴）`。
@@ -151,6 +167,12 @@ Slack 端以 `SLACK_SEARCH_PARENT_CAP = 60`、`SLACK_SEARCH_ASSET_CAP = 240`
 
 `SLACK_SEARCH_PARENT_CAP` 定義在 `slack_presentation`,因為 renderer 必須知道這個數字才能在
 結果觸及上限時如實描述它;`slack_interface` 匯入後用來向 `agent_ask` 要這麼多資料。
+上限判定寫在 `build_structured_slack_pages`(看得到 `matched_entities`),不是 `_render_page`
+(只看得到 grouping 後的品牌數);`_render_page` 收的是已決定好的 `at_ceiling`。
+
+`SLACK_SEARCH_ASSET_CAP = SLACK_SEARCH_PARENT_CAP * 4` 不是巧合:一筆 merchant record 最多
+貢獻 `ASSET_FIELDS` 的 4 種資產,所以 asset 上限不可能比 parent 上限先耗盡。records 是否觸及
+parent cap 因此足以代表「這次搜尋有沒有被 Slack 顯示上限切齊」。
 
 這是 **display capacity,不是 ranking**:
 

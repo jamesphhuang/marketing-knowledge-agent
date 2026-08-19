@@ -198,6 +198,16 @@ def build_structured_slack_pages(answer) -> Optional[SlackSearchPages]:
         return SlackSearchPages(pages=(empty,), total_entities=0, total_assets=0)
 
     total_assets = sum(len(entity["assets"]) for entity in entities)
+    # Whether the ceiling bound is a fact about the records the structured layer admitted, not
+    # about the brands left after this module grouped them. ``matched_entities`` carries one entry
+    # per source record and structured_results stops admitting new ones at exactly this cap, so a
+    # full list means the ceiling bound. Brand groups are only ever fewer -- one brand can own
+    # several source records, and a group is dropped outright on conflicting handles or when no
+    # asset survives governance -- so reading the ceiling off the brand count lets a truncated
+    # result introduce itself as a complete one. A full list may also be an exactly-full result
+    # rather than a truncated one; the two are indistinguishable without a pre-cap total, and
+    # disclosing the ceiling is the side that claims less.
+    at_ceiling = len(structured.matched_entities) >= SLACK_SEARCH_PARENT_CAP
     blocks = []
     number = 1
     for entity in entities:
@@ -220,6 +230,7 @@ def build_structured_slack_pages(answer) -> Optional[SlackSearchPages]:
                 total_entities=len(entities),
                 total_assets=total_assets,
                 remaining=len(entities) - shown,
+                at_ceiling=at_ceiling,
             )
         )
     return SlackSearchPages(
@@ -265,12 +276,11 @@ def _render_page(
     total_entities: int,
     total_assets: int,
     remaining: int,
+    at_ceiling: bool,
 ) -> str:
-    # A result that fills the display ceiling is not known to be a complete result: the count is
-    # taken after the ceiling has already stopped admitting brands, and no pre-cap total exists to
-    # compare it against. Below the ceiling the count is the whole result and says so; at the
-    # ceiling the wording states only what is provable -- how much is being shown.
-    at_ceiling = total_entities >= SLACK_SEARCH_PARENT_CAP
+    # ``at_ceiling`` is decided by the caller from the retrieved record count, never re-derived
+    # from ``total_entities`` here: the two differ whenever grouping merges or drops a brand, and
+    # this function only ever sees the smaller number.
     if page_index == 0:
         # Either wording describes the whole retrieved result rather than this page: a user who
         # reads 23 and sees 15 brands is told below exactly how many are still waiting.

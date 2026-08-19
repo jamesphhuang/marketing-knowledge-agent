@@ -33,6 +33,7 @@ from marketing_knowledge_agent.slack_pagination import (
 )
 from marketing_knowledge_agent.slack_presentation import (
     BRAND_PAGE_SIZE,
+    GOVERNANCE_SILENT_WORDS,
     PAGE_CHAR_BUDGET,
     SHOW_MORE_COMMAND,
     SHOW_MORE_MENTION,
@@ -936,3 +937,126 @@ def test_a_capped_result_reaches_its_ceiling_notice_through_the_real_handler(tmp
     assert _handle(
         _event(f"<@U0BOT> {SHOW_MORE_COMMAND}", ts="31.9", thread_ts="31.1"), answer, store, audit
     )["text"] == PAGINATION_EXPIRED_MESSAGE
+
+
+# --- R-F6: the ceiling is a fact about retrieved records, not about surviving brand groups -------
+
+
+def _capped_records(collapse=None):
+    """SLACK_SEARCH_PARENT_CAP source records -- exactly where the structured layer stopped.
+
+    Every entity here is one record the parent cap admitted. ``collapse`` swaps the last record
+    for one the presentation layer folds into an existing brand or drops outright, so the brand
+    count falls below the cap while the retrieved record count stays on it.
+    """
+    entities = _brands(SLACK_SEARCH_PARENT_CAP)
+    if collapse == "same_brand_twice":
+        # 品牌01 interviewed a second year: two source records, one brand group.
+        entities[-1] = _entity("品牌01", [_asset("video", "品牌01 的第二次採訪", row=901)], year=2025)
+    elif collapse == "conflicting_handles":
+        # A brand whose records disagree on the handle is withheld entirely, not merged.
+        entities[-1] = _entity("品牌01", [_asset("video", "品牌01 v", row=902)], handle="其他-handle")
+    return entities
+
+
+def test_a_full_record_set_that_merges_into_fewer_brands_still_discloses_the_ceiling():
+    """60 records presented as 59 brands is a capped result, not a complete 59.
+
+    The cap is spent on source records, so the brand count left after grouping says nothing
+    about whether it bound. Reading the ceiling off the brand count would let this result
+    introduce itself as the whole universe.
+    """
+    entities = _capped_records(collapse="same_brand_twice")
+    pages = build_structured_slack_pages(_answer(entities))
+
+    assert len(entities) == SLACK_SEARCH_PARENT_CAP
+    assert pages.total_entities == SLACK_SEARCH_PARENT_CAP - 1
+    assert "目前顯示最多 59 個品牌／夥伴，共 60 筆內容。" in pages.pages[0]
+    assert "共找到 59" not in "\n".join(pages.pages)
+    assert "已顯示目前最多可提供的 59 個品牌／夥伴。" in pages.pages[-1]
+
+
+def test_a_full_record_set_whose_brand_is_withheld_still_discloses_the_ceiling():
+    """A group dropped for conflicting handles takes two records off the brand count."""
+    entities = _capped_records(collapse="conflicting_handles")
+    pages = build_structured_slack_pages(_answer(entities))
+
+    assert len(entities) == SLACK_SEARCH_PARENT_CAP
+    assert pages.total_entities == SLACK_SEARCH_PARENT_CAP - 2
+    assert "目前顯示最多 58 個品牌／夥伴，共 58 筆內容。" in pages.pages[0]
+    assert "共找到 58" not in "\n".join(pages.pages)
+    assert "已顯示目前最多可提供的 58 個品牌／夥伴。" in pages.pages[-1]
+
+
+def test_a_brand_lost_to_governance_filtering_does_not_hide_the_ceiling():
+    """The record was retrieved and counted against the cap; only its assets were withheld."""
+    entities = _capped_records()
+    answer = _answer(entities)
+    answer.citations = [citation for citation in answer.citations if "品牌60" not in citation.title]
+    pages = build_structured_slack_pages(answer)
+
+    assert len(answer.structured_result.matched_entities) == SLACK_SEARCH_PARENT_CAP
+    assert pages.total_entities == SLACK_SEARCH_PARENT_CAP - 1
+    assert "目前顯示最多 59 個品牌／夥伴，共 59 筆內容。" in pages.pages[0]
+    assert "共找到 59" not in "\n".join(pages.pages)
+
+
+def test_one_record_below_the_cap_reads_as_a_complete_result():
+    """The control for the three above: 59 records never reached the ceiling."""
+    entities = _brands(SLACK_SEARCH_PARENT_CAP - 1)
+    pages = build_structured_slack_pages(_answer(entities))
+
+    assert len(entities) == SLACK_SEARCH_PARENT_CAP - 1
+    assert pages.total_entities == SLACK_SEARCH_PARENT_CAP - 1
+    assert "共找到 59 個品牌／夥伴、59 筆內容。" in pages.pages[0]
+    assert "目前顯示最多" not in "\n".join(pages.pages)
+
+
+def test_brands_falling_below_the_cap_is_not_by_itself_a_ceiling():
+    """59 records that merge into 58 brands must still read as a complete result.
+
+    The negative control that stops the predicate from being satisfied by any drop in the brand
+    count -- disclosing a ceiling that never bound would be its own false statement.
+    """
+    entities = _brands(SLACK_SEARCH_PARENT_CAP - 1)
+    entities[-1] = _entity("品牌01", [_asset("video", "品牌01 的第二次採訪", row=903)], year=2025)
+    pages = build_structured_slack_pages(_answer(entities))
+
+    assert len(entities) == SLACK_SEARCH_PARENT_CAP - 1
+    assert pages.total_entities == SLACK_SEARCH_PARENT_CAP - 2
+    assert "共找到 58 個品牌／夥伴、59 筆內容。" in pages.pages[0]
+    assert "目前顯示最多" not in "\n".join(pages.pages)
+    assert "已顯示目前最多可提供的" not in "\n".join(pages.pages)
+
+
+def test_the_ceiling_predicate_reads_records_not_the_rendered_brand_count():
+    """Pinned directly: the same 59 brands disclose or not according to the record count."""
+    merged = build_structured_slack_pages(_answer(_capped_records(collapse="same_brand_twice")))
+    short = build_structured_slack_pages(_answer(_brands(SLACK_SEARCH_PARENT_CAP - 1)))
+
+    assert merged.total_entities == short.total_entities == SLACK_SEARCH_PARENT_CAP - 1
+    assert "目前顯示最多 59" in merged.pages[0]
+    assert "共找到 59" in short.pages[0]
+
+
+def test_a_collapsed_ceiling_result_keeps_every_other_v2_guarantee():
+    """R-F6 moved the ceiling predicate only; the rest of the surface is untouched."""
+    entities = _brands(SLACK_SEARCH_PARENT_CAP - 2) + [_shanfeng(), _shanfeng()]
+    pages = build_structured_slack_pages(_answer(entities)).pages
+    joined = "\n".join(pages)
+
+    assert len(entities) == SLACK_SEARCH_PARENT_CAP
+    assert "目前顯示最多 59 個品牌／夥伴" in pages[0]
+    # the continuation notice still quotes the mention form
+    assert f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_REPLY}」。" in pages[0]
+    assert f"回覆「{SHOW_MORE_COMMAND}」" not in joined
+    # fifteen brands to a page, groups whole
+    assert [len(_brand_headings(page)) for page in pages] == [15, 15, 15, 13]
+    # titles still carry their own approved link
+    assert f"<{SHANFENG_ARTICLE_URL}|傳統製麵廠的數位轉型之路！>" in joined
+    assert f"<{SHANFENG_VIDEO_URL}|三風製麵品牌故事>" in joined
+    # hidden metadata and governance vocabulary stay off the surface
+    for label in HIDDEN_LABELS:
+        assert f"{label}：" not in joined
+    for word in GOVERNANCE_SILENT_WORDS:
+        assert word not in joined
