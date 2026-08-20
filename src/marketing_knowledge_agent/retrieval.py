@@ -1,13 +1,35 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from .embeddings import cosine_similarity, embed_text
 from .governance import metadata_allows_written_external_use
 from .indexing import SQLiteIndex
 from .models import Chunk, DocumentMetadata, NON_RETRIEVABLE_RECORD_TYPES, SearchFilters, SearchResult
 from .query_planning import TypedQueryPlan, metadata_matches_query_plan
+
+
+@dataclass
+class RetrievalWindow:
+    """Which documents the ranking window refused, for callers that must not call a cut list a total.
+
+    ``search`` scores every chunk that passed the filters and the query plan, then keeps the first
+    ``limit`` of them. Everything after that slice is gone before any later stage can count it, and
+    the stages that follow -- the alias merge, the structured layer -- both reduce their input to
+    one entry per ``document_id``. A chunk left outside the slice whose document is inside it
+    therefore costs the caller nothing; a document left entirely outside is a candidate the caller
+    will never be offered.
+
+    The refused documents are named rather than counted because a caller can re-supply some of them
+    by another route -- the exact-alias branch fetches its owner's records regardless of this
+    window -- and only a caller that can subtract those knows whether anything was really lost.
+    A result that fits inside the window refuses nothing, so an exactly-full window reports an empty
+    set rather than a truncation.
+    """
+
+    refused_document_ids: Set[str] = field(default_factory=set)
 
 
 class SQLiteRetriever:
@@ -21,6 +43,7 @@ class SQLiteRetriever:
         limit: int = 5,
         mode: str = "hybrid",
         query_plan: Optional[TypedQueryPlan] = None,
+        window: Optional[RetrievalWindow] = None,
     ) -> List[SearchResult]:
         filters = filters or SearchFilters()
         indexed_chunks = [
@@ -60,7 +83,16 @@ class SQLiteRetriever:
                     )
                 )
 
-        return sorted(results, key=lambda result: result.score, reverse=True)[:limit]
+        ranked = sorted(results, key=lambda result: result.score, reverse=True)
+        admitted = ranked[:limit]
+        if window is not None:
+            admitted_documents = {result.chunk.document_id for result in admitted}
+            window.refused_document_ids = {
+                result.chunk.document_id
+                for result in ranked[limit:]
+                if result.chunk.document_id not in admitted_documents
+            }
+        return admitted
 
 
 def matches_filters(metadata: DocumentMetadata, filters: SearchFilters) -> bool:

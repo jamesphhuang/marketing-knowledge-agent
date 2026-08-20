@@ -34,7 +34,7 @@ from .query_planning import (
     metadata_matches_query_plan,
 )
 from .reranking import rerank_results
-from .retrieval import SQLiteRetriever
+from .retrieval import RetrievalWindow, SQLiteRetriever
 from .retrieval import matches_filters
 from .search_aliases import (
     DEFAULT_ALIAS_PROJECTION_PATH,
@@ -92,6 +92,18 @@ class RetrievalTruncation:
     """
 
     exact_alias_capped: bool = False
+    retrieval_window_capped: bool = False
+
+    @property
+    def any_stage_capped(self) -> bool:
+        """True when any stage refused a candidate, whichever one it was.
+
+        The two stages are separate fields rather than one flag because they cut for different
+        reasons and either can bind on its own: a query can be cut by the retrieval window, by the
+        alias merge, or by both, and a single flag written twice would let the second writer erase
+        the first. A consumer that only needs "is this result the whole universe" reads this.
+        """
+        return self.exact_alias_capped or self.retrieval_window_capped
 
 
 def search_index(
@@ -110,12 +122,17 @@ def search_index(
     if query_plan.execution_blocked:
         return []
     retriever = SQLiteRetriever(Path(db_path))
+    # The retrieval window is decided here, three times the caller's limit, and the retriever is
+    # the only place both the window and the candidates it refused exist at once. Asking for the
+    # refusals costs the returned list nothing -- same query, same ranking, same slice.
+    window = RetrievalWindow()
     initial_results = retriever.search(
         query=query,
         filters=filters,
         limit=max(limit * 3, limit),
         mode=mode,
         query_plan=query_plan,
+        window=window,
     )
     ranked = rerank_results(query, initial_results, filters)
     if query_plan.query_mode == "structured_lookup" or query_plan.hard_constraints:
@@ -124,6 +141,8 @@ def search_index(
         query, query_plan, alias_projection_path
     )
     if not alias_owner_ids:
+        if truncation is not None:
+            truncation.retrieval_window_capped = bool(window.refused_document_ids)
         return ranked[:limit]
     alias_results = alias_results_for_parent_ids(
         db_path, alias_owner_ids, filters, query_plan
@@ -137,6 +156,15 @@ def search_index(
     )
     if truncation is not None:
         truncation.exact_alias_capped = len(admitted) < candidate_count
+        # The merge can only refuse candidates it was offered, so it cannot see a document the
+        # window dropped first: that document never reaches ``candidate_count`` and the comparison
+        # above reads it as a result that fit. Subtract the records the alias branch fetches by
+        # parent id -- those arrive whatever the window did, so refusing them lost nothing -- and
+        # whatever is left is a document this query matched and will never be offered.
+        alias_documents = {result.chunk.document_id for result in alias_results}
+        truncation.retrieval_window_capped = bool(
+            window.refused_document_ids - alias_documents
+        )
     return admitted
 
 
@@ -211,7 +239,7 @@ def ask_index(
             governance_index=governance_index,
             parent_cap=parent_cap,
             asset_cap=asset_cap,
-            retrieval_truncated=truncation.exact_alias_capped,
+            retrieval_truncated=truncation.any_stage_capped,
         )
     else:
         answer = generate_answer_with_llm(
