@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Mapping, Optional, Tuple
 
@@ -39,6 +40,7 @@ from .search_aliases import (
     DEFAULT_ALIAS_PROJECTION_PATH,
     EXPECTED_ALIAS_AUTHORITY,
     EXPECTED_ALIAS_BINDING,
+    alias_merge_candidate_count,
     alias_results_for_parent_ids,
     load_alias_projection,
     merge_rank_and_cap_alias_results,
@@ -79,6 +81,19 @@ def ingest_vault(
     }
 
 
+@dataclass
+class RetrievalTruncation:
+    """Whether a retrieval stage dropped candidates it had already found.
+
+    This is a diagnostic channel, not a result: retrieval behaviour is identical whether or not a
+    caller passes one. It exists because a presentation layer cannot otherwise tell a truncated
+    result from a complete one -- both arrive as a short list -- and describing a truncated result
+    as a complete total is the specific claim the Slack wording contract has to avoid.
+    """
+
+    exact_alias_capped: bool = False
+
+
 def search_index(
     query: str,
     db_path: Path,
@@ -87,6 +102,7 @@ def search_index(
     mode: str = "hybrid",
     query_plan: Optional[TypedQueryPlan] = None,
     alias_projection_path: Optional[Path] = DEFAULT_ALIAS_PROJECTION_PATH,
+    truncation: Optional[RetrievalTruncation] = None,
 ) -> List[SearchResult]:
     requested_filters = filters or SearchFilters()
     filters = apply_intent_gating(requested_filters)
@@ -112,9 +128,16 @@ def search_index(
     alias_results = alias_results_for_parent_ids(
         db_path, alias_owner_ids, filters, query_plan
     )
-    return merge_rank_and_cap_alias_results(
+    candidate_count = alias_merge_candidate_count(alias_results, ranked)
+    # The alias merge caps are a frozen ranking contract and stay exactly as they are. What is new
+    # is only that the caller can learn whether they bound: admitting fewer candidates than were
+    # offered is the merge's own definition of having run out of room.
+    admitted = merge_rank_and_cap_alias_results(
         alias_results, ranked, parent_cap=5, asset_cap=10
     )
+    if truncation is not None:
+        truncation.exact_alias_capped = len(admitted) < candidate_count
+    return admitted
 
 
 def ask_index(
@@ -166,6 +189,7 @@ def ask_index(
         if query_plan.query_mode == "structured_lookup"
         else limit
     )
+    truncation = RetrievalTruncation()
     results = search_index(
         question,
         db_path=db_path,
@@ -173,6 +197,7 @@ def ask_index(
         limit=retrieval_limit,
         mode=mode,
         query_plan=query_plan,
+        truncation=truncation,
     )
     results, removed_count = filter_restricted_results(results, governance_index)
     internal_result_count = _internal_result_count(
@@ -186,6 +211,7 @@ def ask_index(
             governance_index=governance_index,
             parent_cap=parent_cap,
             asset_cap=asset_cap,
+            retrieval_truncated=truncation.exact_alias_capped,
         )
     else:
         answer = generate_answer_with_llm(

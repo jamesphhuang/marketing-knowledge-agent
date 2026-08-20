@@ -107,13 +107,22 @@ title 進入 `<url|label>` 前一律走既有 `_mrkdwn_escape`,沒有第二套 e
   40,000 字元,遠高於此。頁面逐品牌填充,下一個品牌會超過預算時提前收頁。
   單一品牌本身就超過預算時仍獨佔一頁完整輸出 —— **atomicity 優先於預算,絕不靜默截斷**。
 - **Totals**:第一頁的總數行描述的是**這次搜尋取得的整份結果**,不是本頁數量 —— 但它是否
-  等於「符合條件的全部結果」,取決於是否觸及 Slack 的顯示上限
-  (`SLACK_SEARCH_PARENT_CAP`,見下節)。因此有兩種措辭:
+  等於「符合條件的全部結果」,取決於**任何一層**是否已經截斷過。有兩個獨立的截斷訊號,
+  任一成立就不得使用完整總數措辭:
+
+  | 截斷訊號 | 來源 |
+  | --- | --- |
+  | Slack 顯示上限 | 取得的 structured records 已觸及 `SLACK_SEARCH_PARENT_CAP`(見下節) |
+  | exact-alias retrieval 上限 | `structured_result.retrieval_truncated`(見「Upstream truncation」) |
 
   | 情況 | 措辭 |
   | --- | --- |
-  | 取得的 structured records < 60 | `共找到 {n} 個品牌／夥伴、{m} 筆內容。` |
-  | 取得的 structured records 已觸及 `SLACK_SEARCH_PARENT_CAP` | `目前顯示最多 {n} 個品牌／夥伴，共 {m} 筆內容。` |
+  | 兩個訊號都不成立 | `共找到 {n} 個品牌／夥伴、{m} 筆內容。` |
+  | 任一訊號成立 | `目前顯示最多 {n} 個品牌／夥伴，共 {m} 筆內容。` |
+
+  **兩個訊號必須一起看**:單看 records 是否觸及 `SLACK_SEARCH_PARENT_CAP` 並不足以判斷
+  這次搜尋有沒有被截斷 —— exact-alias path 的上限低得多,它切齊過的結果抵達 Slack 時
+  遠低於 60,看起來就像一個完整的小結果。
 
   **判定依據是 records,不是畫面上的品牌數**。上限是在 `structured_results` 消耗的,以
   `(entity_type, source_record_id)` 為單位 —— 也就是 `structured_result.matched_entities`
@@ -172,7 +181,31 @@ Slack 端以 `SLACK_SEARCH_PARENT_CAP = 60`、`SLACK_SEARCH_ASSET_CAP = 240`
 
 `SLACK_SEARCH_ASSET_CAP = SLACK_SEARCH_PARENT_CAP * 4` 不是巧合:一筆 merchant record 最多
 貢獻 `ASSET_FIELDS` 的 4 種資產,所以 asset 上限不可能比 parent 上限先耗盡。records 是否觸及
-parent cap 因此足以代表「這次搜尋有沒有被 Slack 顯示上限切齊」。
+parent cap 因此足以代表「這次搜尋有沒有被**這一層**切齊」——— 但只代表這一層,不代表整條
+retrieval 路徑;上游的 exact-alias 上限由下一節的獨立訊號負責。
+
+### Upstream truncation:exact-alias retrieval 上限
+
+`pipeline.search_index` 在 exact-alias 命中時走 `merge_rank_and_cap_alias_results`,
+其 `parent_cap = 5` / `asset_cap = 10` 是既有 frozen ranking contract,**本輪未修改也不得修改**。
+這兩個上限遠低於 Slack 的 60,一旦生效,被拒絕的候選根本不會進入 structured layer:
+Slack 收到的是一個「已經被切齊、但看起來很小很完整」的結果。因此需要一個獨立訊號。
+
+- **產生**:`search_index` 在 alias 分支比較 merge 收下的數量與它被給的候選數量
+  (`search_aliases.alias_merge_candidate_count`,與 merge 自己一樣以 `document_id` 去重)。
+  merge 只有兩種情形會丟掉候選 —— parent cap 拒絕新的 parent、asset cap 結束迴圈 ——
+  所以「收下的比給的少」精確等於「這次查詢踩到了 retrieval 上限」。
+  **這是實際截斷,不是「只要是 alias query 就算」**:候選全數收下時訊號為 false。
+- **傳遞**:`pipeline.RetrievalTruncation` 是一個 opt-in 的診斷通道。
+  `search_index` 多一個 `truncation=` 參數;不傳時行為與回傳值完全不變(其餘 20 餘個
+  呼叫端零影響)。`ask_index` 建立一個並讀出結果,交給 `generate_structured_answer`。
+- **保存**:存成 `StructuredRetrievalResult.retrieval_truncated`。它在 grouping 與
+  presentation 過濾**之前**就已決定,因此品牌合併、handle 衝突整組不顯示、
+  治理過濾整組不顯示,都不可能把這個事實抹掉。
+- **消費**:`build_structured_slack_pages` 把它與 Slack ceiling 訊號 OR 起來成為 `at_ceiling`,
+  之後的措辭與既有 ceiling 措辭**完全相同**,不另立新文案。
+- **不做**:不重新查詢以求得完整總數、不記錄 query、不建立 analytics、不持久化任何搜尋資料;
+  沒有 pre-cap universe count,所以措辭一律不宣稱「還有更多」或真實總數是多少。
 
 這是 **display capacity,不是 ranking**:
 

@@ -207,7 +207,16 @@ def build_structured_slack_pages(answer) -> Optional[SlackSearchPages]:
     # result introduce itself as a complete one. A full list may also be an exactly-full result
     # rather than a truncated one; the two are indistinguishable without a pre-cap total, and
     # disclosing the ceiling is the side that claims less.
-    at_ceiling = len(structured.matched_entities) >= SLACK_SEARCH_PARENT_CAP
+    # A result may also have been cut before it ever reached this surface: the exact-alias merge
+    # in pipeline.search_index has its own, much lower retrieval caps, and when they bind the
+    # structured layer never sees the candidates they refused. Such a result arrives far below the
+    # Slack ceiling and would otherwise introduce itself as a complete total. The upstream fact is
+    # carried on the result itself, decided before grouping, so neither branch of this predicate
+    # can be erased by brands merging or by a group being withheld.
+    at_ceiling = (
+        len(structured.matched_entities) >= SLACK_SEARCH_PARENT_CAP
+        or bool(getattr(structured, "retrieval_truncated", False))
+    )
     blocks = []
     number = 1
     for entity in entities:

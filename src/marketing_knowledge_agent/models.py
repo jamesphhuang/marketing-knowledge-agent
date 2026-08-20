@@ -485,6 +485,10 @@ class StructuredRetrievalResult(BaseModel):
     execution_blocked: bool = False
     abstained: bool = False
     abstain_reason: Optional[str] = None
+    # True when a retrieval stage dropped candidates it had already found, so the counts below
+    # describe what was admitted rather than what exists. Set before any grouping or presentation
+    # filtering runs, so a layer that shrinks the visible result cannot erase the fact.
+    retrieval_truncated: bool = False
 
 
 class GeneratedAnswer(BaseModel):

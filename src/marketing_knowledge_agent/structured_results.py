@@ -41,6 +41,7 @@ def generate_structured_answer(
     governance_index: Optional[GovernanceIndex] = None,
     parent_cap: int = DEFAULT_PARENT_CAP,
     asset_cap: int = DEFAULT_ASSET_CAP,
+    retrieval_truncated: bool = False,
 ) -> GeneratedAnswer:
     unique_results = [] if query_plan.execution_blocked else _unique_document_results(results)
     entities, citations, warnings, removed_asset_count = _aggregate_entities(
@@ -70,6 +71,7 @@ def generate_structured_answer(
         execution_blocked=query_plan.execution_blocked,
         abstained=abstained,
         abstain_reason=abstain_reason,
+        retrieval_truncated=retrieval_truncated,
     )
     answer_text = render_structured_result(structured)
     return GeneratedAnswer(

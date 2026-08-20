@@ -236,6 +236,18 @@ def merge_rank_and_cap_alias_results(
     return output
 
 
+def alias_merge_candidate_count(alias_results, organic_results) -> int:
+    """How many distinct candidates the alias merge is asked to admit, before any cap applies.
+
+    Deduplication by ``document_id`` is the merge's own first step, so counting it here exactly
+    the same way is what makes ``len(admitted) < candidate_count`` a statement about the caps
+    rather than an accident of duplicated input. The merge drops a candidate for only two
+    reasons -- the parent cap refusing a new parent, and the asset cap ending the loop -- so that
+    comparison is precisely "a retrieval cap bound on this query".
+    """
+    return len({result.chunk.document_id for result in list(alias_results) + list(organic_results)})
+
+
 def _parent_identity(result) -> str:
     metadata = result.chunk.metadata
     if metadata.source_sheet and metadata.source_row is not None:
