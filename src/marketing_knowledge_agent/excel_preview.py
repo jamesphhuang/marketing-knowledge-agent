@@ -38,6 +38,8 @@ from .models import DocumentMetadata
 from .record_identity_lineage import (
     PREVIEW_LINEAGE_FILENAME,
     RECORD_IDENTITY_SCHEME_VERSION,
+    preview_merchant_surface_digest,
+    preview_merchant_surface_entries,
     workbook_lineage_identity,
 )
 
@@ -284,6 +286,11 @@ def _workbook_lineage_declaration(
     Provenance only: the preview itself is never gated on it. Downstream paths that bind existing
     row-coordinate review decisions read this to refuse a workbook the decisions were not
     reviewed against.
+
+    The row identity surface is stamped alongside so the declaration can be checked against the
+    ``merchant_cases.json`` written beside it. That file is written first and this one last, so
+    without the digest a run interrupted between the two would leave a new payload wearing a stale
+    declaration, with nothing to tell them apart.
     """
     source_rows = [
         record["source_row"] for record in merchant_cases if isinstance(record.get("source_row"), int)
@@ -302,6 +309,9 @@ def _workbook_lineage_declaration(
     return {
         "record_identity_scheme_version": RECORD_IDENTITY_SCHEME_VERSION,
         "workbook": lineage,
+        "merchant_row_identity_surface_digest": preview_merchant_surface_digest(
+            preview_merchant_surface_entries(merchant_cases)
+        ),
         "workbook_path": str(workbook_path),
         "captured_date": captured_date.isoformat(),
         "normalized_at": normalized_at,

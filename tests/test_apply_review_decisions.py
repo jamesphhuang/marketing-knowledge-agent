@@ -5,8 +5,19 @@ from pathlib import Path
 
 import pytest
 
-from fixtures import write_row_v1_preview_lineage
+from fixtures import use_synthetic_row_v1_lineage_contract, write_row_v1_preview_lineage
 from marketing_knowledge_agent.review_template import REVIEW_COLUMNS
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_row_v1_lineage(monkeypatch, tmp_path):
+    """These previews are invented merchant rows, so they carry their own lineage contract.
+
+    Without it every apply here would refuse: ``resolve_preview_lineage`` cross-checks a
+    declaration against the payload beside it, and a fixture cannot declare the production
+    workbook's 120-row lineage over rows it made up.
+    """
+    use_synthetic_row_v1_lineage_contract(monkeypatch, tmp_path)
 
 
 def test_apply_review_decisions_routes_all_decisions_and_preserves_conservation(tmp_path):

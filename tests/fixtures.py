@@ -1,14 +1,23 @@
+import hashlib
 import json
+import sys
 from pathlib import Path
 
+from marketing_knowledge_agent import record_identity_lineage
 from marketing_knowledge_agent.record_identity_lineage import (
     APPLY_LINEAGE_FILENAME,
+    MERCHANT_SHAPE_FIELDS,
     PREVIEW_LINEAGE_FILENAME,
     RECORD_IDENTITY_SCHEME_VERSION,
+    _hash_json,
     apply_row_identity_surface_digest,
     apply_row_identity_surface_entries,
     load_lineage_contract,
+    observe_preview_merchant_surface,
 )
+
+# Set only by ``use_synthetic_row_v1_lineage_contract``; None means the packaged contract is live.
+_SYNTHETIC_CONTRACT_ROOT = None
 
 
 def write_regression_vault(base_path: Path) -> Path:
@@ -102,20 +111,109 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def write_row_v1_preview_lineage(preview_dir: Path) -> Path:
-    """Declare the pinned row_v1 workbook lineage on a synthetic preview directory.
+def use_synthetic_row_v1_lineage_contract(monkeypatch, tmp_path) -> Path:
+    """Give synthetic preview fixtures a lineage contract that describes them.
 
-    Stands in for a preview directory that ``excel-preview`` produced from the lineage workbook.
-    The row coordinates a fixture invents are irrelevant to the guard: it checks which workbook a
-    preview came from, not which rows it contains.
+    The fixtures invent a handful of merchant rows; the shipped contract pins the 120-row
+    production workbook. A fixture that declared the shipped lineage over its own invented rows
+    would be asserting a lineage it does not have — the precise forgery ``resolve_preview_lineage``
+    now rejects — so it gets its own contract instead of a hole in the guard.
+
+    Tests that exercise the *production* lineage (the 20260708 workbook, the live preview
+    directory, the packaged manifest) must not request this, and do not.
     """
+    root = tmp_path / "_row_v1_synthetic_authority"
+    root.mkdir(parents=True, exist_ok=True)
+    _write_synthetic_lineage_contract(root, None)
+    monkeypatch.setattr(record_identity_lineage, "_contract_root", lambda: root)
+    monkeypatch.setattr(sys.modules[__name__], "_SYNTHETIC_CONTRACT_ROOT", root)
+    return root
+
+
+def write_row_v1_preview_lineage(preview_dir: Path) -> Path:
+    """Declare a row_v1 workbook lineage over a synthetic preview directory.
+
+    The declaration is derived from the directory's own ``merchant_cases.json``, so it states the
+    lineage the preview actually has rather than one it was told to claim. When a synthetic
+    contract root is installed, that same observation is what the contract pins, which is what
+    lets the fixture reach ``LINEAGE_MATCH`` honestly.
+    """
+    preview_dir = Path(preview_dir)
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    observed, _ = observe_preview_merchant_surface(preview_dir)
+    if _SYNTHETIC_CONTRACT_ROOT is not None:
+        _write_synthetic_lineage_contract(_SYNTHETIC_CONTRACT_ROOT, observed)
+
     payload = {
         "record_identity_scheme_version": RECORD_IDENTITY_SCHEME_VERSION,
         "workbook": load_lineage_contract()["lineage_workbook"],
     }
-    path = Path(preview_dir) / PREVIEW_LINEAGE_FILENAME
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if observed is not None:
+        payload["merchant_row_identity_surface_digest"] = observed[
+            "merchant_row_identity_surface_digest"
+        ]
+    path = preview_dir / PREVIEW_LINEAGE_FILENAME
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def pin_synthetic_preview_payload(preview_dir: Path) -> Path:
+    """Add the pre-guard payload proof to the synthetic contract, for grandfathering tests.
+
+    Opt-in, because most fixtures need the opposite: a preview with no declaration and no pinned
+    payload must stay ``LINEAGE_UNBOUND``.
+    """
+    if _SYNTHETIC_CONTRACT_ROOT is None:
+        raise RuntimeError("no synthetic lineage contract is installed")
+    preview_dir = Path(preview_dir)
+    observed, _ = observe_preview_merchant_surface(preview_dir)
+    pins = []
+    for filename in ("merchant_cases.json",):
+        payload = (preview_dir / filename).read_bytes()
+        pins.append(
+            {
+                "relative_path": filename,
+                "expected_sha256": hashlib.sha256(payload).hexdigest(),
+                "expected_size": len(payload),
+            }
+        )
+    return _write_synthetic_lineage_contract(
+        _SYNTHETIC_CONTRACT_ROOT, observed, preview_payload=pins
+    )
+
+
+def _write_synthetic_lineage_contract(root: Path, observed, preview_payload=None) -> Path:
+    """Pin a contract to an observed synthetic merchant shape, self-integrity hash and all."""
+    shape = {
+        field: (observed[field] if observed is not None else None)
+        for field in MERCHANT_SHAPE_FIELDS
+    }
+    # Deterministic stand-in for a workbook the fixtures never actually produce.
+    identity = json.dumps(shape, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    body = {
+        "authority": "row_v1_workbook_lineage",
+        "schema_version": 1,
+        "record_identity_scheme_version": RECORD_IDENTITY_SCHEME_VERSION,
+        "purpose": (
+            "Test-only lineage contract describing a synthetic preview fixture. Never shipped: "
+            "the packaged contract pins the production workbook."
+        ),
+        "lineage_workbook": {
+            "filename": "synthetic-row-v1-lineage.xlsx",
+            "sha256": hashlib.sha256(f"synthetic-row-v1:{identity}".encode("utf-8")).hexdigest(),
+            "size": len(identity),
+            "merchant_header_row": 6,
+            "merchant_header_fingerprint": hashlib.sha256(
+                f"synthetic-row-v1-header:{identity}".encode("utf-8")
+            ).hexdigest(),
+            **shape,
+        },
+    }
+    if preview_payload is not None:
+        body["preview_payload"] = preview_payload
+    manifest = {**body, "manifest_hash": _hash_json(body)}
+    path = root / "manifest.json"
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 

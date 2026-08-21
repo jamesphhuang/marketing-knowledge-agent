@@ -20,6 +20,7 @@ from marketing_knowledge_agent.excel_preview import generate_excel_preview
 from marketing_knowledge_agent.obsidian_sync import create_sync_plan
 from marketing_knowledge_agent.record_identity_lineage import (
     APPLY_LINEAGE_FILENAME,
+    EVIDENCE_DECLARED,
     EVIDENCE_PINNED_LEGACY_APPLY_SURFACE,
     EVIDENCE_PINNED_PREVIEW_PAYLOAD,
     LINEAGE_MATCH,
@@ -27,16 +28,20 @@ from marketing_knowledge_agent.record_identity_lineage import (
     LINEAGE_UNBOUND,
     LINEAGE_UNSUPPORTED_SCHEME,
     PREVIEW_LINEAGE_FILENAME,
+    PREVIEW_MERCHANT_PAYLOAD_FILENAME,
     RECORD_IDENTITY_SCHEME_VERSION,
     RowV1LineageContractError,
     RowV1LineageError,
     apply_row_identity_surface_digest,
     apply_row_identity_surface_entries,
     load_lineage_contract,
+    preview_merchant_surface_digest,
+    preview_merchant_surface_entries,
     resolve_apply_lineage,
     resolve_preview_lineage,
 )
 from marketing_knowledge_agent.review_decision_validation import validate_review_decisions
+from fixtures import pin_synthetic_preview_payload, use_synthetic_row_v1_lineage_contract
 from test_apply_review_decisions import (
     _all_review_rows,
     _write_apply_preview_fixture,
@@ -69,6 +74,17 @@ PROTECTED_ARTIFACTS = (
     REPO_ROOT
     / "src/marketing_knowledge_agent/authority/approved_asset_urls/manifest.json",
 )
+
+
+@pytest.fixture
+def synthetic_lineage(monkeypatch, tmp_path):
+    """Contract for the invented-row preview fixtures.
+
+    Requested by name, never autouse: the tests that prove the *production* lineage — the 20260708
+    workbook, the live preview directory, the 2026-08-21 authority workbook and the packaged
+    manifest itself — must run against the shipped contract, and must keep running against it.
+    """
+    return use_synthetic_row_v1_lineage_contract(monkeypatch, tmp_path)
 
 
 def _require(path: Path) -> Path:
@@ -153,7 +169,7 @@ def test_authority_workbook_20260821_is_a_lineage_mismatch(tmp_path):
 # --- TEST 3: read-only analysis is never blocked ---------------------------------------------
 
 
-def test_read_only_preview_and_validation_survive_a_lineage_mismatch(tmp_path):
+def test_read_only_preview_and_validation_survive_a_lineage_mismatch(synthetic_lineage, tmp_path):
     workbook = tmp_path / "other.xlsx"
     _write_xlsx(workbook, _preview_workbook_sheets())
     preview_dir = tmp_path / "preview"
@@ -183,7 +199,7 @@ def test_read_only_preview_and_validation_survive_a_lineage_mismatch(tmp_path):
 # --- TEST 4: apply is blocked, and blocked before any write ---------------------------------
 
 
-def test_apply_is_blocked_before_any_write_on_lineage_mismatch(tmp_path):
+def test_apply_is_blocked_before_any_write_on_lineage_mismatch(synthetic_lineage, tmp_path):
     preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
     _write_declaration(preview_dir, {**_pinned_workbook(), "sha256": AUTHORITY_WORKBOOK_20260821_SHA256})
     decisions = _reviewed_decisions(tmp_path / "decisions.csv")
@@ -204,7 +220,7 @@ def test_apply_is_blocked_before_any_write_on_lineage_mismatch(tmp_path):
     assert _snapshot(PROTECTED_ARTIFACTS) == before
 
 
-def test_apply_refusal_leaves_an_existing_output_directory_untouched(tmp_path):
+def test_apply_refusal_leaves_an_existing_output_directory_untouched(synthetic_lineage, tmp_path):
     preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
     decisions = _reviewed_decisions(tmp_path / "decisions.csv")
     output_dir = tmp_path / "apply_preview"
@@ -219,7 +235,7 @@ def test_apply_refusal_leaves_an_existing_output_directory_untouched(tmp_path):
     assert _snapshot([output_dir]) == good
 
 
-def test_sync_is_blocked_before_any_vault_write_on_lineage_mismatch(tmp_path):
+def test_sync_is_blocked_before_any_vault_write_on_lineage_mismatch(synthetic_lineage, tmp_path):
     preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
     decisions = _reviewed_decisions(tmp_path / "decisions.csv")
     apply_dir = tmp_path / "apply_preview"
@@ -243,7 +259,7 @@ def test_sync_is_blocked_before_any_vault_write_on_lineage_mismatch(tmp_path):
     assert _snapshot([vault, *PROTECTED_ARTIFACTS]) == before
 
 
-def test_apply_stamps_a_binding_the_sync_path_verifies(tmp_path):
+def test_apply_stamps_a_binding_the_sync_path_verifies(synthetic_lineage, tmp_path):
     preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
     decisions = _reviewed_decisions(tmp_path / "decisions.csv")
     apply_dir = tmp_path / "apply_preview"
@@ -258,7 +274,7 @@ def test_apply_stamps_a_binding_the_sync_path_verifies(tmp_path):
     assert resolve_apply_lineage(apply_dir)["state"] == LINEAGE_MATCH
 
 
-def test_a_binding_copied_from_another_apply_preview_fails_closed(tmp_path):
+def test_a_binding_copied_from_another_apply_preview_fails_closed(synthetic_lineage, tmp_path):
     preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
     decisions = _reviewed_decisions(tmp_path / "decisions.csv")
     source_dir = tmp_path / "apply_a"
@@ -278,7 +294,7 @@ def test_a_binding_copied_from_another_apply_preview_fails_closed(tmp_path):
 # --- TEST 5 / TEST 6: shape is not identity --------------------------------------------------
 
 
-def test_a_different_workbook_with_the_same_row_count_is_blocked(tmp_path):
+def test_a_different_workbook_with_the_same_row_count_is_blocked(synthetic_lineage, tmp_path):
     preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
     # Identical merchant record count and row range; only the bytes differ.
     _write_declaration(preview_dir, {**_pinned_workbook(), "sha256": "a" * 64})
@@ -314,7 +330,7 @@ def test_a_modified_workbook_keeping_filename_and_sheets_is_blocked(tmp_path):
 # --- TEST 7: an unprovable lineage is not a passing lineage ----------------------------------
 
 
-def test_missing_lineage_binding_fails_closed_for_the_mutation_path(tmp_path):
+def test_missing_lineage_binding_fails_closed_for_the_mutation_path(synthetic_lineage, tmp_path):
     preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
     (preview_dir / PREVIEW_LINEAGE_FILENAME).unlink()
     decisions = _reviewed_decisions(tmp_path / "decisions.csv")
@@ -327,7 +343,7 @@ def test_missing_lineage_binding_fails_closed_for_the_mutation_path(tmp_path):
     assert not (tmp_path / "out").exists()
 
 
-def test_missing_apply_binding_fails_closed_for_the_sync_path(tmp_path):
+def test_missing_apply_binding_fails_closed_for_the_sync_path(synthetic_lineage, tmp_path):
     preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
     decisions = _reviewed_decisions(tmp_path / "decisions.csv")
     apply_dir = tmp_path / "apply_preview"
@@ -346,7 +362,7 @@ def test_missing_apply_binding_fails_closed_for_the_sync_path(tmp_path):
 # --- TEST 8: an unknown identity scheme is not row_v1 ----------------------------------------
 
 
-def test_unknown_record_identity_scheme_version_fails_closed(tmp_path):
+def test_unknown_record_identity_scheme_version_fails_closed(synthetic_lineage, tmp_path):
     preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
     _write_declaration(preview_dir, _pinned_workbook(), scheme="stable_record_v2")
     decisions = _reviewed_decisions(tmp_path / "decisions.csv")
@@ -384,7 +400,7 @@ def test_contract_is_packaged_and_self_verifying(monkeypatch, tmp_path):
         load_lineage_contract()
 
 
-def test_apply_output_assigns_no_successor_identity_key(tmp_path):
+def test_apply_output_assigns_no_successor_identity_key(synthetic_lineage, tmp_path):
     """WP0.4a establishes a lineage binding only; identity migration is a later work package."""
     from marketing_knowledge_agent.frontmatter import parse_markdown_with_frontmatter
 
@@ -405,6 +421,309 @@ def test_apply_output_assigns_no_successor_identity_key(tmp_path):
 
     binding = json.loads((apply_dir / APPLY_LINEAGE_FILENAME).read_text(encoding="utf-8"))
     assert binding["record_identity_scheme_version"] == RECORD_IDENTITY_SCHEME_VERSION
+
+
+# --- WP0.4a-H1: a declaration is only evidence if the payload beside it agrees ---------------
+#
+# Every test below is synthetic: it builds its own preview payload and its own lineage contract,
+# so it runs on a clean checkout with no workbook, no reports/ and no local authority present.
+
+
+def _merchant_payload(preview_dir: Path):
+    return json.loads(
+        (preview_dir / PREVIEW_MERCHANT_PAYLOAD_FILENAME).read_text(encoding="utf-8")
+    )
+
+
+def _rewrite_merchant_payload(preview_dir: Path, records) -> None:
+    """Overwrite the payload the way excel-preview writes it, leaving the declaration alone."""
+    (preview_dir / PREVIEW_MERCHANT_PAYLOAD_FILENAME).write_text(
+        json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _lineage_bound_preview(tmp_path: Path) -> Path:
+    """A preview whose declaration, payload and contract all agree — the CASE 1 starting point."""
+    preview_dir = _write_apply_preview_fixture(tmp_path / "preview")
+    assert resolve_preview_lineage(preview_dir)["state"] == LINEAGE_MATCH
+    return preview_dir
+
+
+def test_declared_lineage_is_cross_checked_against_the_payload_beside_it(
+    synthetic_lineage, tmp_path
+):
+    """CASE 1: agreement between declaration, payload and contract is what a match means."""
+    preview_dir = _lineage_bound_preview(tmp_path)
+    status = resolve_preview_lineage(preview_dir)
+
+    assert status["state"] == LINEAGE_MATCH
+    assert status["evidence"] == EVIDENCE_DECLARED
+    observed = status["observed_merchant_surface"]
+    assert observed["merchant_record_count"] == _pinned_workbook()["merchant_record_count"]
+    assert observed["merchant_source_row_min"] == _pinned_workbook()["merchant_source_row_min"]
+    assert observed["merchant_source_row_max"] == _pinned_workbook()["merchant_source_row_max"]
+    assert observed["merchant_row_identity_surface_digest"] == preview_merchant_surface_digest(
+        preview_merchant_surface_entries(_merchant_payload(preview_dir))
+    )
+
+
+def test_interrupted_preview_leaves_a_stale_declaration_that_never_matches(
+    synthetic_lineage, tmp_path
+):
+    """§10 — the state the independent reviewer actually reproduced.
+
+    ``excel-preview`` writes merchant_cases.json first and workbook_lineage.json last. Re-running
+    it over an existing output directory with a new workbook, and losing the process in between,
+    leaves a NEW payload under the OLD declaration. Nothing in the directory is corrupt; the two
+    halves simply describe different workbooks.
+    """
+    preview_dir = _lineage_bound_preview(tmp_path)
+    stale_declaration = (preview_dir / PREVIEW_LINEAGE_FILENAME).read_bytes()
+
+    # The new workbook inserts a merchant row, exactly as the 2026-08-21 authority does.
+    records = _merchant_payload(preview_dir)
+    inserted = {**records[0], "source_row": max(r["source_row"] for r in records) + 1,
+                "brand_name": "Inserted Merchant"}
+    _rewrite_merchant_payload(preview_dir, records + [inserted])
+
+    # The declaration was never reached by the interrupted run.
+    assert (preview_dir / PREVIEW_LINEAGE_FILENAME).read_bytes() == stale_declaration
+
+    status = resolve_preview_lineage(preview_dir)
+    # The declaration still names the pinned workbook; only the payload gives the run away.
+    assert status["actual_workbook_sha256"] == _pinned_workbook()["sha256"]
+    assert status["state"] != LINEAGE_MATCH
+    assert status["state"] == LINEAGE_MISMATCH
+
+    decisions = _reviewed_decisions(tmp_path / "decisions.csv")
+    output_dir = tmp_path / "apply_preview"
+    before = _snapshot(PROTECTED_ARTIFACTS)
+    with pytest.raises(RowV1LineageError):
+        apply_review_decisions(decisions, preview_dir, output_dir)
+    assert not output_dir.exists()
+    assert _snapshot(PROTECTED_ARTIFACTS) == before
+
+
+def test_a_declaration_copied_onto_a_different_preview_payload_never_matches(
+    synthetic_lineage, tmp_path
+):
+    """CASE 3 — a real declaration, copied beside a payload it does not describe."""
+    preview_dir = _lineage_bound_preview(tmp_path)
+    declaration = (preview_dir / PREVIEW_LINEAGE_FILENAME).read_bytes()
+
+    other = tmp_path / "other_preview"
+    _write_apply_preview_fixture(other)
+    records = _merchant_payload(other)
+    _rewrite_merchant_payload(other, records[:-1])
+    (other / PREVIEW_LINEAGE_FILENAME).write_bytes(declaration)
+
+    status = resolve_preview_lineage(other)
+    assert status["state"] in (LINEAGE_MISMATCH, LINEAGE_UNBOUND)
+    assert status["state"] != LINEAGE_MATCH
+
+    with pytest.raises(RowV1LineageError):
+        apply_review_decisions(
+            _reviewed_decisions(tmp_path / "decisions.csv"), other, tmp_path / "out"
+        )
+    assert not (tmp_path / "out").exists()
+
+
+def test_declared_merchant_shape_must_match_the_contract_not_only_the_sha256(
+    synthetic_lineage, tmp_path
+):
+    """CASE 4 — the pinned sha256 with a merchant shape the pinned workbook cannot have.
+
+    Before H1 these fields were carried for diagnostics and never consulted on the accept path.
+    """
+    preview_dir = _lineage_bound_preview(tmp_path)
+    pinned = _pinned_workbook()
+    _write_declaration(
+        preview_dir,
+        {
+            **pinned,
+            "merchant_record_count": pinned["merchant_record_count"] + 1,
+            "merchant_source_row_max": pinned["merchant_source_row_max"] + 1,
+        },
+    )
+
+    status = resolve_preview_lineage(preview_dir)
+    assert status["actual_workbook_sha256"] == pinned["sha256"]
+    assert status["state"] == LINEAGE_MISMATCH
+    assert "merchant_record_count" in status["detail"]
+
+    with pytest.raises(RowV1LineageError):
+        apply_review_decisions(
+            _reviewed_decisions(tmp_path / "decisions.csv"), preview_dir, tmp_path / "out"
+        )
+    assert not (tmp_path / "out").exists()
+
+
+def test_an_inserted_merchant_row_never_matches(synthetic_lineage, tmp_path):
+    """CASE 5."""
+    preview_dir = _lineage_bound_preview(tmp_path)
+    records = _merchant_payload(preview_dir)
+    inserted = {**records[0], "source_row": max(r["source_row"] for r in records) + 1}
+    _rewrite_merchant_payload(preview_dir, records + [inserted])
+
+    assert resolve_preview_lineage(preview_dir)["state"] != LINEAGE_MATCH
+
+
+def test_a_deleted_merchant_row_never_matches(synthetic_lineage, tmp_path):
+    """CASE 6."""
+    preview_dir = _lineage_bound_preview(tmp_path)
+    records = _merchant_payload(preview_dir)
+    _rewrite_merchant_payload(preview_dir, records[:-1])
+
+    assert resolve_preview_lineage(preview_dir)["state"] != LINEAGE_MATCH
+
+
+def test_a_remapped_row_to_merchant_relation_never_matches(synthetic_lineage, tmp_path):
+    """CASE 7a — the dangerous reorder: same count, same row range, different merchants.
+
+    This is the row shift that motivated WP0.4a, reduced to two rows. Merchant sheet *shape* is
+    byte-for-byte the same, so a shape-only cross-check would accept it; only a surface that
+    records which merchant each coordinate names can refuse.
+    """
+    preview_dir = _lineage_bound_preview(tmp_path)
+    records = _merchant_payload(preview_dir)
+    records[0]["brand_name"], records[1]["brand_name"] = (
+        records[1]["brand_name"],
+        records[0]["brand_name"],
+    )
+    _rewrite_merchant_payload(preview_dir, records)
+
+    observed = resolve_preview_lineage(preview_dir)["observed_merchant_surface"]
+    pinned = _pinned_workbook()
+    for field in ("merchant_record_count", "merchant_source_row_min", "merchant_source_row_max"):
+        assert observed[field] == pinned[field], "shape must be unchanged for this case to matter"
+
+    status = resolve_preview_lineage(preview_dir)
+    assert status["state"] == LINEAGE_MISMATCH
+    assert "merchant_row_identity_surface_digest" in status["detail"]
+
+    with pytest.raises(RowV1LineageError):
+        apply_review_decisions(
+            _reviewed_decisions(tmp_path / "decisions.csv"), preview_dir, tmp_path / "out"
+        )
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_reordered_merchant_payload_never_matches(synthetic_lineage, tmp_path):
+    """CASE 7b — a pure array permutation, each record still carrying its own source_row.
+
+    Semantically inert downstream, where every join is on the coordinate. Refused anyway: the
+    preview writer emits rows in ascending order, so a permuted payload is one that was edited
+    outside it, and an edited payload is not evidence of anything.
+    """
+    preview_dir = _lineage_bound_preview(tmp_path)
+    records = _merchant_payload(preview_dir)
+    records[0], records[1] = records[1], records[0]
+    _rewrite_merchant_payload(preview_dir, records)
+
+    assert resolve_preview_lineage(preview_dir)["state"] == LINEAGE_MISMATCH
+
+
+def test_a_declaration_without_a_row_identity_surface_is_unbound(synthetic_lineage, tmp_path):
+    """A lineage claim that cannot be checked is not a lineage claim that passed."""
+    preview_dir = _lineage_bound_preview(tmp_path)
+    _write_declaration(preview_dir, _pinned_workbook())  # shape-only, no surface digest
+
+    status = resolve_preview_lineage(preview_dir)
+    assert status["state"] == LINEAGE_UNBOUND
+    assert "merchant_row_identity_surface_digest" in status["detail"]
+
+    with pytest.raises(RowV1LineageError):
+        apply_review_decisions(
+            _reviewed_decisions(tmp_path / "decisions.csv"), preview_dir, tmp_path / "out"
+        )
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_missing_merchant_payload_is_unbound(synthetic_lineage, tmp_path):
+    preview_dir = _lineage_bound_preview(tmp_path)
+    (preview_dir / PREVIEW_MERCHANT_PAYLOAD_FILENAME).unlink()
+
+    status = resolve_preview_lineage(preview_dir)
+    assert status["state"] == LINEAGE_UNBOUND
+    assert PREVIEW_MERCHANT_PAYLOAD_FILENAME in status["detail"]
+
+
+def test_an_unreadable_merchant_payload_is_unbound(synthetic_lineage, tmp_path):
+    preview_dir = _lineage_bound_preview(tmp_path)
+    (preview_dir / PREVIEW_MERCHANT_PAYLOAD_FILENAME).write_text("{not json", encoding="utf-8")
+
+    assert resolve_preview_lineage(preview_dir)["state"] == LINEAGE_UNBOUND
+
+
+def test_grandfathered_preview_without_a_declaration_is_untouched_by_the_cross_check(
+    synthetic_lineage, tmp_path
+):
+    """CASE 8 — the pre-guard proof path must not acquire a declaration requirement.
+
+    A preview produced before the guard existed has no declaration to cross-check, and its payload
+    is pinned byte-for-byte, which already implies both the shape and the surface.
+    """
+    preview_dir = _lineage_bound_preview(tmp_path)
+    pin_synthetic_preview_payload(preview_dir)
+    (preview_dir / PREVIEW_LINEAGE_FILENAME).unlink()
+
+    status = resolve_preview_lineage(preview_dir)
+    assert status["state"] == LINEAGE_MATCH
+    assert status["evidence"] == EVIDENCE_PINNED_PREVIEW_PAYLOAD
+
+
+def test_grandfathered_preview_with_a_modified_payload_is_unbound(synthetic_lineage, tmp_path):
+    """CASE 9 — grandfathering proves those exact bytes, and nothing else."""
+    preview_dir = _lineage_bound_preview(tmp_path)
+    pin_synthetic_preview_payload(preview_dir)
+    (preview_dir / PREVIEW_LINEAGE_FILENAME).unlink()
+    records = _merchant_payload(preview_dir)
+    _rewrite_merchant_payload(preview_dir, records[:-1])
+
+    assert resolve_preview_lineage(preview_dir)["state"] == LINEAGE_UNBOUND
+
+
+def test_row_identity_surface_digest_is_deterministic_and_carries_no_wall_clock(tmp_path):
+    """§21 — the surface must survive a legitimate re-run, which rewrites every timestamp."""
+    records = [
+        {
+            "source_sheet": "商家夥伴案例資料庫",
+            "source_row": 7,
+            "record_type": "merchant_case",
+            "brand_name": "品牌 A",
+            "merchant_handle": None,
+            "interview_year": 2025,
+            "normalized_at": "2026-07-10T03:24:23+00:00",
+            "captured_date": "2026-07-10",
+        }
+    ]
+    rerun = [
+        {**records[0], "normalized_at": "2026-08-21T09:00:00+00:00", "captured_date": "2026-08-21"}
+    ]
+    digest = preview_merchant_surface_digest(preview_merchant_surface_entries(records))
+
+    assert digest == preview_merchant_surface_digest(preview_merchant_surface_entries(rerun))
+    assert digest == preview_merchant_surface_digest(preview_merchant_surface_entries(records))
+    # ...and it is still sensitive to the relation it exists to protect.
+    remapped = [{**records[0], "brand_name": "品牌 B"}]
+    assert digest != preview_merchant_surface_digest(preview_merchant_surface_entries(remapped))
+
+
+def test_read_only_paths_still_run_on_a_payload_that_fails_the_cross_check(
+    synthetic_lineage, tmp_path
+):
+    """§11 — H1 tightens binding evidence only; analysis of a mismatched preview stays available."""
+    preview_dir = _lineage_bound_preview(tmp_path)
+    records = _merchant_payload(preview_dir)
+    _rewrite_merchant_payload(preview_dir, records[:-1])
+    decisions = _reviewed_decisions(tmp_path / "decisions.csv")
+
+    summary = validate_review_decisions(
+        decisions, tmp_path / "validation.md", preview_dir=preview_dir
+    )
+    assert summary["row_v1_lineage"]["state"] == LINEAGE_MISMATCH
+    report = (tmp_path / "validation.md").read_text(encoding="utf-8")
+    assert "LINEAGE_MISMATCH" in report
 
 
 def _rewrite_first_shared_string(source: Path, target: Path) -> None:

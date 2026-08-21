@@ -44,8 +44,22 @@ APPLY_LINEAGE_FILENAME = "record_identity_binding.json"
 
 MERCHANT_HEADER_NAMESPACE = "mka:row-v1-workbook-lineage:v1:merchant-header"
 APPLY_SURFACE_NAMESPACE = "mka:row-v1-apply-row-identity-surface:v1"
+PREVIEW_MERCHANT_SURFACE_NAMESPACE = "mka:row-v1-preview-merchant-row-identity-surface:v1"
 
 APPLY_SURFACE_ROOT = "approved_vault_preview"
+
+# The payload a preview lineage declaration is checked against. It sits beside the declaration and
+# is written before it, so a preview interrupted between the two leaves this file newer than the
+# declaration that claims to describe it.
+PREVIEW_MERCHANT_PAYLOAD_FILENAME = "merchant_cases.json"
+
+# The merchant sheet facts a declaration states and the payload can independently re-state.
+MERCHANT_SHAPE_FIELDS = (
+    "merchant_sheet_name",
+    "merchant_record_count",
+    "merchant_source_row_min",
+    "merchant_source_row_max",
+)
 
 LINEAGE_MATCH = "LINEAGE_MATCH"
 LINEAGE_MISMATCH = "LINEAGE_MISMATCH"
@@ -160,6 +174,93 @@ def workbook_lineage_identity(
     }
 
 
+def preview_merchant_surface_entries(
+    records: Iterable[Mapping[str, object]]
+) -> List[List[str]]:
+    """Describe which merchant each row coordinate names, one entry per merchant record.
+
+    This is the row_v1 identity relation itself: a decision keyed ``商家夥伴案例資料庫:8`` means
+    whatever merchant sits at row 8, so the mapping from coordinate to merchant is exactly what a
+    row insertion changes and exactly what a lineage claim has to be checked against.
+
+    Deliberately excludes ``normalized_at``, ``captured_date`` and ``publish_date``: those change
+    on every legitimate re-run of the preview, and a surface that moved with them could not be
+    compared across runs. Everything kept here is a workbook cell value.
+
+    Order-sensitive on purpose. ``excel-preview`` emits merchant rows in ascending ``source_row``
+    order, so a reordered payload is one that was edited outside the preview writer — which is
+    precisely the state this guard must not accept as evidence.
+    """
+    return [
+        [
+            _surface_value(record.get("source_sheet")),
+            _surface_value(record.get("source_row")),
+            _surface_value(record.get("record_type")),
+            _surface_value(record.get("brand_name")),
+            _surface_value(record.get("merchant_handle")),
+            _surface_value(record.get("interview_year")),
+        ]
+        for record in records
+    ]
+
+
+def preview_merchant_surface_digest(entries: Iterable[Sequence[str]]) -> str:
+    return _namespaced_digest(
+        PREVIEW_MERCHANT_SURFACE_NAMESPACE, [list(entry) for entry in entries]
+    )
+
+
+def observe_merchant_records(records: Sequence[Mapping[str, object]]) -> Dict[str, object]:
+    """Re-derive the merchant sheet shape and row-identity surface from merchant-case records.
+
+    Used by both sides of the cross-check: ``excel-preview`` runs it over the records it is about
+    to write, and the guard runs it over the records it reads back. One derivation, so an
+    agreement between them means the same run produced both, not that two derivations happened to
+    round to the same answer.
+    """
+    sheets = sorted({_surface_value(record.get("source_sheet")) for record in records})
+    source_rows = [
+        record["source_row"] for record in records if isinstance(record.get("source_row"), int)
+    ]
+    return {
+        # A merchant payload spanning more than one sheet has no single sheet identity; report the
+        # set so the refusal names it instead of silently picking one.
+        "merchant_sheet_name": sheets[0] if len(sheets) == 1 else ",".join(sheets),
+        "merchant_record_count": len(records),
+        "merchant_source_row_min": min(source_rows) if source_rows else None,
+        "merchant_source_row_max": max(source_rows) if source_rows else None,
+        "merchant_row_identity_surface_digest": preview_merchant_surface_digest(
+            preview_merchant_surface_entries(records)
+        ),
+    }
+
+
+def observe_preview_merchant_surface(
+    preview_dir: Path,
+) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
+    """Read the merchant payload a preview declaration sits beside. Absent is not 'agrees'."""
+    path = Path(preview_dir) / PREVIEW_MERCHANT_PAYLOAD_FILENAME
+    if path.is_symlink():
+        return None, (
+            f"`{PREVIEW_MERCHANT_PAYLOAD_FILENAME}` is a symlink and is not trusted as payload "
+            "evidence"
+        )
+    if not path.is_file():
+        return None, (
+            f"`{PREVIEW_MERCHANT_PAYLOAD_FILENAME}` is missing, so the declared lineage cannot be "
+            "checked against the preview payload it claims to describe"
+        )
+    try:
+        records = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, f"`{PREVIEW_MERCHANT_PAYLOAD_FILENAME}` is unreadable"
+    if not isinstance(records, list) or any(
+        not isinstance(record, Mapping) for record in records
+    ):
+        return None, f"`{PREVIEW_MERCHANT_PAYLOAD_FILENAME}` is malformed"
+    return observe_merchant_records(records), None
+
+
 def apply_row_identity_surface_entries(apply_dir: Path) -> List[List[str]]:
     """Read the row-identity surface an apply preview directory exposes to the sync path.
 
@@ -207,6 +308,12 @@ def resolve_preview_lineage(preview_dir: Path) -> Dict[str, object]:
        ``normalized_at`` and therefore every payload hash.
     2. The pinned preview payload hashes, for a preview directory produced before this guard
        existed. Absence of both is not treated as a match.
+
+    A declaration is a claim, not an authority. Before proof 1 is accepted, the merchant payload
+    sitting beside it is re-read and must agree with both the declaration and the packaged
+    contract. ``excel-preview`` writes ``merchant_cases.json`` first and ``workbook_lineage.json``
+    last, so a run interrupted between them leaves a new payload under a stale declaration — a
+    state that is reachable by accident, not only by forgery, and that must never read as a match.
     """
     preview_dir = Path(preview_dir)
     contract = load_lineage_contract()
@@ -222,6 +329,7 @@ def resolve_preview_lineage(preview_dir: Path) -> Dict[str, object]:
         "declared_scheme_version": None,
         "evidence": EVIDENCE_NONE,
         "detail": None,
+        "observed_merchant_surface": None,
     }
 
     declared, declared_error = _read_declaration(preview_dir / PREVIEW_LINEAGE_FILENAME)
@@ -252,6 +360,29 @@ def resolve_preview_lineage(preview_dir: Path) -> Dict[str, object]:
             status["state"] = LINEAGE_MISMATCH
             status["detail"] = _workbook_difference(lineage, workbook)
             return status
+
+        # The declaration claims the pinned lineage. Everything above trusted it to say so; from
+        # here it has to survive the payload written beside it.
+        observed, observe_error = observe_preview_merchant_surface(preview_dir)
+        if observe_error is not None:
+            status["state"] = LINEAGE_UNBOUND
+            status["detail"] = observe_error
+            return status
+        status["observed_merchant_surface"] = dict(observed)
+
+        unprovable, contradictions = _preview_payload_disagreement(lineage, declared, observed)
+        if contradictions:
+            status["state"] = LINEAGE_MISMATCH
+            status["detail"] = (
+                "declared workbook lineage does not describe the preview payload beside it: "
+                + "; ".join(contradictions)
+            )
+            return status
+        if unprovable is not None:
+            status["state"] = LINEAGE_UNBOUND
+            status["detail"] = unprovable
+            return status
+
         status["state"] = LINEAGE_MATCH
         return status
 
@@ -471,6 +602,61 @@ def _pinned_payload_mismatch(preview_dir: Path, pinned: object) -> Optional[str]
         if len(payload) != expected_size or hashlib.sha256(payload).hexdigest() != expected_sha256:
             return f"{relative} differs from the pinned row_v1 payload"
     return None
+
+
+def _preview_payload_disagreement(
+    expected: Mapping[str, object],
+    declared: Mapping[str, object],
+    observed: Mapping[str, object],
+) -> Tuple[Optional[str], List[str]]:
+    """Cross-check a legacy-claiming declaration against the contract and the payload beside it.
+
+    Returns ``(unprovable, contradictions)``. A contradiction is a statement the payload refutes;
+    ``unprovable`` is a claim that simply cannot be checked. Both refuse, but they are different
+    failures and the refusal should say which one happened.
+
+    Each shape field is compared to the contract from both sides rather than declaration against
+    payload: a forged declaration that matches a doctored payload agrees with itself, and only the
+    contract breaks the tie.
+    """
+    declared_workbook = declared.get("workbook")
+    declared_workbook = declared_workbook if isinstance(declared_workbook, Mapping) else {}
+    contradictions: List[str] = []
+
+    for field in MERCHANT_SHAPE_FIELDS:
+        contract_value = expected.get(field)
+        observed_value = observed.get(field)
+        if observed_value != contract_value:
+            contradictions.append(
+                f"{field}: contract {contract_value!r}, "
+                f"{PREVIEW_MERCHANT_PAYLOAD_FILENAME} {observed_value!r}"
+            )
+        if field in declared_workbook and declared_workbook[field] != contract_value:
+            contradictions.append(
+                f"{field}: contract {contract_value!r}, declared {declared_workbook[field]!r}"
+            )
+
+    observed_digest = observed.get("merchant_row_identity_surface_digest")
+    declared_digest = declared.get("merchant_row_identity_surface_digest")
+    if isinstance(declared_digest, str) and declared_digest != observed_digest:
+        contradictions.append(
+            "merchant_row_identity_surface_digest: declared "
+            f"{declared_digest}, recomputed {observed_digest}"
+        )
+
+    unprovable = None
+    if not isinstance(declared_digest, str):
+        unprovable = (
+            "declared workbook lineage carries no merchant_row_identity_surface_digest, so which "
+            "merchant each reviewed row coordinate names cannot be checked against "
+            f"`{PREVIEW_MERCHANT_PAYLOAD_FILENAME}`; re-run excel-preview to produce a preview "
+            "that states its own row identity surface"
+        )
+    return unprovable, contradictions
+
+
+def _surface_value(value: object) -> str:
+    return "" if value is None else str(value)
 
 
 def _workbook_difference(expected: Mapping[str, object], actual: object) -> str:
