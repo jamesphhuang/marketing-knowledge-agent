@@ -1,4 +1,14 @@
+import json
 from pathlib import Path
+
+from marketing_knowledge_agent.record_identity_lineage import (
+    APPLY_LINEAGE_FILENAME,
+    PREVIEW_LINEAGE_FILENAME,
+    RECORD_IDENTITY_SCHEME_VERSION,
+    apply_row_identity_surface_digest,
+    apply_row_identity_surface_entries,
+    load_lineage_contract,
+)
 
 
 def write_regression_vault(base_path: Path) -> Path:
@@ -90,3 +100,40 @@ Product C demo transcript showing the previous navigation flow.
 
 def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
+
+
+def write_row_v1_preview_lineage(preview_dir: Path) -> Path:
+    """Declare the pinned row_v1 workbook lineage on a synthetic preview directory.
+
+    Stands in for a preview directory that ``excel-preview`` produced from the lineage workbook.
+    The row coordinates a fixture invents are irrelevant to the guard: it checks which workbook a
+    preview came from, not which rows it contains.
+    """
+    payload = {
+        "record_identity_scheme_version": RECORD_IDENTITY_SCHEME_VERSION,
+        "workbook": load_lineage_contract()["lineage_workbook"],
+    }
+    path = Path(preview_dir) / PREVIEW_LINEAGE_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def write_row_v1_apply_lineage(apply_dir: Path) -> Path:
+    """Declare the pinned row_v1 lineage on a synthetic apply preview directory.
+
+    The digest is recomputed from the directory's own records, so a binding copied between apply
+    previews still fails closed.
+    """
+    apply_dir = Path(apply_dir)
+    payload = {
+        "record_identity_scheme_version": RECORD_IDENTITY_SCHEME_VERSION,
+        "workbook": load_lineage_contract()["lineage_workbook"],
+        "row_identity_surface_digest": apply_row_identity_surface_digest(
+            apply_row_identity_surface_entries(apply_dir)
+        ),
+    }
+    path = apply_dir / APPLY_LINEAGE_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path

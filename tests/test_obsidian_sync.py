@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures import write_row_v1_apply_lineage
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.obsidian_sync import (
     ObsidianSyncError,
@@ -266,6 +267,7 @@ def _write_apply_dir(apply_dir: Path, records) -> Path:
     )
     for record in records:
         (target / f"merchant-{record['brand_name'][-1].lower()}.md").write_text(_markdown(record), encoding="utf-8")
+    write_row_v1_apply_lineage(apply_dir)
     return apply_dir
 
 

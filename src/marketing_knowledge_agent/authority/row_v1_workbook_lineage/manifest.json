@@ -1,0 +1,57 @@
+{
+  "authority": "row_v1_workbook_lineage",
+  "legacy_apply_row_identity_surface_digest": "4f3c8ab8808f79b55f5c800421c7286f56d4e7915dbc741fc214f5081a605f51",
+  "legacy_apply_row_identity_surface_note": "Grandfathers the one apply preview directory produced before this guard existed (reports/excel_preview/apply_preview, 109 vault-bound records). Any other apply preview must carry its own record_identity_binding.json.",
+  "lineage_evidence": [
+    "The pinned workbook reproduces all five live preview JSON payloads byte-for-byte when replayed at captured_date=2026-07-10 and normalized_at=2026-07-10T03:24:23+00:00.",
+    "merchant_cases.json sha256 6e33c942… is the pinned Decision Store Schema V2 Plan input in tests/fixtures/historical_inputs_manifest.json.",
+    "That manifest also pins the live governance_decisions.sqlite (df82a182…) and .mka/content_index.sqlite (74b6038e…), both of which match on disk."
+  ],
+  "lineage_workbook": {
+    "filename": "MKT 內容產出資料庫_店家_夥伴案例_對外數據-20260708.xlsx",
+    "merchant_data_start_row": 7,
+    "merchant_header_fingerprint": "1916c9cb69306bbaf909eade20bbcca33090452cdc1c12af810466e5e6f80465",
+    "merchant_header_row": 6,
+    "merchant_record_count": 120,
+    "merchant_sheet_name": "商家夥伴案例資料庫",
+    "merchant_source_row_max": 126,
+    "merchant_source_row_min": 7,
+    "sha256": "9cbd93f1a754eb28aa358d74215445c5ffa3b1100dd947000aa9bed1b5c4ad2c",
+    "size": 194522
+  },
+  "manifest_hash": "a4c2c68276129d176219f55cd6433952207771cb265cc71a0a731b6b69e4fe97",
+  "preview_payload": [
+    {
+      "expected_sha256": "6e33c942b9b79159597e3f5c10c8b1a8367d7ca517c6d9c6337831b3db732b90",
+      "expected_size": 210954,
+      "relative_path": "merchant_cases.json"
+    },
+    {
+      "expected_sha256": "89d5036fca02fe1cfbf7dd597af9e79761908ade5cdd376204b2774596ddc06e",
+      "expected_size": 36256,
+      "relative_path": "public_metrics.json"
+    },
+    {
+      "expected_sha256": "14ee427c308eb378c50d0fff658d67263acbe89134e61e986361418b9fb228ca",
+      "expected_size": 4705,
+      "relative_path": "pending_metrics.json"
+    },
+    {
+      "expected_sha256": "cfd9378c388cb4e58562a1a04785fda9a4cf0a7186cad7c2338ba25737c4be39",
+      "expected_size": 8971,
+      "relative_path": "restricted_customers.json"
+    },
+    {
+      "expected_sha256": "d6008b99352990061e877aa964ee760d24f014178d584e4603369543a4976467",
+      "expected_size": 53741,
+      "relative_path": "handle_mappings.json"
+    }
+  ],
+  "preview_payload_note": "Fallback proof for a preview directory produced before this guard existed. merchant_cases.json is already pinned at this exact sha256 in tests/fixtures/historical_inputs_manifest.json as the Decision Store Schema V2 Plan input, which is what ties this workbook to the live decision store.",
+  "purpose": "Bind the existing row-coordinate review-decision authority to the one workbook lineage it was reviewed against, so a different workbook fails closed at the binding and mutation boundaries instead of silently re-pointing every decision at a different merchant. Read-only preview and analysis are deliberately not gated by this contract.",
+  "record_identity_format": "{source_sheet}:{source_row} and {source_sheet}:r{source_row}",
+  "record_identity_scheme_version": "row_v1",
+  "schema_version": 1,
+  "successor_note": "Not assigned, minted or written by this contract. When record identity moves to stable_record_id, that scheme gets its own contract and this guard stops applying; an unrecognised record_identity_scheme_version fails closed rather than defaulting to row_v1.",
+  "successor_scheme": "stable_record_v2"
+}

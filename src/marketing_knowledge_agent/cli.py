@@ -214,6 +214,7 @@ from .obsidian_sync import (
     execute_sync_plan,
     rollback_sync,
 )
+from .record_identity_lineage import RowV1LineageContractError, RowV1LineageError
 from .validation import validate_vault
 
 
@@ -1044,6 +1045,12 @@ def main(argv=None) -> int:
         return 2
     except ApplyReviewDecisionsError as exc:
         print(f"apply review decisions error: {exc}", file=sys.stderr)
+        return 2
+    except RowV1LineageError as exc:
+        print(f"record identity lineage error: {exc}", file=sys.stderr)
+        return 2
+    except RowV1LineageContractError as exc:
+        print(f"record identity lineage contract error: {exc}", file=sys.stderr)
         return 2
     except ObsidianSyncError as exc:
         print(f"obsidian sync error: {exc}", file=sys.stderr)

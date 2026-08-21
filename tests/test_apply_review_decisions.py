@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures import write_row_v1_preview_lineage
 from marketing_knowledge_agent.review_template import REVIEW_COLUMNS
 
 
@@ -340,6 +341,7 @@ def _write_apply_preview_fixture(preview_dir: Path, restricted_brand: str = "Res
         "handle_mappings.json": handle_mappings,
     }.items():
         (preview_dir / filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_row_v1_preview_lineage(preview_dir)
     return preview_dir
 
 

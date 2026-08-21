@@ -32,6 +32,7 @@ where = ["src"]
 marketing_knowledge_agent = [
     "authority/approved_asset_urls/manifest.json",
     "authority/approved_asset_urls/approved_urls.csv",
+    "authority/row_v1_workbook_lineage/manifest.json",
 ]
 
 [tool.pytest.ini_options]

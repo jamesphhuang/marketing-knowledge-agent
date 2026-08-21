@@ -39,6 +39,7 @@ def test_generate_excel_preview_writes_expected_files(tmp_path):
         "handle_mappings.json",
         "preview_summary.md",
         "validation_errors.md",
+        "workbook_lineage.json",
     }
     assert expected_files == {path.name for path in output_dir.iterdir()}
 

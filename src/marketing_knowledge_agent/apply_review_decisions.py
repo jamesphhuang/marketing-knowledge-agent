@@ -13,6 +13,13 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from .governance import GovernanceIndex, RestrictedCustomerRecord, split_restricted_aliases
 from .models import DocumentMetadata
+from .record_identity_lineage import (
+    APPLY_LINEAGE_FILENAME,
+    apply_row_identity_surface_entries,
+    assert_row_v1_lineage,
+    build_apply_lineage_binding,
+    resolve_preview_lineage,
+)
 from .review_decision_validation import validate_review_decisions
 from .review_template import REVIEW_COLUMNS, build_expected_review_rows, load_preview_records
 
@@ -42,6 +49,12 @@ def apply_review_decisions(
     preview_dir = Path(preview_dir)
     output_dir = Path(output_dir)
     applied_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    # First formal boundary at which existing row-coordinate review decisions are joined to the
+    # current workbook's records. Runs before every read and every write below, so a workbook the
+    # decisions were not reviewed against fails closed with nothing mutated.
+    preview_lineage = resolve_preview_lineage(preview_dir)
+    assert_row_v1_lineage(preview_lineage, operation="apply-review-decisions")
 
     preview = load_preview_records(preview_dir)
     rows = _read_decision_rows(decisions_path)
@@ -91,6 +104,17 @@ def apply_review_decisions(
         _write_text(output_dir, relative_path, content)
     for relative_path, payload in plan["json_files"].items():
         _write_json(output_dir, relative_path, payload)
+
+    _write_json(
+        output_dir,
+        Path(APPLY_LINEAGE_FILENAME),
+        build_apply_lineage_binding(
+            preview_status=preview_lineage,
+            surface_entries=apply_row_identity_surface_entries(output_dir),
+            applied_at=applied_at,
+            decisions_path=decisions_path,
+        ),
+    )
 
     assert_apply_preview_safety(output_dir, restricted_customers)
     return plan["summary"]

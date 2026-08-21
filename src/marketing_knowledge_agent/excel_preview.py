@@ -35,6 +35,11 @@ from .governance import (
     split_restricted_aliases,
 )
 from .models import DocumentMetadata
+from .record_identity_lineage import (
+    PREVIEW_LINEAGE_FILENAME,
+    RECORD_IDENTITY_SCHEME_VERSION,
+    workbook_lineage_identity,
+)
 
 
 WORKBOOK_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -250,10 +255,57 @@ def generate_excel_preview(
     output_dir.mkdir(parents=True, exist_ok=True)
     for key, filename in PREVIEW_FILENAMES.items():
         _write_json(output_dir / filename, preview[key])
+    _write_json(
+        output_dir / PREVIEW_LINEAGE_FILENAME,
+        _workbook_lineage_declaration(
+            workbook_path=workbook_path,
+            sheets=sheets,
+            merchant_cases=merchant_cases,
+            captured_date=captured_date,
+            normalized_at=normalized_at,
+        ),
+    )
     _write_text(output_dir / "preview_summary.md", render_preview_summary(summary))
     _write_text(output_dir / "validation_errors.md", render_validation_errors(validation_errors))
 
     return summary
+
+
+def _workbook_lineage_declaration(
+    *,
+    workbook_path: Path,
+    sheets: Dict[str, List[List[object]]],
+    merchant_cases: List[dict],
+    captured_date: date,
+    normalized_at: str,
+) -> dict:
+    """Record which workbook this preview was produced from.
+
+    Provenance only: the preview itself is never gated on it. Downstream paths that bind existing
+    row-coordinate review decisions read this to refuse a workbook the decisions were not
+    reviewed against.
+    """
+    source_rows = [
+        record["source_row"] for record in merchant_cases if isinstance(record.get("source_row"), int)
+    ]
+    lineage = workbook_lineage_identity(
+        workbook_path,
+        merchant_sheet_name=SHEET_MERCHANT_CASES,
+        merchant_header_row=EXPECTED_HEADER_ROWS[SHEET_MERCHANT_CASES],
+        merchant_headers=_normalized_headers_for(
+            sheets[SHEET_MERCHANT_CASES], EXPECTED_HEADER_ROWS[SHEET_MERCHANT_CASES]
+        ),
+        merchant_record_count=len(merchant_cases),
+        merchant_source_row_min=min(source_rows) if source_rows else None,
+        merchant_source_row_max=max(source_rows) if source_rows else None,
+    )
+    return {
+        "record_identity_scheme_version": RECORD_IDENTITY_SCHEME_VERSION,
+        "workbook": lineage,
+        "workbook_path": str(workbook_path),
+        "captured_date": captured_date.isoformat(),
+        "normalized_at": normalized_at,
+    }
 
 
 def build_preview_summary(

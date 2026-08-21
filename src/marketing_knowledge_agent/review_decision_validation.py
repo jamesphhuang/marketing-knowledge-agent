@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, get_args
 
 from .models import AllowedExposureChannel
+from .record_identity_lineage import describe_lineage_status, resolve_preview_lineage
 from .review_template import (
     REVIEW_COLUMNS,
     ReviewTemplateError,
@@ -110,6 +111,11 @@ def validate_review_decisions(
             _validate_against_preview(preview_records, rows, issues)
 
     summary = _build_summary(decisions_path, output_path, preview_dir, rows, issues, preview_records)
+    # Read-only analysis: a lineage mismatch is reported here, never enforced. Blocking validation
+    # would remove the very tool needed to analyse a new workbook safely before rebinding.
+    summary["row_v1_lineage"] = (
+        resolve_preview_lineage(preview_dir) if preview_dir is not None else None
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(render_validation_report(summary, issues), encoding="utf-8")
     _write_issue_csv(Path(summary["errors_output_path"]), [issue for issue in issues if issue.severity == "error"])
@@ -176,6 +182,9 @@ def render_validation_report(summary: dict, issues: List[ValidationIssue]) -> st
             )
     else:
         lines.append("- No validation errors or warnings.")
+    if summary.get("row_v1_lineage") is not None:
+        lines.extend(["", "## Record Identity Lineage", ""])
+        lines.extend(describe_lineage_status(summary["row_v1_lineage"]))
     lines.extend(
         [
             "",

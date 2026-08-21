@@ -29,6 +29,10 @@ from marketing_knowledge_agent.models import (
     StructuredEntity,
     StructuredRetrievalResult,
 )
+from marketing_knowledge_agent.record_identity_lineage import (
+    AUTHORITY_MANIFEST_FILENAME as LINEAGE_AUTHORITY_MANIFEST_FILENAME,
+    AUTHORITY_PACKAGE_RELATIVE_DIR as LINEAGE_AUTHORITY_PACKAGE_RELATIVE_DIR,
+)
 from marketing_knowledge_agent.slack_interface import (
     APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE,
     SlackConfig,
@@ -722,9 +726,35 @@ def test_built_wheel_contains_no_source_governance_data(tmp_path):
         assert not [name for name in data if "apply_preview" in name]
         assert not [name for name in data if "inventory" in name or "review_decision" in name]
         assert sorted(data) == sorted(
-            f"marketing_knowledge_agent/{AUTHORITY_PACKAGE_RELATIVE_DIR}/{filename}"
-            for filename in (AUTHORITY_MANIFEST_FILENAME, *APPROVED_ASSET_URL_INPUTS)
+            [
+                f"marketing_knowledge_agent/{AUTHORITY_PACKAGE_RELATIVE_DIR}/{filename}"
+                for filename in (AUTHORITY_MANIFEST_FILENAME, *APPROVED_ASSET_URL_INPUTS)
+            ]
+            # The row_v1 workbook lineage contract is the only other packaged authority. It ships
+            # hashes, sheet-shape counts and the workbook filename; no reviewer or customer rows.
+            + [
+                "marketing_knowledge_agent/"
+                f"{LINEAGE_AUTHORITY_PACKAGE_RELATIVE_DIR}/{LINEAGE_AUTHORITY_MANIFEST_FILENAME}"
+            ]
         )
+        lineage_contract = json.loads(
+            archive.read(
+                "marketing_knowledge_agent/"
+                f"{LINEAGE_AUTHORITY_PACKAGE_RELATIVE_DIR}/{LINEAGE_AUTHORITY_MANIFEST_FILENAME}"
+            ).decode("utf-8")
+        )
+        assert set(lineage_contract["lineage_workbook"]) == {
+            "filename",
+            "sha256",
+            "size",
+            "merchant_sheet_name",
+            "merchant_header_row",
+            "merchant_data_start_row",
+            "merchant_header_fingerprint",
+            "merchant_record_count",
+            "merchant_source_row_min",
+            "merchant_source_row_max",
+        }
 
         for name in names:
             if not name.startswith(f"marketing_knowledge_agent/{AUTHORITY_PACKAGE_RELATIVE_DIR}/"):

@@ -15,6 +15,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from .frontmatter import parse_markdown_with_frontmatter
 from .governance import GovernanceIndex, RestrictedCustomerRecord, split_restricted_aliases
+from .record_identity_lineage import assert_row_v1_lineage, resolve_apply_lineage
 
 
 DEFAULT_NAMESPACE = "MKA"
@@ -55,6 +56,9 @@ def create_sync_plan(
 
     namespace_path = _namespace_path(vault_path, namespace)
     _assert_output_outside_vault(output_dir, vault_path)
+    # The plan matches incoming records to existing vault notes by (source_sheet, source_row), so
+    # an apply preview from a different workbook lineage would silently retarget managed notes.
+    assert_row_v1_lineage(resolve_apply_lineage(apply_dir), operation="sync-obsidian plan")
     preview_items = _load_preview_items(apply_dir)
     current_files = _load_namespace_files(namespace_path)
     current_by_source = {
@@ -166,6 +170,7 @@ def execute_sync_plan(
     if conflict_count and not allow_conflicts_skip:
         raise ObsidianSyncError("plan contains conflict entries; resolve them or use --allow-conflicts-skip")
 
+    assert_row_v1_lineage(resolve_apply_lineage(apply_dir), operation="sync-obsidian execute")
     _assert_apply_summary_safe(apply_dir)
     restricted_index = _load_restricted_index(apply_dir)
     _assert_denylist_final_gate(plan, apply_dir, restricted_index)
