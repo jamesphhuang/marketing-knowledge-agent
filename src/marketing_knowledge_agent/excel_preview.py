@@ -40,6 +40,8 @@ from .record_identity_lineage import (
     RECORD_IDENTITY_SCHEME_VERSION,
     preview_merchant_surface_digest,
     preview_merchant_surface_entries,
+    preview_merchant_payload_digest,
+    preview_merchant_payload_entries,
     workbook_lineage_identity,
 )
 
@@ -287,10 +289,16 @@ def _workbook_lineage_declaration(
     row-coordinate review decisions read this to refuse a workbook the decisions were not
     reviewed against.
 
-    The row identity surface is stamped alongside so the declaration can be checked against the
-    ``merchant_cases.json`` written beside it. That file is written first and this one last, so
-    without the digest a run interrupted between the two would leave a new payload wearing a stale
-    declaration, with nothing to tell them apart.
+    The row identity surface and the semantic payload digest are stamped alongside so the
+    declaration can be checked against the ``merchant_cases.json`` written beside it. That file is
+    written first and this one last, so without the digests a run interrupted between the two
+    would leave a new payload wearing a stale declaration, with nothing to tell them apart. The
+    two digests are separate because they fail separately: the first states which merchant each
+    row coordinate names, the second states what those merchants say.
+
+    ``merchant_cases`` is already JSON-safe by this point — ``_normalize_sheet_records`` runs
+    ``_json_safe`` over every record — so the digest stamped here canonicalizes exactly the value
+    space the guard reads back out of the written file.
     """
     source_rows = [
         record["source_row"] for record in merchant_cases if isinstance(record.get("source_row"), int)
@@ -311,6 +319,9 @@ def _workbook_lineage_declaration(
         "workbook": lineage,
         "merchant_row_identity_surface_digest": preview_merchant_surface_digest(
             preview_merchant_surface_entries(merchant_cases)
+        ),
+        "merchant_payload_semantic_digest": preview_merchant_payload_digest(
+            preview_merchant_payload_entries(merchant_cases)
         ),
         "workbook_path": str(workbook_path),
         "captured_date": captured_date.isoformat(),

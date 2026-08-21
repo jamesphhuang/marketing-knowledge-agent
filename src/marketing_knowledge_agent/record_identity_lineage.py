@@ -45,6 +45,7 @@ APPLY_LINEAGE_FILENAME = "record_identity_binding.json"
 MERCHANT_HEADER_NAMESPACE = "mka:row-v1-workbook-lineage:v1:merchant-header"
 APPLY_SURFACE_NAMESPACE = "mka:row-v1-apply-row-identity-surface:v1"
 PREVIEW_MERCHANT_SURFACE_NAMESPACE = "mka:row-v1-preview-merchant-row-identity-surface:v1"
+PREVIEW_MERCHANT_PAYLOAD_NAMESPACE = "mka:row-v1-preview-merchant-payload-semantic:v1"
 
 APPLY_SURFACE_ROOT = "approved_vault_preview"
 
@@ -59,6 +60,32 @@ MERCHANT_SHAPE_FIELDS = (
     "merchant_record_count",
     "merchant_source_row_min",
     "merchant_source_row_max",
+)
+
+# The only merchant-record fields the semantic payload digest drops. Everything else a record
+# carries is covered, so a governance or content field added later is protected the day it is
+# added rather than the day someone remembers to allowlist it.
+#
+# Each exclusion is a field ``excel-preview`` regenerates from the clock, not from the workbook,
+# so it changes on a legitimate re-run against the *same* file and a digest that moved with it
+# could never be compared across runs:
+#
+#   captured_date  ``excel_preview.build_excel_preview`` defaults it to ``date.today()``.
+#   normalized_at  ``excel_preview.build_excel_preview`` defaults it to ``datetime.now(utc)``,
+#                  and ``_normalize_sheet_records`` stamps it onto every record.
+#   publish_date   ``excel_ingestion.normalize_merchant_case_row`` assigns the ``captured_date``
+#                  argument verbatim. No merchant sheet column feeds it, so despite the name it
+#                  states when the preview ran, not anything the workbook says.
+#
+# Note what is deliberately NOT here: ``source_path`` is ``f"{source_sheet}:{source_row}"``, a
+# pure workbook coordinate, and the duplicate-review flags are derived from the merchant record
+# set itself and gate ``apply-review-decisions``. Both are stable and both stay covered.
+MERCHANT_PAYLOAD_VOLATILE_FIELDS = frozenset(
+    {
+        "captured_date",
+        "normalized_at",
+        "publish_date",
+    }
 )
 
 LINEAGE_MATCH = "LINEAGE_MATCH"
@@ -210,6 +237,53 @@ def preview_merchant_surface_digest(entries: Iterable[Sequence[str]]) -> str:
     )
 
 
+def preview_merchant_payload_entries(
+    records: Iterable[Mapping[str, object]]
+) -> List[Dict[str, object]]:
+    """Describe what each merchant record *says*, as opposed to which merchant it names.
+
+    The companion to :func:`preview_merchant_surface_entries`, and deliberately a separate
+    concept. That one answers "which merchant does this row coordinate point at" — the relation a
+    row insertion breaks. This one answers "is the governance and content payload beside the
+    declaration the same version the declaration was written for" — the relation an edited
+    workbook cell breaks while every coordinate stays exactly where it was.
+
+    Include-by-default: every key a record carries survives except
+    :data:`MERCHANT_PAYLOAD_VOLATILE_FIELDS`, which is the whole point. An allowlist would only
+    ever protect the fields someone thought of, and a governance field added next quarter would
+    silently sit outside the integrity contract.
+
+    Records are already JSON-native here — ``excel-preview`` runs ``_json_safe`` over each record
+    before it writes ``merchant_cases.json``, and the guard reads them back through
+    ``json.loads`` — so the write side and the read side canonicalize the same value space.
+    """
+    return [
+        {
+            key: value
+            for key, value in record.items()
+            if key not in MERCHANT_PAYLOAD_VOLATILE_FIELDS
+        }
+        for record in records
+    ]
+
+
+def preview_merchant_payload_digest(entries: Iterable[Mapping[str, object]]) -> str:
+    """Digest the semantic payload, preserving JSON types.
+
+    Types are kept on purpose: ``2025`` and ``"2025"``, ``None`` and ``""``, ``True`` and ``1``
+    are different governance statements, and a digest that coerced them to text would read a
+    retyped field as no change at all.
+
+    Order-sensitive across records for the same reason the row-identity surface is:
+    ``excel-preview`` emits merchant rows in ascending ``source_row``, so a reordered payload is
+    one edited outside the preview writer. Order-*insensitive* within a record, because mapping
+    key order is a JSON serialization artifact and not a statement about the merchant.
+    """
+    return _namespaced_canonical_digest(
+        PREVIEW_MERCHANT_PAYLOAD_NAMESPACE, [dict(entry) for entry in entries]
+    )
+
+
 def observe_merchant_records(records: Sequence[Mapping[str, object]]) -> Dict[str, object]:
     """Re-derive the merchant sheet shape and row-identity surface from merchant-case records.
 
@@ -231,6 +305,9 @@ def observe_merchant_records(records: Sequence[Mapping[str, object]]) -> Dict[st
         "merchant_source_row_max": max(source_rows) if source_rows else None,
         "merchant_row_identity_surface_digest": preview_merchant_surface_digest(
             preview_merchant_surface_entries(records)
+        ),
+        "merchant_payload_semantic_digest": preview_merchant_payload_digest(
+            preview_merchant_payload_entries(records)
         ),
     }
 
@@ -314,6 +391,12 @@ def resolve_preview_lineage(preview_dir: Path) -> Dict[str, object]:
     contract. ``excel-preview`` writes ``merchant_cases.json`` first and ``workbook_lineage.json``
     last, so a run interrupted between them leaves a new payload under a stale declaration — a
     state that is reachable by accident, not only by forgery, and that must never read as a match.
+
+    That agreement is checked on two independent relations, because they fail independently. The
+    row-identity surface catches a payload whose coordinates now name different merchants. The
+    semantic payload digest catches the other half: every coordinate still names the same
+    merchant, but that merchant's governance and content fields have been rewritten since the
+    declaration was stamped, so the declaration describes a payload version that is gone.
     """
     preview_dir = Path(preview_dir)
     contract = load_lineage_contract()
@@ -636,23 +719,39 @@ def _preview_payload_disagreement(
                 f"{field}: contract {contract_value!r}, declared {declared_workbook[field]!r}"
             )
 
-    observed_digest = observed.get("merchant_row_identity_surface_digest")
-    declared_digest = declared.get("merchant_row_identity_surface_digest")
-    if isinstance(declared_digest, str) and declared_digest != observed_digest:
-        contradictions.append(
-            "merchant_row_identity_surface_digest: declared "
-            f"{declared_digest}, recomputed {observed_digest}"
-        )
+    # Two independent relations, checked separately so a refusal says which one broke.
+    unprovable: List[str] = []
+    for field, missing_reason in (
+        (
+            "merchant_row_identity_surface_digest",
+            "which merchant each reviewed row coordinate names",
+        ),
+        (
+            "merchant_payload_semantic_digest",
+            "whether the governance and content payload is the version the declaration describes",
+        ),
+    ):
+        observed_digest = observed.get(field)
+        declared_digest = declared.get(field)
+        if not isinstance(declared_digest, str):
+            unprovable.append(
+                f"declared workbook lineage carries no {field}, so {missing_reason} cannot be "
+                f"checked against `{PREVIEW_MERCHANT_PAYLOAD_FILENAME}`"
+            )
+        elif declared_digest != observed_digest:
+            contradictions.append(
+                f"{field}: declared {declared_digest}, recomputed {observed_digest}"
+            )
 
-    unprovable = None
-    if not isinstance(declared_digest, str):
-        unprovable = (
-            "declared workbook lineage carries no merchant_row_identity_surface_digest, so which "
-            "merchant each reviewed row coordinate names cannot be checked against "
-            f"`{PREVIEW_MERCHANT_PAYLOAD_FILENAME}`; re-run excel-preview to produce a preview "
-            "that states its own row identity surface"
+    return (
+        (
+            "; ".join(unprovable)
+            + "; re-run excel-preview to produce a preview that states its own row identity "
+            "surface and payload semantics"
         )
-    return unprovable, contradictions
+        if unprovable
+        else None
+    ), contradictions
 
 
 def _surface_value(value: object) -> str:
@@ -670,6 +769,17 @@ def _workbook_difference(expected: Mapping[str, object], actual: object) -> str:
     if not differences:
         return "workbook sha256 differs; merchant sheet shape is unchanged"
     return "; ".join(differences)
+
+
+def _namespaced_canonical_digest(namespace: str, value: object) -> str:
+    """Bind a namespace to a canonical-JSON hash of ``value``.
+
+    ``_hash_json`` already sorts mapping keys and uses stable separators and UTF-8, so composing
+    the two gives a digest that is insertion-order independent and type-preserving without
+    inventing a second hashing scheme. Kept distinct from ``_namespaced_digest``, which does not
+    sort keys and whose callers hash lists of pre-stringified values.
+    """
+    return hashlib.sha256(f"{namespace}:{_hash_json(value)}".encode("utf-8")).hexdigest()
 
 
 def _namespaced_digest(namespace: str, value: object) -> str:

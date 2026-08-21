@@ -149,8 +149,13 @@ def write_row_v1_preview_lineage(preview_dir: Path) -> Path:
         "workbook": load_lineage_contract()["lineage_workbook"],
     }
     if observed is not None:
+        # Both digests are taken from the fixture's own payload, never asserted independently, so
+        # the declaration states the lineage the preview actually has.
         payload["merchant_row_identity_surface_digest"] = observed[
             "merchant_row_identity_surface_digest"
+        ]
+        payload["merchant_payload_semantic_digest"] = observed[
+            "merchant_payload_semantic_digest"
         ]
     path = preview_dir / PREVIEW_LINEAGE_FILENAME
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

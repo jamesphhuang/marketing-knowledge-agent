@@ -11,12 +11,18 @@ import hashlib
 import json
 import shutil
 import zipfile
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from marketing_knowledge_agent.apply_review_decisions import apply_review_decisions
-from marketing_knowledge_agent.excel_preview import generate_excel_preview
+from marketing_knowledge_agent.excel_ingestion import normalize_merchant_case_row
+from marketing_knowledge_agent.excel_preview import (
+    _json_safe,
+    annotate_merchant_case_record_groups,
+    generate_excel_preview,
+)
 from marketing_knowledge_agent.obsidian_sync import create_sync_plan
 from marketing_knowledge_agent.record_identity_lineage import (
     APPLY_LINEAGE_FILENAME,
@@ -35,6 +41,10 @@ from marketing_knowledge_agent.record_identity_lineage import (
     apply_row_identity_surface_digest,
     apply_row_identity_surface_entries,
     load_lineage_contract,
+    MERCHANT_PAYLOAD_VOLATILE_FIELDS,
+    MERCHANT_SHAPE_FIELDS,
+    preview_merchant_payload_digest,
+    preview_merchant_payload_entries,
     preview_merchant_surface_digest,
     preview_merchant_surface_entries,
     resolve_apply_lineage,
@@ -741,3 +751,430 @@ def _rewrite_first_shared_string(source: Path, target: Path) -> None:
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         for name in names:
             archive.writestr(name, payloads[name])
+
+
+# --- WP0.4a-H2: a declaration must also describe the payload's governance semantics -----------
+#
+# H1 proved *which merchant* each reviewed row coordinate names. That leaves the other half open:
+# every coordinate can still name the same merchant while that merchant's governance and content
+# payload has been rewritten since the declaration was stamped. The H1 parent (26ae494) reads
+# that state as LINEAGE_MATCH; everything below is the refusal.
+#
+# Hermetic, like the H1 block above: synthetic payload, synthetic contract, no workbook, no
+# reports/, no local authority.
+
+# §13 — one representative mutation per load-bearing governance/content field. Each leaves
+# source_sheet, source_row, record_type, brand_name, merchant_handle and interview_year — the
+# entire H1 identity surface — byte-identical.
+GOVERNANCE_ONLY_MUTATIONS = (
+    ("can_quote_externally", False),
+    ("can_enter_content_index", False),
+    ("data_classification", "internal"),
+    ("status", "archived"),
+    ("article_title", "改寫後的文章標題"),
+    ("industry", ["改寫後的產業"]),
+    ("notes", "改寫後的備註"),
+    # An eighth field that is not merely descriptive: apply_review_decisions reads
+    # suspected_duplicate_review directly when it decides what may reach the vault.
+    ("suspected_duplicate_review", True),
+)
+
+H1_IDENTITY_SURFACE_KEYS = (
+    "source_sheet",
+    "source_row",
+    "record_type",
+    "brand_name",
+    "merchant_handle",
+    "interview_year",
+)
+
+
+def _identity_surface(records):
+    return [[record.get(key) for key in H1_IDENTITY_SURFACE_KEYS] for record in records]
+
+
+@pytest.mark.parametrize("field,value", GOVERNANCE_ONLY_MUTATIONS)
+def test_a_governance_only_payload_change_never_matches(
+    synthetic_lineage, tmp_path, field, value
+):
+    """§12 — the H2 discriminator, and the state the H1 independent reviewer reproduced.
+
+    Nothing about identity moves: the same row coordinates name the same merchants, so the H1
+    row-identity surface digest still recomputes to exactly what the declaration says. Only the
+    governance/content payload was rewritten, and the declaration was left describing the version
+    that is gone. On the H1 parent this is LINEAGE_MATCH.
+    """
+    preview_dir = _lineage_bound_preview(tmp_path)
+    declaration = (preview_dir / PREVIEW_LINEAGE_FILENAME).read_bytes()
+    records = _merchant_payload(preview_dir)
+    identity_before = _identity_surface(records)
+
+    mutated = [{**record, field: value} for record in records]
+    assert mutated != records, f"{field}: mutation was a no-op against the fixture"
+    _rewrite_merchant_payload(preview_dir, mutated)
+
+    # The whole H1 surface is untouched, and so is the declaration.
+    assert _identity_surface(_merchant_payload(preview_dir)) == identity_before
+    assert (preview_dir / PREVIEW_LINEAGE_FILENAME).read_bytes() == declaration
+    assert preview_merchant_surface_digest(
+        preview_merchant_surface_entries(mutated)
+    ) == json.loads(declaration)["merchant_row_identity_surface_digest"]
+
+    status = resolve_preview_lineage(preview_dir)
+    assert status["state"] != LINEAGE_MATCH
+    assert status["state"] == LINEAGE_MISMATCH
+    assert "merchant_payload_semantic_digest" in status["detail"]
+
+    # And the mutation path refuses before it writes anything.
+    before = _snapshot(PROTECTED_ARTIFACTS)
+    with pytest.raises(RowV1LineageError):
+        apply_review_decisions(
+            _reviewed_decisions(tmp_path / "decisions.csv"), preview_dir, tmp_path / "out"
+        )
+    assert not (tmp_path / "out").exists()
+    assert _snapshot(PROTECTED_ARTIFACTS) == before
+
+
+def _schema_complete_merchant_records():
+    """Merchant records carrying the real payload schema, derived from the code that builds it.
+
+    Deliberately not a hand-listed set of keys: the schema is taken from
+    ``normalize_merchant_case_row`` plus the two things the preview layer adds afterwards
+    (``annotate_merchant_case_record_groups`` and the ``normalized_at`` stamp). A governance field
+    added to the normalizer later therefore enters this test automatically, which is the whole
+    point of §14 — the gap H2 closes was a field sitting outside the integrity contract.
+
+    ``_json_safe`` is the preview writer's own coercion, applied here for the same reason it is
+    applied there: it is what turns the in-memory record into the value space that reaches
+    ``merchant_cases.json``.
+    """
+    row = {
+        "商家 / 夥伴名稱": "測試品牌",
+        "Handle": "test-handle",
+        "Sales Category LV1": "餐飲",
+        "Sales Category LV2": "咖啡",
+        "採訪年份": 2025,
+        "內容相關標籤": "標籤A、標籤B",
+        "文章": "測試文章標題",
+        "影片": None,
+        "Podcast": None,
+        "新聞": None,
+        "備註": "測試備註",
+        "狀態": "現有商家",
+    }
+    records = [
+        normalize_merchant_case_row(dict(row), source_row=7, captured_date=date(2026, 7, 10)),
+        normalize_merchant_case_row(
+            {**row, "商家 / 夥伴名稱": "測試品牌二", "Handle": "test-handle-2"},
+            source_row=8,
+            captured_date=date(2026, 7, 10),
+        ),
+    ]
+    annotate_merchant_case_record_groups(records)
+    for record in records:
+        record["normalized_at"] = "2026-07-10T03:24:23+00:00"
+    return [_json_safe(record) for record in records]
+
+
+def _distinct_value(value):
+    """A value of the same shape that is unambiguously not ``value``."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + 1
+    if isinstance(value, str):
+        return value + "-mutated"
+    if isinstance(value, list):
+        return value + ["mutated"]
+    if isinstance(value, dict):
+        return {**value, "mutated": "mutated"}
+    if value is None:
+        return "mutated"
+    raise AssertionError(f"unhandled payload value type: {type(value)!r}")
+
+
+def test_the_real_merchant_schema_has_no_field_outside_the_integrity_contract():
+    """§14 — every top-level key is covered unless it is a documented volatile exclusion.
+
+    This is the regression that matters most for the next governance field someone adds: it fails
+    the moment a new key lands in the merchant payload without either changing the digest or being
+    argued into ``MERCHANT_PAYLOAD_VOLATILE_FIELDS`` on the record.
+    """
+    records = _schema_complete_merchant_records()
+    baseline = preview_merchant_payload_digest(preview_merchant_payload_entries(records))
+
+    covered = set()
+    for key in records[0]:
+        mutated = [{**records[0], key: _distinct_value(records[0][key])}, records[1]]
+        assert mutated != records, f"{key}: mutation was a no-op"
+        moved = (
+            preview_merchant_payload_digest(preview_merchant_payload_entries(mutated)) != baseline
+        )
+        if key in MERCHANT_PAYLOAD_VOLATILE_FIELDS:
+            assert not moved, f"{key} is declared volatile but moves the semantic digest"
+        else:
+            assert moved, f"{key} is not declared volatile but is outside the semantic digest"
+            covered.add(key)
+
+    # The exclusion list is not allowed to name fields the schema does not have, which is how an
+    # exclusion quietly becomes a hole that nothing tests.
+    assert MERCHANT_PAYLOAD_VOLATILE_FIELDS <= set(records[0])
+    # Sanity: the §8 fields the prompt names are in the covered set, not merely "not volatile".
+    assert {
+        "can_quote_externally",
+        "can_enter_content_index",
+        "data_classification",
+        "status",
+        "article_title",
+        "industry",
+        "notes",
+        "governance_issue_types",
+        "governance_risk_reasons",
+        "governance_risk_fields",
+        "invalid_asset_fields",
+        "invalid_asset_values",
+        "content_tags",
+        "source_path",
+        "suspected_duplicate_review",
+        "same_brand_multiple_records",
+        "same_handle_multiple_records",
+        "multi_interview_record",
+    } <= covered
+
+
+def test_declared_volatile_fields_survive_a_legitimate_rerun():
+    """§15 — each exclusion must be provably inert, so the list cannot become an untested hole.
+
+    This is the property the exclusions exist for: re-running ``excel-preview`` against the same
+    workbook on a different day rewrites exactly these fields and nothing else, and the digest has
+    to survive that or it could never be compared across runs.
+    """
+    records = _schema_complete_merchant_records()
+    baseline = preview_merchant_payload_digest(preview_merchant_payload_entries(records))
+
+    assert MERCHANT_PAYLOAD_VOLATILE_FIELDS == {
+        "captured_date",
+        "normalized_at",
+        "publish_date",
+    }
+    for field in sorted(MERCHANT_PAYLOAD_VOLATILE_FIELDS):
+        rerun = [{**record, field: "9999-12-31T23:59:59+00:00"} for record in records]
+        assert rerun != records, f"{field}: mutation was a no-op"
+        assert (
+            preview_merchant_payload_digest(preview_merchant_payload_entries(rerun)) == baseline
+        ), f"{field} is declared volatile but moves the semantic digest"
+
+    # All three at once, which is what a re-run actually does.
+    rerun = [
+        {
+            **record,
+            "captured_date": "2026-08-21",
+            "publish_date": "2026-08-21",
+            "normalized_at": "2026-08-21T09:00:00+00:00",
+        }
+        for record in records
+    ]
+    assert preview_merchant_payload_digest(preview_merchant_payload_entries(rerun)) == baseline
+
+
+def test_semantic_digest_preserves_json_type_distinctions():
+    """§9 — the H1 P3 ``str(value)`` collision must not be inherited by this digest.
+
+    Each pair below is a different governance statement that a string coercion would flatten into
+    one: a year that became text, a cleared field that became an empty one, a boolean that became
+    a number.
+    """
+    base = _schema_complete_merchant_records()
+
+    def digest(**overrides):
+        return preview_merchant_payload_digest(
+            preview_merchant_payload_entries([{**base[0], **overrides}, base[1]])
+        )
+
+    assert digest(interview_year=2025) != digest(interview_year="2025")
+    assert digest(notes=None) != digest(notes="")
+    assert digest(can_quote_externally=True) != digest(can_quote_externally=1)
+    assert digest(can_quote_externally=False) != digest(can_quote_externally=0)
+    assert digest(can_quote_externally=False) != digest(can_quote_externally=None)
+    assert digest(source_row=7) != digest(source_row="7")
+    assert digest(content_tags=[]) != digest(content_tags=None)
+    assert digest(industry=["餐飲"]) != digest(industry="餐飲")
+
+
+def test_semantic_digest_ignores_mapping_key_order_but_not_record_order():
+    """§10 — key order is a serialization artifact; record order is a statement about the run.
+
+    ``excel-preview`` emits merchant rows in ascending ``source_row``, so a reordered payload is
+    one that was edited outside the preview writer — the state this guard exists to refuse.
+    """
+    records = _schema_complete_merchant_records()
+    baseline = preview_merchant_payload_digest(preview_merchant_payload_entries(records))
+
+    reordered_keys = [
+        {key: record[key] for key in sorted(record, reverse=True)} for record in records
+    ]
+    assert [list(record) for record in reordered_keys] != [list(r) for r in records]
+    assert (
+        preview_merchant_payload_digest(preview_merchant_payload_entries(reordered_keys))
+        == baseline
+    )
+
+    reordered_records = list(reversed(records))
+    assert (
+        preview_merchant_payload_digest(preview_merchant_payload_entries(reordered_records))
+        != baseline
+    )
+
+
+def test_semantic_digest_is_stable_across_runs_and_output_directories(tmp_path):
+    """§10 — same semantic input, same digest; nothing from the filesystem or the clock leaks in."""
+    records = _schema_complete_merchant_records()
+    digest = preview_merchant_payload_digest(preview_merchant_payload_entries(records))
+
+    for directory in ("run_a", "deeply/nested/run_b"):
+        target = tmp_path / directory
+        target.mkdir(parents=True)
+        path = target / PREVIEW_MERCHANT_PAYLOAD_FILENAME
+        path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        round_tripped = json.loads(path.read_text(encoding="utf-8"))
+        assert (
+            preview_merchant_payload_digest(preview_merchant_payload_entries(round_tripped))
+            == digest
+        )
+
+
+def test_an_h1_era_declaration_without_a_payload_digest_is_unbound(synthetic_lineage, tmp_path):
+    """§17 — fail closed on a declaration that predates the semantic digest.
+
+    Verified before choosing this policy: the repository holds no formal ``workbook_lineage.json``
+    at all — the live preview is the pre-guard grandfathered directory, which carries no
+    declaration and is proved by its pinned payload instead. With zero H1-era declarations in
+    existence, a declaration that cannot state its payload semantics is unprovable, not
+    compatible.
+    """
+    preview_dir = _lineage_bound_preview(tmp_path)
+    declaration = json.loads((preview_dir / PREVIEW_LINEAGE_FILENAME).read_text(encoding="utf-8"))
+    h1_era = {
+        key: value
+        for key, value in declaration.items()
+        if key != "merchant_payload_semantic_digest"
+    }
+    assert "merchant_row_identity_surface_digest" in h1_era
+    (preview_dir / PREVIEW_LINEAGE_FILENAME).write_text(
+        json.dumps(h1_era, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    status = resolve_preview_lineage(preview_dir)
+    assert status["state"] == LINEAGE_UNBOUND
+    assert "merchant_payload_semantic_digest" in status["detail"]
+
+    with pytest.raises(RowV1LineageError):
+        apply_review_decisions(
+            _reviewed_decisions(tmp_path / "decisions.csv"), preview_dir, tmp_path / "out"
+        )
+    assert not (tmp_path / "out").exists()
+
+
+def test_grandfathered_preview_needs_no_semantic_digest(synthetic_lineage, tmp_path):
+    """§16 — the pre-guard proof path must not acquire an H2 requirement either.
+
+    The grandfather artifact has no declaration to carry a digest. Its evidence is the pinned
+    payload itself, byte-for-byte, which already implies every semantic field in it.
+    """
+    preview_dir = _lineage_bound_preview(tmp_path)
+    pin_synthetic_preview_payload(preview_dir)
+    (preview_dir / PREVIEW_LINEAGE_FILENAME).unlink()
+
+    status = resolve_preview_lineage(preview_dir)
+    assert status["state"] == LINEAGE_MATCH
+    assert status["evidence"] == EVIDENCE_PINNED_PREVIEW_PAYLOAD
+
+    # ...and a governance-only edit to those pinned bytes still loses the grandfather proof.
+    records = _merchant_payload(preview_dir)
+    _rewrite_merchant_payload(
+        preview_dir, [{**record, "can_quote_externally": False} for record in records]
+    )
+    assert resolve_preview_lineage(preview_dir)["state"] == LINEAGE_UNBOUND
+
+
+def test_excel_preview_declaration_states_its_own_payload_semantics(tmp_path):
+    """The writer and the guard must derive the digest the same way, or nothing ever matches."""
+    workbook = tmp_path / "lineage.xlsx"
+    _write_xlsx(workbook, _preview_workbook_sheets())
+    output_dir = tmp_path / "preview"
+    generate_excel_preview(workbook, output_dir)
+
+    declaration = json.loads(
+        (output_dir / PREVIEW_LINEAGE_FILENAME).read_text(encoding="utf-8")
+    )
+    records = json.loads(
+        (output_dir / PREVIEW_MERCHANT_PAYLOAD_FILENAME).read_text(encoding="utf-8")
+    )
+    assert declaration["merchant_payload_semantic_digest"] == preview_merchant_payload_digest(
+        preview_merchant_payload_entries(records)
+    )
+    # The two digests are separate concepts and must not collapse into one another.
+    assert (
+        declaration["merchant_payload_semantic_digest"]
+        != declaration["merchant_row_identity_surface_digest"]
+    )
+
+
+# --- WP0.4a-H2: the packaged contract's load-bearing merchant shape ---------------------------
+
+
+def test_packaged_lineage_contract_pins_the_load_bearing_merchant_shape():
+    """§18 — a deliberate review gate on four values the acceptance path now depends on.
+
+    ``resolve_preview_lineage`` compares each of these to the payload before it will call a
+    declaration evidence, so they are invariants, not diagnostics. Changing one changes which
+    workbooks can bind existing row_v1 decisions, and that must not be possible without a diff
+    that a reviewer sees.
+
+    Hermetic on purpose: it reads only the contract packaged with the module, never the workbook,
+    the untracked reports directory or the production sqlite, and it must never be given the
+    synthetic test contract. It runs, and asserts, on a clean checkout.
+    """
+    lineage = load_lineage_contract()["lineage_workbook"]
+
+    assert lineage["merchant_sheet_name"] == "商家夥伴案例資料庫"
+    assert lineage["merchant_record_count"] == 120
+    assert lineage["merchant_source_row_min"] == 7
+    assert lineage["merchant_source_row_max"] == 126
+
+    # The lineage these four describe, pinned in the same breath so the shape cannot be re-aimed
+    # at a different workbook without this test changing too.
+    assert lineage["sha256"] == (
+        "9cbd93f1a754eb28aa358d74215445c5ffa3b1100dd947000aa9bed1b5c4ad2c"
+    )
+    assert lineage["filename"] == (
+        "MKT 內容產出資料庫_店家_夥伴案例_對外數據-20260708.xlsx"
+    )
+    # 120 records inside rows 7..126 is only consistent if the sheet is contiguous bar the header
+    # block; a shape edit that broke that arithmetic would otherwise pass unnoticed.
+    assert (
+        lineage["merchant_source_row_max"] - lineage["merchant_source_row_min"] + 1
+        == lineage["merchant_record_count"]
+    )
+
+
+def test_packaged_contract_shape_is_what_the_acceptance_path_reads():
+    """§18 — pin the four values *through* MERCHANT_SHAPE_FIELDS, not just by name.
+
+    The test above would still pass if the guard stopped consulting these fields. This one fails
+    if the cross-check's field list drifts away from the values it is supposed to enforce.
+    """
+    lineage = load_lineage_contract()["lineage_workbook"]
+
+    assert set(MERCHANT_SHAPE_FIELDS) == {
+        "merchant_sheet_name",
+        "merchant_record_count",
+        "merchant_source_row_min",
+        "merchant_source_row_max",
+    }
+    assert {field: lineage[field] for field in MERCHANT_SHAPE_FIELDS} == {
+        "merchant_sheet_name": "商家夥伴案例資料庫",
+        "merchant_record_count": 120,
+        "merchant_source_row_min": 7,
+        "merchant_source_row_max": 126,
+    }
