@@ -198,6 +198,11 @@ from .query_gating import precheck_restricted_query
 from .retrieval import result_to_dict
 from .review_template import ReviewTemplateError, generate_review_template
 from .review_decision_validation import ReviewDecisionValidationError, validate_review_decisions
+from .stable_record_crosswalk import (
+    M1_EXPECTATION,
+    StableRecordCrosswalkError,
+    generate_stable_record_crosswalk_proposal,
+)
 from .slack_interface import SlackInterfaceError, run_slack_bot
 from .slack_output_preview import (
     SAMPLE_QUERIES,
@@ -329,6 +334,18 @@ def main(argv=None) -> int:
                 workbook_path=args.workbook,
                 output_dir=args.output,
                 captured_date=args.captured_date,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "stable-record-crosswalk-proposal":
+            summary = generate_stable_record_crosswalk_proposal(
+                legacy_workbook=args.legacy_workbook,
+                authority_workbook=args.authority_workbook,
+                output_dir=args.output,
+                expectation=M1_EXPECTATION,
+                decision_store=args.decision_store,
+                verify_existing=args.verify_existing,
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
@@ -1046,6 +1063,9 @@ def main(argv=None) -> int:
     except ApplyReviewDecisionsError as exc:
         print(f"apply review decisions error: {exc}", file=sys.stderr)
         return 2
+    except StableRecordCrosswalkError as exc:
+        print(f"stable record crosswalk error: {exc}", file=sys.stderr)
+        return 2
     except RowV1LineageError as exc:
         print(f"record identity lineage error: {exc}", file=sys.stderr)
         return 2
@@ -1130,6 +1150,35 @@ def build_parser() -> argparse.ArgumentParser:
     excel_preview_parser.add_argument("--workbook", type=Path, required=True)
     excel_preview_parser.add_argument("--output", type=Path, default=Path("reports/excel_preview"))
     excel_preview_parser.add_argument("--captured-date", type=_date_arg, default=None)
+
+    crosswalk_parser = subparsers.add_parser(
+        "stable-record-crosswalk-proposal",
+        help=(
+            "Build a disposable, proposal-only stable-record crosswalk between the legacy and "
+            "authority merchant workbooks (mints no production identity)"
+        ),
+    )
+    crosswalk_parser.add_argument("--legacy-workbook", type=Path, required=True)
+    crosswalk_parser.add_argument("--authority-workbook", type=Path, required=True)
+    crosswalk_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/stable_record_crosswalk_proposal"),
+    )
+    crosswalk_parser.add_argument(
+        "--decision-store",
+        type=Path,
+        default=None,
+        help="Optional decision store to read (read-only) for event-grain impact analysis",
+    )
+    crosswalk_parser.add_argument(
+        "--verify-existing",
+        action="store_true",
+        help=(
+            "Regenerate the proposal and compare it against the one already in --output instead "
+            "of writing; fails if any issued stable_record_id would move"
+        ),
+    )
 
     asset_metadata_parser = subparsers.add_parser(
         "asset-metadata-preview",
