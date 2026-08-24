@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -1205,6 +1206,114 @@ def _canonical_json(payload: Mapping[str, object]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+# --- manifest integrity contract ----------------------------------------------------------------
+#
+# The manifest is sealed twice, over two deliberately different bodies, because the two seals
+# answer different questions and neither one alone is sufficient.
+
+MANIFEST_CONTENT_DIGEST_FIELD = "content_digest"
+MANIFEST_HASH_FIELD = "manifest_hash"
+MANIFEST_CREATED_AT_FIELD = "created_at"
+
+# ``content_digest`` is taken over the *semantic* body: everything the proposal asserts about what
+# it reconciled. Each exclusion below is a claim that the field is not part of what the proposal
+# *is*, and each claim has a reason:
+#
+#   created_at      volatile publication metadata. Two runs over identical inputs must agree on
+#                   content_digest or the reproducibility check means nothing; covering the
+#                   publication time would make that agreement impossible by construction.
+#   content_digest  a digest cannot cover itself.
+#   manifest_hash   the outer seal is computed afterwards, over this digest.
+#
+# This is an exclusion list rather than an allowlist, and deliberately so: a manifest field added
+# later is covered automatically. A new field silently escaping the digest is the failure mode
+# worth engineering against. A new field silently *entering* it is caught instead by the exact-key
+# regression pin in the tests, which forces a reviewer to adjudicate the schema change rather than
+# letting coverage drift on its own.
+MANIFEST_CONTENT_DIGEST_EXCLUDED_FIELDS = frozenset(
+    {MANIFEST_CREATED_AT_FIELD, MANIFEST_CONTENT_DIGEST_FIELD, MANIFEST_HASH_FIELD}
+)
+
+# ``manifest_hash`` covers the whole file — ``created_at`` and ``content_digest`` included — so the
+# file is self-verifying against an edit to any field. It cannot cover itself.
+MANIFEST_HASH_EXCLUDED_FIELDS = frozenset({MANIFEST_HASH_FIELD})
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def content_digest_body(manifest: Mapping[str, object]) -> Dict[str, object]:
+    """Return the semantic body ``content_digest`` is computed over."""
+    return {
+        key: value
+        for key, value in manifest.items()
+        if key not in MANIFEST_CONTENT_DIGEST_EXCLUDED_FIELDS
+    }
+
+
+def compute_content_digest(manifest: Mapping[str, object]) -> str:
+    """Compute ``content_digest`` from a manifest, ignoring any digest already recorded in it."""
+    return hashlib.sha256(_canonical_json(content_digest_body(manifest))).hexdigest()
+
+
+def compute_manifest_hash(manifest: Mapping[str, object]) -> str:
+    """Compute ``manifest_hash`` over the whole manifest except the seal itself."""
+    body = {
+        key: value for key, value in manifest.items() if key not in MANIFEST_HASH_EXCLUDED_FIELDS
+    }
+    return hashlib.sha256(_canonical_json(body)).hexdigest()
+
+
+def verify_manifest_integrity(
+    manifest: Mapping[str, object], source: str = MANIFEST_FILENAME
+) -> None:
+    """Recompute both seals and refuse a manifest that does not reproduce them.
+
+    Both are checked, never only one, because each catches what the other cannot:
+
+    * Checking only ``manifest_hash`` accepts an edited semantic field whose editor re-sealed the
+      file afterwards, leaving ``content_digest`` — the value every downstream evidence binding
+      quotes as the proposal's identity — describing a proposal that no longer exists.
+    * Checking only ``content_digest`` accepts an edited ``created_at``, an edited seal, or any
+      other change outside the semantic body.
+
+    Fail closed. A missing, mistyped, or malformed seal is a refusal, and there is deliberately no
+    bypass for an artifact that predates the check: a proposal that cannot prove what it is has no
+    safe interpretation. This defends against corruption, operator error, a partial hand edit, and
+    a stale artifact. It does not defend against someone who can rewrite this module and the
+    manifest together — that is a different threat model, and weakening these checks because they
+    do not also solve it would trade a real guarantee for none.
+    """
+    if not isinstance(manifest, Mapping):
+        raise StableRecordCrosswalkError(
+            f"{source} is not a JSON object; it cannot be read as a manifest"
+        )
+
+    for field in (MANIFEST_CONTENT_DIGEST_FIELD, MANIFEST_HASH_FIELD):
+        if field not in manifest:
+            raise StableRecordCrosswalkError(
+                f"{source} declares no {field}; an unsealed manifest is never loadable"
+            )
+        declared = manifest[field]
+        if not isinstance(declared, str) or not _SHA256_HEX_RE.match(declared):
+            raise StableRecordCrosswalkError(
+                f"{source} declares a malformed {field} ({declared!r}); expected 64 lowercase "
+                "hexadecimal characters"
+            )
+
+    # Semantic identity first, then the outer seal. A manifest that fails the first check is
+    # already refused, so the order only decides which refusal a reader is told about.
+    for field, recomputed in (
+        (MANIFEST_CONTENT_DIGEST_FIELD, compute_content_digest(manifest)),
+        (MANIFEST_HASH_FIELD, compute_manifest_hash(manifest)),
+    ):
+        declared = str(manifest[field])
+        if not hmac.compare_digest(recomputed, declared):
+            raise StableRecordCrosswalkError(
+                f"{source} {field} does not match its contents (declared {declared}, recomputed "
+                f"{recomputed}); the manifest has been modified since it was published"
+            )
+
+
 def build_manifest(
     proposal: CrosswalkProposal,
     registry_bytes: bytes,
@@ -1266,9 +1375,11 @@ def build_manifest(
         "asset_review_candidates": [dict(item) for item in proposal.asset_review_candidates],
     }
 
-    body["content_digest"] = hashlib.sha256(_canonical_json(body)).hexdigest()
-    body["created_at"] = created_at or datetime.now(timezone.utc).isoformat()
-    body["manifest_hash"] = hashlib.sha256(_canonical_json(body)).hexdigest()
+    # The publisher and the loader must never be able to disagree about what is hashed, so both
+    # go through the same two functions.
+    body[MANIFEST_CONTENT_DIGEST_FIELD] = compute_content_digest(body)
+    body[MANIFEST_CREATED_AT_FIELD] = created_at or datetime.now(timezone.utc).isoformat()
+    body[MANIFEST_HASH_FIELD] = compute_manifest_hash(body)
     return body
 
 
@@ -1333,7 +1444,25 @@ def write_proposal(
 
 
 def load_proposal(output_dir: Path) -> Tuple[Dict[str, object], List[Dict[str, str]], List[Dict[str, str]]]:
-    """Load a published proposal, refusing anything that is not a complete one."""
+    """Load a published proposal, refusing anything that is not a complete and intact one.
+
+    The sequence below is the contract, and it is ordered on purpose: nothing the manifest *says*
+    may influence a decision before the manifest has proved it is the file that was published.
+
+    1. the manifest exists and parses as JSON
+    2. both seals are present and well-formed
+    3. ``content_digest`` reproduces from the semantic body
+    4. ``manifest_hash`` reproduces from the whole manifest
+    5. the authority declarations are read *now* — ``proposal_state`` and ``authority_status``
+       decide whether this directory may be treated as a loadable proposal at all, so they are
+       read only once they are known to be the published values and not an edit
+    6. each declared CSV matches its declared sha256
+    7. the CSVs parse and carry exactly the expected columns
+
+    Reversing steps 5 and 6 against steps 2-4 would mean acting on an unverified claim. Reading the
+    CSV rows before step 6 would mean parsing bytes that have not been shown to be the published
+    ones.
+    """
     output_dir = Path(output_dir)
     manifest_path = output_dir / MANIFEST_FILENAME
     if not manifest_path.is_file():
@@ -1344,6 +1473,8 @@ def load_proposal(output_dir: Path) -> Tuple[Dict[str, object], List[Dict[str, s
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise StableRecordCrosswalkError(f"{manifest_path} could not be read: {exc}") from exc
+
+    verify_manifest_integrity(manifest, source=str(manifest_path))
 
     if manifest.get("proposal_state") != PROPOSAL_STATE_COMPLETE:
         raise StableRecordCrosswalkError(
@@ -1356,18 +1487,47 @@ def load_proposal(output_dir: Path) -> Tuple[Dict[str, object], List[Dict[str, s
             f"this loader only accepts {AUTHORITY_STATUS_PROPOSAL_ONLY!r}"
         )
 
-    registry = _read_csv(output_dir / manifest["registry_filename"], REGISTRY_COLUMNS)
-    crosswalk = _read_csv(output_dir / manifest["crosswalk_filename"], CROSSWALK_COLUMNS)
-
-    for label, path, rows_digest in (
-        ("registry", output_dir / manifest["registry_filename"], manifest["registry_sha256"]),
-        ("crosswalk", output_dir / manifest["crosswalk_filename"], manifest["crosswalk_sha256"]),
+    # The manifest names the files to open. Verified or not, that name stays inside the proposal
+    # directory: a hand-edited manifest must not be able to point the loader at another directory.
+    paths: Dict[str, Path] = {}
+    for label, name_field in (
+        ("registry", "registry_filename"),
+        ("crosswalk", "crosswalk_filename"),
     ):
+        declared_name = manifest.get(name_field)
+        if (
+            not isinstance(declared_name, str)
+            or not declared_name
+            or Path(declared_name).name != declared_name
+        ):
+            raise StableRecordCrosswalkError(
+                f"{manifest_path} declares {name_field}={declared_name!r}; a proposal file must be "
+                "named by a plain filename inside the proposal directory"
+            )
+        paths[label] = output_dir / declared_name
+
+    for label, digest_field in (
+        ("registry", "registry_sha256"),
+        ("crosswalk", "crosswalk_sha256"),
+    ):
+        path = paths[label]
+        if not path.is_file():
+            raise StableRecordCrosswalkError(f"proposal file {path} is missing")
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual != rows_digest:
+        rows_digest = manifest.get(digest_field)
+        # Shape first: ``compute_digest`` rejects non-ASCII input, and a value that is not
+        # lowercase hexadecimal cannot equal a sha256 hexdigest anyway.
+        if (
+            not isinstance(rows_digest, str)
+            or not _SHA256_HEX_RE.match(rows_digest)
+            or not hmac.compare_digest(actual, rows_digest)
+        ):
             raise StableRecordCrosswalkError(
                 f"{label} file {path} sha256 {actual} does not match the manifest ({rows_digest})"
             )
+
+    registry = _read_csv(paths["registry"], REGISTRY_COLUMNS)
+    crosswalk = _read_csv(paths["crosswalk"], CROSSWALK_COLUMNS)
 
     return manifest, registry, crosswalk
 

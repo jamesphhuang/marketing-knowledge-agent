@@ -37,7 +37,12 @@ from marketing_knowledge_agent.stable_record_crosswalk import (
     CROSSWALK_COLUMNS,
     CROSSWALK_FILENAME,
     M1_EXPECTATION,
+    MANIFEST_CONTENT_DIGEST_EXCLUDED_FIELDS,
+    MANIFEST_CONTENT_DIGEST_FIELD,
+    MANIFEST_CREATED_AT_FIELD,
     MANIFEST_FILENAME,
+    MANIFEST_HASH_EXCLUDED_FIELDS,
+    MANIFEST_HASH_FIELD,
     MERCHANT_FIELD_ORDER,
     NORMALIZATION_VERSION,
     PROPOSAL_STATE_COMPLETE,
@@ -53,11 +58,15 @@ from marketing_knowledge_agent.stable_record_crosswalk import (
     build_crosswalk_proposal,
     build_manifest,
     classify_decision_subject,
+    compute_content_digest,
+    compute_manifest_hash,
+    content_digest_body,
     format_stable_id,
     generate_stable_record_crosswalk_proposal,
     hash_file,
     load_merchant_evidence,
     load_proposal,
+    manifest_bytes,
     match_records,
     normalize_evidence_brand,
     normalize_evidence_handle,
@@ -66,6 +75,7 @@ from marketing_knowledge_agent.stable_record_crosswalk import (
     validate_expectation,
     validate_proposal,
     verify_existing_proposal,
+    verify_manifest_integrity,
     write_proposal,
 )
 
@@ -592,6 +602,62 @@ def synthetic_proposal(tmp_path, legacy_rows=None, authority_rows=None):
     return build_crosswalk_proposal(legacy, authority), legacy, authority
 
 
+def published_proposal(tmp_path, name="proposal"):
+    """Publish a synthetic proposal and return its directory."""
+    proposal, _, _ = synthetic_proposal(tmp_path)
+    output = tmp_path / name
+    write_proposal(proposal, output)
+    return output
+
+
+def read_manifest(output):
+    return json.loads((output / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+
+
+def overwrite_manifest(output, manifest):
+    """Write a manifest back the way the publisher writes it, so only the payload differs."""
+    (output / MANIFEST_FILENAME).write_bytes(manifest_bytes(manifest))
+
+
+def reseal_manifest(manifest):
+    """Re-seal a manifest exactly the way the publisher does, over its current contents.
+
+    Tamper tests that leave a stale seal behind prove only that *some* check fired. A test aimed at
+    a specific refusal re-seals everything else first, so the artifact it presents is the hardest
+    version of that tamper rather than the easiest.
+    """
+    body = {
+        key: value
+        for key, value in manifest.items()
+        if key not in (MANIFEST_CONTENT_DIGEST_FIELD, MANIFEST_HASH_FIELD)
+    }
+    body[MANIFEST_CONTENT_DIGEST_FIELD] = compute_content_digest(body)
+    body[MANIFEST_HASH_FIELD] = compute_manifest_hash(body)
+    return body
+
+
+def flip_hex(digest):
+    """Change one character of a hexdigest, so the tamper can never be a silent no-op."""
+    flipped = ("1" if digest[0] == "0" else "0") + digest[1:]
+    assert flipped != digest, "hostile digest mutation is a no-op"
+    return flipped
+
+
+def perturb(value):
+    """Return a different value of the same JSON type."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + 1
+    if isinstance(value, str):
+        return value + "-perturbed"
+    if isinstance(value, list):
+        return list(value) + ["perturbed"]
+    if isinstance(value, dict):
+        return dict(value, perturbed=1)
+    raise AssertionError(f"no perturbation defined for {type(value).__name__}")
+
+
 def test_write_proposal_publishes_a_complete_directory(tmp_path):
     proposal, _, _ = synthetic_proposal(tmp_path)
     output = tmp_path / "proposal"
@@ -638,7 +704,11 @@ def test_partial_output_is_not_accepted_as_a_proposal(tmp_path):
     assert payload["proposal_state"] == PROPOSAL_STATE_COMPLETE
     payload["proposal_state"] = "incomplete"
     assert payload["proposal_state"] != PROPOSAL_STATE_COMPLETE
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    # Re-sealed on purpose. An unsealed edit is refused by the manifest seals long before
+    # proposal_state is read, which would leave this assertion testing the wrong refusal; a
+    # correctly sealed manifest that still declares itself incomplete is the harder artifact, and
+    # it is the one this test is about.
+    overwrite_manifest(output, reseal_manifest(payload))
     with pytest.raises(StableRecordCrosswalkError, match="proposal_state"):
         load_proposal(output)
 
@@ -964,10 +1034,12 @@ def test_verify_existing_refuses_a_regeneration_that_moves_a_stable_id(tmp_path)
     assert rows[0]["seed_derivation_digest"] != before
     registry_path.write_bytes(render_csv(rows, REGISTRY_COLUMNS))
 
-    manifest_path = output / MANIFEST_FILENAME
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = read_manifest(output)
     manifest["registry_sha256"] = hashlib.sha256(registry_path.read_bytes()).hexdigest()
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # Re-sealed so the rewritten registry is presented inside a manifest that is internally
+    # consistent. Without this the loader's seal check fires first and this test would never reach
+    # the identifier comparison it exists to make.
+    overwrite_manifest(output, reseal_manifest(manifest))
 
     with pytest.raises(StableRecordCrosswalkError, match="seed derivation moved"):
         verify_existing_proposal(proposal, output)
@@ -1003,6 +1075,466 @@ def test_manifest_carries_no_merchant_roster(tmp_path):
         created_at="2026-01-01T00:00:00+00:00",
     )
     assert "SecretBrandName" not in json.dumps(manifest, ensure_ascii=False)
+
+
+# --- (24) the manifest seals are enforced, not merely recorded ------------------------------------
+#
+# WP0.4b-M3B. The manifest has always carried two seals; until this section nothing ever checked
+# them, so a proposal whose semantic body had been edited loaded exactly like one that had not.
+# Two separate contracts are pinned here.
+#
+# F1  ``load_proposal`` recomputes *both* seals and refuses any manifest that fails to reproduce
+#     either one. Neither seal alone is sufficient, and the tests below prove that by laundering an
+#     edit through each seal in turn.
+# F3  The field set ``content_digest`` covers is pinned by name, so adding or removing a manifest
+#     field cannot change digest coverage without a test failing first.
+
+
+# The exact semantic field set the reviewed ``content_digest`` covers.
+#
+# This lives in the tests, not in the module, and that placement is the mechanism. Production
+# computes coverage by *exclusion*, so a manifest field added later is covered automatically and
+# correctly — that is the safe default. But a coverage change that nobody looked at is exactly the
+# drift this contract exists to stop, so the reviewed set is written down separately and the two
+# are compared.
+#
+# When the test below fails because this set no longer matches, do not paste the new key in to get
+# green. Decide first what the new field is. If it is volatile publication metadata like
+# ``created_at`` it belongs in the excluded set instead. If it is semantic, adding it here is a
+# statement that ``content_digest`` legitimately takes a new value from this point on, and every
+# evidence binding that quotes the old digest is describing an older schema.
+REVIEWED_CONTENT_DIGEST_SEMANTIC_FIELDS = frozenset(
+    {
+        "asset_review_candidate_count",
+        "asset_review_candidate_field_count",
+        "asset_review_candidates",
+        "authority_record_count",
+        "authority_status",
+        "authority_workbook_sha256",
+        "confidence_counts",
+        "crosswalk_filename",
+        "crosswalk_record_count",
+        "crosswalk_sha256",
+        "legacy_record_count",
+        "legacy_workbook_sha256",
+        "migration_version",
+        "new_record_count",
+        "normalization_version",
+        "payload_changed_record_count",
+        "proposal_state",
+        "proposed_successor_scheme",
+        "reconciliation",
+        "record_identity_scheme_status",
+        "registry_filename",
+        "registry_record_count",
+        "registry_sha256",
+        "schema_version",
+        "seed_algorithm",
+        "seed_namespace_identifier",
+        "seed_namespace_uuid",
+        "stable_id_count",
+        "stable_id_max",
+        "stable_id_min",
+    }
+)
+
+# The only three fields outside the semantic body: the volatile publication timestamp, and the two
+# seals, neither of which can cover itself.
+REVIEWED_CONTENT_DIGEST_EXCLUDED_FIELDS = frozenset(
+    {"created_at", "content_digest", "manifest_hash"}
+)
+
+# The frozen M1 proposal. Its four published values are the ones every downstream M1/M2/M3 evidence
+# binding quotes; this WP hardens the loader and must not move any of them.
+M1_PROPOSAL_DIR = REPO_ROOT / "data/identity/proposals/stable-record-crosswalk-m1-2026-08-21"
+M1_PUBLISHED_REGISTRY_SHA256 = "5cbacc11813fc72ab9573a3a110eb65b04e4fde6536aa0c6a0bd7658056baf73"
+M1_PUBLISHED_CROSSWALK_SHA256 = "8bb5ca326a2d68ee8e50d7059868724737604320fe7c7fb5777f55e0d7eaae9a"
+M1_PUBLISHED_CONTENT_DIGEST = "6155d2c06b045600077c2edfc192c287a231192ed91ac7f59ba98031244064ce"
+M1_PUBLISHED_MANIFEST_HASH = "0996bf8f221910b4730acbe16202e39d85c29c6fc56ad537e707a913e604c1f9"
+
+requires_m1_proposal = pytest.mark.skipif(
+    not (M1_PROPOSAL_DIR / MANIFEST_FILENAME).is_file(),
+    reason="the published M1 proposal is a local artifact and is not tracked",
+)
+
+
+@pytest.fixture
+def sealed_manifest(tmp_path):
+    """A freshly built manifest, at rest, with both seals valid."""
+    proposal, _, _ = synthetic_proposal(tmp_path)
+    return build_manifest(
+        proposal,
+        render_csv(proposal.registry_rows, REGISTRY_COLUMNS),
+        render_csv(proposal.crosswalk_rows, CROSSWALK_COLUMNS),
+        created_at="2026-02-03T04:05:06+00:00",
+    )
+
+
+# --- F3: what content_digest covers is pinned by name --------------------------------------------
+
+
+def test_content_digest_covers_exactly_the_reviewed_semantic_field_set(sealed_manifest):
+    covered = frozenset(content_digest_body(sealed_manifest))
+    assert covered == REVIEWED_CONTENT_DIGEST_SEMANTIC_FIELDS, (
+        "manifest semantic fields changed: added "
+        f"{sorted(covered - REVIEWED_CONTENT_DIGEST_SEMANTIC_FIELDS)}, removed "
+        f"{sorted(REVIEWED_CONTENT_DIGEST_SEMANTIC_FIELDS - covered)}. content_digest coverage may "
+        "not drift silently — adjudicate the schema change first, then update "
+        "REVIEWED_CONTENT_DIGEST_SEMANTIC_FIELDS."
+    )
+    # A second, coarser tripwire: the count alone would not catch a rename, but it does catch a
+    # field being added and another removed in the same edit.
+    assert len(covered) == 30
+
+
+def test_content_digest_excludes_exactly_created_at_and_the_two_seals(sealed_manifest):
+    excluded = frozenset(sealed_manifest) - frozenset(content_digest_body(sealed_manifest))
+    assert excluded == REVIEWED_CONTENT_DIGEST_EXCLUDED_FIELDS
+    assert MANIFEST_CONTENT_DIGEST_EXCLUDED_FIELDS == REVIEWED_CONTENT_DIGEST_EXCLUDED_FIELDS
+    assert MANIFEST_HASH_EXCLUDED_FIELDS == frozenset({MANIFEST_HASH_FIELD})
+    # The seal covers everything the digest does, plus the timestamp and the digest itself.
+    assert frozenset(sealed_manifest) - MANIFEST_HASH_EXCLUDED_FIELDS == (
+        REVIEWED_CONTENT_DIGEST_SEMANTIC_FIELDS
+        | {MANIFEST_CREATED_AT_FIELD, MANIFEST_CONTENT_DIGEST_FIELD}
+    )
+
+
+def test_every_covered_field_actually_moves_the_content_digest(sealed_manifest):
+    """Coverage must be real, not nominal: perturbing any covered field must move the digest.
+
+    A field can sit inside the hashed body and still fail to influence it — dropped by a
+    normalisation step, flattened to a constant, or serialised identically for every value. Listing
+    it as covered would then be a false assurance, which is worse than not claiming coverage.
+    """
+    baseline = compute_content_digest(sealed_manifest)
+    assert baseline == sealed_manifest[MANIFEST_CONTENT_DIGEST_FIELD]
+
+    for field in sorted(content_digest_body(sealed_manifest)):
+        mutated = dict(sealed_manifest)
+        mutated[field] = perturb(mutated[field])
+        assert mutated[field] != sealed_manifest[field], f"perturbing {field!r} was a no-op"
+        assert compute_content_digest(mutated) != baseline, (
+            f"{field!r} is inside the content_digest body but does not affect the digest"
+        )
+
+
+def test_no_excluded_field_moves_the_content_digest(sealed_manifest):
+    """The converse: the three excluded fields must not be able to move semantic identity."""
+    baseline = compute_content_digest(sealed_manifest)
+    for field in sorted(REVIEWED_CONTENT_DIGEST_EXCLUDED_FIELDS):
+        mutated = dict(sealed_manifest)
+        mutated[field] = perturb(mutated[field])
+        assert mutated[field] != sealed_manifest[field], f"perturbing {field!r} was a no-op"
+        assert compute_content_digest(mutated) == baseline, (
+            f"{field!r} is excluded from content_digest but moved it"
+        )
+
+
+def test_created_at_moves_the_seal_but_never_the_semantic_digest(sealed_manifest):
+    """Volatile metadata and semantic identity must not be mixed."""
+    later = dict(sealed_manifest)
+    later[MANIFEST_CREATED_AT_FIELD] = "2026-11-12T13:14:15+00:00"
+    assert later[MANIFEST_CREATED_AT_FIELD] != sealed_manifest[MANIFEST_CREATED_AT_FIELD]
+
+    assert compute_content_digest(later) == compute_content_digest(sealed_manifest)
+    assert compute_manifest_hash(later) != compute_manifest_hash(sealed_manifest)
+
+
+# --- F1: the loader recomputes both seals --------------------------------------------------------
+#
+# Tamper matrix. Every case asserts the mutation actually changed something before asserting the
+# refusal, because a mutation that set a field to the value it already held would look green while
+# proving nothing.
+
+
+def test_a_published_proposal_verifies_at_rest(tmp_path):
+    """The baseline the whole matrix is measured against: an untouched proposal loads."""
+    output = published_proposal(tmp_path)
+    manifest, registry, crosswalk = load_proposal(output)
+    verify_manifest_integrity(manifest)
+    assert manifest[MANIFEST_CONTENT_DIGEST_FIELD] == compute_content_digest(manifest)
+    assert manifest[MANIFEST_HASH_FIELD] == compute_manifest_hash(manifest)
+    assert registry and crosswalk
+
+
+def test_a_flipped_manifest_hash_is_refused(tmp_path):
+    """(A) The seal alone was edited."""
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    manifest[MANIFEST_HASH_FIELD] = flip_hex(manifest[MANIFEST_HASH_FIELD])
+    overwrite_manifest(output, manifest)
+    with pytest.raises(StableRecordCrosswalkError, match="manifest_hash does not match"):
+        load_proposal(output)
+
+
+def test_a_missing_manifest_hash_is_refused(tmp_path):
+    """(B) An unsealed manifest is never loadable — there is no grandfather path."""
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    del manifest[MANIFEST_HASH_FIELD]
+    assert MANIFEST_HASH_FIELD not in manifest
+    overwrite_manifest(output, manifest)
+    with pytest.raises(StableRecordCrosswalkError, match="declares no manifest_hash"):
+        load_proposal(output)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "",
+        "not-a-sha256",
+        "0" * 63,
+        "0" * 65,
+        "0996BF8F221910B4730ACBE16202E39D85C29C6FC56AD537E707A913E604C1F9",
+        "zz96bf8f221910b4730acbe16202e39d85c29c6fc56ad537e707a913e604c1f9",
+        12345,
+        None,
+        ["0" * 64],
+    ],
+    ids=[
+        "empty", "prose", "too-short", "too-long", "uppercase", "non-hex",
+        "integer", "null", "list",
+    ],
+)
+def test_a_malformed_manifest_hash_is_refused(tmp_path, malformed):
+    """(C) Wrong type and wrong shape are refusals, not coercions."""
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    assert manifest[MANIFEST_HASH_FIELD] != malformed
+    manifest[MANIFEST_HASH_FIELD] = malformed
+    overwrite_manifest(output, manifest)
+    with pytest.raises(StableRecordCrosswalkError, match="malformed manifest_hash"):
+        load_proposal(output)
+
+
+def test_a_flipped_content_digest_is_refused(tmp_path):
+    """(D) Editing semantic identity is caught even when the outer seal is left stale."""
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    manifest[MANIFEST_CONTENT_DIGEST_FIELD] = flip_hex(manifest[MANIFEST_CONTENT_DIGEST_FIELD])
+    overwrite_manifest(output, manifest)
+    with pytest.raises(StableRecordCrosswalkError, match="content_digest does not match"):
+        load_proposal(output)
+
+
+def test_a_missing_content_digest_is_refused(tmp_path):
+    """(E) A proposal with no semantic identity value has no safe interpretation."""
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    del manifest[MANIFEST_CONTENT_DIGEST_FIELD]
+    assert MANIFEST_CONTENT_DIGEST_FIELD not in manifest
+    overwrite_manifest(output, manifest)
+    with pytest.raises(StableRecordCrosswalkError, match="declares no content_digest"):
+        load_proposal(output)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    ["", "not-a-sha256", "0" * 63, "6155D2C0" + "0" * 56, 0, None, {"digest": "0" * 64}],
+    ids=["empty", "prose", "too-short", "uppercase", "integer", "null", "object"],
+)
+def test_a_malformed_content_digest_is_refused(tmp_path, malformed):
+    """(F) Same shape discipline for the semantic digest."""
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    assert manifest[MANIFEST_CONTENT_DIGEST_FIELD] != malformed
+    manifest[MANIFEST_CONTENT_DIGEST_FIELD] = malformed
+    overwrite_manifest(output, manifest)
+    with pytest.raises(StableRecordCrosswalkError, match="malformed content_digest"):
+        load_proposal(output)
+
+
+def test_an_edited_semantic_field_with_no_reseal_is_refused(tmp_path):
+    """(G) The ordinary corruption case: someone hand-edited the manifest."""
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    before = manifest["registry_record_count"]
+    manifest["registry_record_count"] = before + 1
+    assert manifest["registry_record_count"] != before
+    overwrite_manifest(output, manifest)
+    with pytest.raises(StableRecordCrosswalkError, match="content_digest does not match"):
+        load_proposal(output)
+
+
+def test_resealing_only_the_manifest_hash_does_not_launder_an_edited_field(tmp_path):
+    """(H) Why ``manifest_hash`` alone is not enough.
+
+    The outer seal covers the edit, so it verifies. ``content_digest`` — the value every downstream
+    evidence binding quotes as this proposal's identity — is now stale, and describes a proposal
+    that no longer exists. A loader checking only the seal would accept this.
+    """
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    stale_digest = manifest[MANIFEST_CONTENT_DIGEST_FIELD]
+
+    before = manifest["stable_id_count"]
+    manifest["stable_id_count"] = before + 1
+    assert manifest["stable_id_count"] != before
+    manifest[MANIFEST_HASH_FIELD] = compute_manifest_hash(manifest)
+
+    # The seal really does verify; only the semantic digest catches this.
+    assert compute_manifest_hash(manifest) == manifest[MANIFEST_HASH_FIELD]
+    assert compute_content_digest(manifest) != stale_digest
+
+    overwrite_manifest(output, manifest)
+    with pytest.raises(StableRecordCrosswalkError, match="content_digest does not match"):
+        load_proposal(output)
+
+
+def test_resealing_only_the_content_digest_does_not_launder_an_edited_field(tmp_path):
+    """(I) Why ``content_digest`` alone is not enough: the outer seal is left stale."""
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    stale_seal = manifest[MANIFEST_HASH_FIELD]
+
+    before = manifest["stable_id_count"]
+    manifest["stable_id_count"] = before + 1
+    assert manifest["stable_id_count"] != before
+    manifest[MANIFEST_CONTENT_DIGEST_FIELD] = compute_content_digest(manifest)
+
+    # The semantic digest really does verify; only the outer seal catches this.
+    assert compute_content_digest(manifest) == manifest[MANIFEST_CONTENT_DIGEST_FIELD]
+    assert compute_manifest_hash(manifest) != stale_seal
+
+    overwrite_manifest(output, manifest)
+    with pytest.raises(StableRecordCrosswalkError, match="manifest_hash does not match"):
+        load_proposal(output)
+
+
+def test_a_correctly_resealed_created_at_is_accepted(tmp_path):
+    """(J) Volatile metadata may move; semantic identity may not follow it.
+
+    ``created_at`` is inside the outer seal and outside the semantic digest. Re-stamping it and
+    re-sealing correctly is a legitimate republication, and it must load — while leaving
+    ``content_digest`` at exactly the value it had before. If this test ever fails by rejection,
+    the two concerns have been mixed and every reproducibility check downstream is broken.
+    """
+    output = published_proposal(tmp_path)
+    before = read_manifest(output)
+
+    after = dict(before)
+    after[MANIFEST_CREATED_AT_FIELD] = "2027-03-04T05:06:07+00:00"
+    assert after[MANIFEST_CREATED_AT_FIELD] != before[MANIFEST_CREATED_AT_FIELD]
+    after[MANIFEST_HASH_FIELD] = compute_manifest_hash(after)
+    assert after[MANIFEST_HASH_FIELD] != before[MANIFEST_HASH_FIELD], (
+        "created_at must be inside the outer seal or this case proves nothing"
+    )
+    overwrite_manifest(output, after)
+
+    manifest, registry, crosswalk = load_proposal(output)
+    assert manifest[MANIFEST_CREATED_AT_FIELD] == "2027-03-04T05:06:07+00:00"
+    assert manifest[MANIFEST_CONTENT_DIGEST_FIELD] == before[MANIFEST_CONTENT_DIGEST_FIELD]
+    assert registry and crosswalk
+
+
+def test_a_manifest_that_is_not_an_object_is_refused(tmp_path):
+    output = published_proposal(tmp_path)
+    (output / MANIFEST_FILENAME).write_text(json.dumps(["not", "a", "manifest"]), encoding="utf-8")
+    with pytest.raises(StableRecordCrosswalkError, match="not a JSON object"):
+        load_proposal(output)
+
+
+# --- F1: verification precedes every use of what the manifest says --------------------------------
+
+
+def test_the_seals_are_checked_before_the_authority_declaration_is_read(tmp_path):
+    """An unverified manifest must not get as far as being asked what it is.
+
+    The same edit is presented twice. Unsealed, it is refused for being unverifiable — the loader
+    never reaches ``proposal_state``. Sealed, it is refused for what it declares. The pair pins the
+    order: authority-sensitive values are read only once they are known to be the published ones.
+    """
+    output = published_proposal(tmp_path)
+    original = read_manifest(output)
+
+    tampered = dict(original)
+    tampered["authority_status"] = "stable_record_v2_authority"
+    assert tampered["authority_status"] != original["authority_status"]
+
+    overwrite_manifest(output, tampered)
+    with pytest.raises(StableRecordCrosswalkError, match="content_digest does not match"):
+        load_proposal(output)
+
+    overwrite_manifest(output, reseal_manifest(tampered))
+    with pytest.raises(StableRecordCrosswalkError, match="authority_status"):
+        load_proposal(output)
+
+
+def test_a_manifest_may_not_name_a_file_outside_the_proposal_directory(tmp_path):
+    """The manifest names the files to open; that name stays inside the directory."""
+    output = published_proposal(tmp_path)
+    manifest = read_manifest(output)
+    manifest["registry_filename"] = "../" + REGISTRY_FILENAME
+    overwrite_manifest(output, reseal_manifest(manifest))
+    with pytest.raises(StableRecordCrosswalkError, match="plain filename"):
+        load_proposal(output)
+
+
+# --- F1: CSV body integrity is unchanged and still enforced ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "filename, digest_field, label",
+    [
+        (REGISTRY_FILENAME, "registry_sha256", "registry"),
+        (CROSSWALK_FILENAME, "crosswalk_sha256", "crosswalk"),
+    ],
+)
+def test_edited_csv_bytes_are_refused(tmp_path, filename, digest_field, label):
+    output = published_proposal(tmp_path)
+    path = output / filename
+    before = path.read_bytes()
+    after = before.replace(b"MKA-MC-00001", b"MKA-MC-09999", 1)
+    assert after != before, "hostile byte mutation is a no-op"
+    path.write_bytes(after)
+    with pytest.raises(StableRecordCrosswalkError, match=f"{label} file .* does not match"):
+        load_proposal(output)
+
+
+@pytest.mark.parametrize(
+    "filename, digest_field",
+    [(REGISTRY_FILENAME, "registry_sha256"), (CROSSWALK_FILENAME, "crosswalk_sha256")],
+)
+def test_repointing_a_csv_digest_without_resealing_is_refused(tmp_path, filename, digest_field):
+    """Editing a CSV and updating its declared digest is now caught by the manifest seals."""
+    output = published_proposal(tmp_path)
+    path = output / filename
+    before = path.read_bytes()
+    after = before.replace(b"MKA-MC-00001", b"MKA-MC-09999", 1)
+    assert after != before, "hostile byte mutation is a no-op"
+    path.write_bytes(after)
+
+    manifest = read_manifest(output)
+    manifest[digest_field] = hashlib.sha256(after).hexdigest()
+    overwrite_manifest(output, manifest)
+
+    with pytest.raises(StableRecordCrosswalkError, match="content_digest does not match"):
+        load_proposal(output)
+
+
+# --- F1/F3: the frozen M1 proposal is unaffected ---------------------------------------------------
+
+
+@requires_m1_proposal
+def test_the_published_m1_proposal_verifies_under_the_enforcing_loader():
+    """Backward compatibility, stated as values rather than as an absence of errors.
+
+    The enforcing loader must accept the formal M1 proposal, and none of the four published values
+    may move. There is deliberately no bypass that could make this pass for the wrong reason: if
+    the seals were not enforced this test would still pass, which is why the tamper matrix above
+    carries the enforcement claim and this test carries only the compatibility claim.
+    """
+    manifest, registry, crosswalk = load_proposal(M1_PROPOSAL_DIR)
+
+    assert manifest["registry_sha256"] == M1_PUBLISHED_REGISTRY_SHA256
+    assert manifest["crosswalk_sha256"] == M1_PUBLISHED_CROSSWALK_SHA256
+    assert manifest[MANIFEST_CONTENT_DIGEST_FIELD] == M1_PUBLISHED_CONTENT_DIGEST
+    assert manifest[MANIFEST_HASH_FIELD] == M1_PUBLISHED_MANIFEST_HASH
+    assert len(registry) == len(crosswalk) == 121
+
+    # The published manifest carries exactly the reviewed schema, so the coverage contract above is
+    # pinned against the real artifact and not only against a synthetic one.
+    assert frozenset(content_digest_body(manifest)) == REVIEWED_CONTENT_DIGEST_SEMANTIC_FIELDS
 
 
 # --- (U) decision subject formats --------------------------------------------------------------------------
