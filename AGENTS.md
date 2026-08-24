@@ -24,6 +24,17 @@ Git discipline (multi-agent repo — 2026-07-11 教訓,詳見 docs/governance/LE
   發現 git 狀態與你的認知不符(commit 消失、分支被 merge)→ 先回報,通常是
   另一端已處理,你的視圖過時了——不要「修復」它。
 
+Cross-tool collaboration:
+- 每個新 session 先讀 `docs/collaboration/START_HERE.md` 與
+  `docs/collaboration/CURRENT_WORK.md`，再依任務按需讀取其他文件。
+- Codex 與 Claude Code 不固定分工；每個任務開始時指定唯一實作者，其他 agent
+  只能閱讀、研究或審查，除非交接紀錄已明確轉移責任。
+- 改檔前必須在 `CURRENT_WORK.md` 登記任務鎖定；已有其他實作者的 active lock
+  時停止並向使用者確認，不得自行接管或覆寫。
+- 任務開始、重大決策、任務完成或中斷時，依協作文件更新正式紀錄。
+- Git repo 是專案事實與決策的唯一正式來源；Obsidian 協作 Vault 只放去敏摘要，
+  不得放入客戶資料、原始 Excel、API key、憑證或完整 AI 對話。
+
 Project-specific rules:
 - 第一階段不得接正式公司資料，只能使用 `data/mock_vault/` 或測試臨時資料。
 - 第一階段不得要求外部 LLM 或 API key；`generation` 必須維持可離線測試。
