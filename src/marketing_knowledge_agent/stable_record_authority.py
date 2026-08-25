@@ -52,6 +52,35 @@ statement that one particular 2026 review is the only one this engine can ever m
 The evidence binds three ways, which is deliberate. The proposal seals itself; the external pins
 state what the reviewer saw; and the decision artifact independently records the proposal hashes
 it was written against. All three must agree, so substituting any single one of them fails.
+
+A pin that is carried but not checked is worse than no pin
+-----------------------------------------------------------
+The same argument decides what an *optional* pin means here. A package that records
+``backup_manifest_sha256`` without ever opening the backup produces a file that a later reader
+cannot tell apart from one that verified it — and the reader's whole reason for consulting the
+package is that they were not there when it was made. So "supplied" and "verified" are one word:
+every optional pin arrives with the location of the artifact it names
+(:class:`AuthorityEvidencePins` refuses half of that pair), the bytes are read and hashed on every
+build and again on every publication, and the manifest reports what *this run* read rather than
+what the pins claimed. Where no backup was pinned, the package says the gate was not asserted; it
+never says ``PASS`` by omission.
+
+The published package seals all three of its files
+----------------------------------------------------
+The manifest seals itself twice, as before. It also seals the receipt's bytes, via
+``receipt_sha256``, so a receipt that is edited or deleted cannot go unnoticed. The receipt in turn
+quotes only the manifest's *semantic* identity — ``registry_sha256``, ``content_digest``,
+``stable_id_set_digest`` — and never ``manifest_hash``, which is what keeps the two seals acyclic:
+the receipt is complete before the manifest's outer seal is computed over it. ``content_digest``
+excludes ``receipt_sha256`` for the same reason, and :func:`build_authority_payloads` asserts the
+fixed point rather than assuming it.
+
+What this module does not decide
+----------------------------------
+:func:`load_authority_package` proves a package is internally whole. It does not decide that a
+package is the one to trust, and it is not an activation gate; the distinction is spelled out on
+that function. Activating ``stable_record_v2`` will need an external pin of the authority output
+itself, and no such pin is enforced here.
 """
 
 from __future__ import annotations
@@ -140,6 +169,62 @@ PRODUCTION_AUTHORITY_RELPATH: Tuple[str, ...] = (
     "authority",
     "stable_record_v2",
 )
+
+
+# --- package scope versus project governance gate -------------------------------------------------
+#
+# These two sentences look alike and mean opposite things:
+#
+#     this bundle of files was written               (a package fact)
+#     the project's AUTHORITY_MATERIALIZED gate flipped   (a governance fact)
+#
+# The project gate is still NO and only a governance decision can move it. A receipt that said
+# ``AUTHORITY_MATERIALIZED: YES`` would be read as the second sentence by anyone who found the
+# directory later — including a tmp bundle written by a test — so nothing published here uses that
+# spelling. Every state this module asserts is named for the package it describes.
+
+PACKAGE_STATE_FIELD = "package_state"
+PACKAGE_MATERIALIZED_FIELD = "authority_package_materialized"
+STABLE_RECORD_V2_ACTIVATED_FIELD = "stable_record_v2_activated"
+ROW_V1_RETIRED_FIELD = "row_v1_retired"
+PRODUCTION_REINDEX_AUTHORIZED_FIELD = "production_reindex_authorized"
+ALIAS_REBINDING_SEPARATE_FIELD = "alias_rebinding_requires_separate_decision"
+
+
+# --- backup evidence ------------------------------------------------------------------------------
+#
+# A pin the package carries but never checked is worse than no pin: it reads as proof. So a backup
+# pin arrives with the location of the artifact it pins (see :class:`AuthorityEvidencePins`), the
+# bytes are read and hashed before publication, and the manifest states *which* of the two worlds
+# it is in. Absent evidence is recorded as absent, never as a pass.
+
+BACKUP_EVIDENCE_NOT_SUPPLIED = "not_supplied"
+BACKUP_EVIDENCE_VERIFIED = "verified_against_supplied_evidence"
+M3_BACKUP_GATE_PASS = "PASS"
+M3_BACKUP_GATE_NOT_ASSERTED = "NOT_ASSERTED"
+
+# The M2 companion artifacts, each paired with the pin field that names it. Filenames live here so
+# that "which pins exist" and "which files they name" cannot drift apart. No production path and no
+# production hash is a constant of this module: both arrive per call from the governance record.
+COMPANION_ARTIFACTS: Tuple[Tuple[str, str], ...] = (
+    ("human_review_decisions_manifest.json", "decision_manifest_sha256"),
+    ("apply_preview.json", "decision_apply_preview_sha256"),
+    ("reissue_receipt.json", "decision_reissue_receipt_sha256"),
+)
+
+
+# --- activation trust (deferred, deliberately) ------------------------------------------------------
+#
+# :func:`load_authority_package` proves a package is internally whole: its manifest reproduces its
+# own seals, its registry matches the manifest, its receipt matches the manifest. That is
+# self-validation, and self-validation is not a trust decision. A package whose registry, manifest
+# and receipt were all rewritten together is internally whole too. Deciding to *activate* an
+# authority therefore requires the same thing materializing one required: an external pin, held
+# outside the artifact, of the authority output itself. No caller in this work package activates
+# anything, so no such pin is enforced here — and the package says so out loud rather than leaving
+# the omission to be discovered.
+ACTIVATION_TRUST_FIELD = "activation_trust"
+AUTHORITY_OUTPUT_EXTERNAL_PIN_REQUIRED = "REQUIRED_BEFORE_ACTIVATION"
 
 
 # --- field-specific parsing contract --------------------------------------------------------------
@@ -256,8 +341,15 @@ class AuthorityEvidencePins:
 
     Supplied by the caller from the governance record, never read out of the artifacts these pins
     are used to check. The four M1 values and the M2 decisions hash are required; the remaining M2
-    companion artifacts and the off-volume backup manifest are optional, and each one supplied is
-    additionally enforced.
+    companion artifacts and the off-volume backup manifest are optional.
+
+    Optional does not mean weaker. A pin is a claim the package will carry, so *supplying one is
+    the same act as requiring it be checked* — there is no third state where a pin is recorded but
+    unverified, because that state is indistinguishable to a later reader from a pin that passed.
+    Each optional pin therefore arrives together with the location of the evidence it pins, and
+    that pairing is enforced here, at construction, rather than at the call site that might forget:
+    a hash without a location cannot be checked, and a location without a hash states nothing that
+    could be checked. Neither half is accepted alone.
 
     ``proposal_manifest_hash`` covers the proposal manifest including its ``created_at``, so
     pinning it binds the exact publication as well as its contents.
@@ -273,7 +365,14 @@ class AuthorityEvidencePins:
     decision_manifest_sha256: str = ""
     decision_apply_preview_sha256: str = ""
     decision_reissue_receipt_sha256: str = ""
+    # The directory the three companion artifacts above live in. Required whenever any of them is
+    # pinned, refused when none is.
+    decision_companion_dir: str = ""
     backup_manifest_sha256: str = ""
+    # The backup manifest file itself. Required whenever the hash above is set, refused when it is
+    # not. The backup lives off this volume by design, so its path is never derivable from the
+    # repository and must be supplied.
+    backup_manifest_path: str = ""
 
     def __post_init__(self) -> None:
         required = (
@@ -311,6 +410,43 @@ class AuthorityEvidencePins:
             raise StableRecordAuthorityError(
                 f"evidence pin reviewed_at={self.reviewed_at!r} is not an ISO YYYY-MM-DD date"
             )
+
+        # Pin and location are one statement, and half a statement is refused. This is what makes
+        # "supplied" and "verified" the same word downstream: no combination of arguments to any
+        # entry point can produce a pin this module carries but never read.
+        supplied_companions = sorted(
+            attr for _filename, attr in COMPANION_ARTIFACTS if getattr(self, attr)
+        )
+        companion_dir = str(self.decision_companion_dir or "").strip()
+        if supplied_companions and not companion_dir:
+            raise StableRecordAuthorityError(
+                f"companion pin(s) {supplied_companions} are supplied but decision_companion_dir "
+                "is empty; a pin whose evidence has no location can never be checked, and an "
+                "unchecked pin recorded in an authority reads as a check that passed"
+            )
+        if companion_dir and not supplied_companions:
+            raise StableRecordAuthorityError(
+                "decision_companion_dir is supplied but no companion artifact is pinned; an "
+                "evidence location without a hash states nothing that could be verified"
+            )
+        backup_path = str(self.backup_manifest_path or "").strip()
+        if self.backup_manifest_sha256 and not backup_path:
+            raise StableRecordAuthorityError(
+                "backup_manifest_sha256 is supplied but backup_manifest_path is empty; the "
+                "package may not claim a backup it has no way to read"
+            )
+        if backup_path and not self.backup_manifest_sha256:
+            raise StableRecordAuthorityError(
+                "backup_manifest_path is supplied but backup_manifest_sha256 is empty; an "
+                "unpinned backup file proves nothing about which backup was taken"
+            )
+
+    @property
+    def supplied_companion_filenames(self) -> Tuple[str, ...]:
+        """The companion filenames this contract pins, in a stable order."""
+        return tuple(
+            filename for filename, attr in COMPANION_ARTIFACTS if getattr(self, attr)
+        )
 
 
 def _require_pin(actual: str, expected: str, label: str) -> None:
@@ -483,31 +619,110 @@ def load_decision_artifact(
     actual = hashlib.sha256(raw).hexdigest()
     _require_pin(actual, pins.decision_artifact_sha256, f"decision artifact {decisions_path} sha256")
 
-    reader = csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=""))
-    if reader.fieldnames != list(DECISION_COLUMNS):
-        raise StableRecordAuthorityError(
-            f"decision artifact {decisions_path} columns {reader.fieldnames} do not match "
-            f"{list(DECISION_COLUMNS)}"
-        )
-    return parse_decision_rows([dict(row) for row in reader])
+    return parse_decision_rows(read_decision_csv(raw, source=str(decisions_path)))
 
 
-def verify_companion_artifacts(
-    artifact_dir: Path, pins: AuthorityEvidencePins
-) -> Dict[str, str]:
-    """Verify each optional M2 companion artifact the caller pinned.
+def read_decision_csv(raw: bytes, *, source: str) -> List[Dict[str, str]]:
+    """Read the decision CSV under an exact-width contract.
 
-    A pin that is set must be satisfiable: a missing file is a refusal, not a skipped check.
+    ``csv.DictReader`` is deliberately not used, because its two convenience behaviours are both
+    silent and both wrong here. A row missing trailing fields is padded with ``restval`` — the
+    resulting mapping has every expected key, passes a column-set check, and carries ``None`` where
+    a human decision should be, which stringifies to the literal ``"None"`` further down. A row
+    with extra fields is collected under the ``restkey`` of ``None``, producing a mapping whose key
+    set contains ``None``; sorting that set to report the mismatch raises ``TypeError``, which no
+    caller failing closed on :class:`StableRecordAuthorityError` would catch.
+
+    So the file is read positionally: the header must equal the contract exactly, in order, and
+    every data row must carry exactly as many fields as there are columns. Short and long are the
+    same refusal, because a decision artifact whose shape is unknown has an unknown meaning.
+
+    Row values never appear in an error message. The artifact carries the merchant roster and the
+    reviewer's free-text notes, and a refusal is not a licence to copy either into a log.
     """
-    artifact_dir = Path(artifact_dir)
-    verified: Dict[str, str] = {}
-    for filename, expected in (
-        ("human_review_decisions_manifest.json", pins.decision_manifest_sha256),
-        ("apply_preview.json", pins.decision_apply_preview_sha256),
-        ("reissue_receipt.json", pins.decision_reissue_receipt_sha256),
-    ):
-        if not expected:
-            continue
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise StableRecordAuthorityError(
+            f"decision artifact {source} is not valid UTF-8: {exc.reason}"
+        ) from exc
+
+    reader = csv.reader(io.StringIO(decoded, newline=""))
+    expected_width = len(DECISION_COLUMNS)
+    try:
+        header = next(reader)
+    except StopIteration:
+        raise StableRecordAuthorityError(
+            f"decision artifact {source} is empty; it declares no header and no decisions"
+        ) from None
+    except csv.Error as exc:
+        raise StableRecordAuthorityError(
+            f"decision artifact {source} could not be parsed as CSV: {exc}"
+        ) from exc
+
+    if header != list(DECISION_COLUMNS):
+        raise StableRecordAuthorityError(
+            f"decision artifact {source} columns {header} do not match {list(DECISION_COLUMNS)}; "
+            "the header must match the contract exactly and in order"
+        )
+
+    rows: List[Dict[str, str]] = []
+    try:
+        for number, fields in enumerate(reader, start=1):
+            if len(fields) != expected_width:
+                raise StableRecordAuthorityError(
+                    f"decision artifact {source} data row {number} carries {len(fields)} fields "
+                    f"but the decision contract is exactly {expected_width}; a short row leaves a "
+                    "decision undefined and a long row carries a value this contract cannot name"
+                )
+            rows.append(dict(zip(DECISION_COLUMNS, fields)))
+    except csv.Error as exc:
+        raise StableRecordAuthorityError(
+            f"decision artifact {source} could not be parsed as CSV: {exc}"
+        ) from exc
+
+    if not rows:
+        raise StableRecordAuthorityError(
+            f"decision artifact {source} declares no decision rows; an authority is never "
+            "materialized from a header alone"
+        )
+    return rows
+
+
+@dataclass(frozen=True)
+class VerifiedEvidence:
+    """What :func:`verify_supplied_evidence` actually read and hashed on this call.
+
+    The manifest reports *this*, not the pin fields, so "the package says the backup was verified"
+    and "this run verified the backup" are the same statement rather than two that could drift.
+    """
+
+    companion_artifacts: Tuple[str, ...]
+    backup_manifest_verified: bool
+
+
+def verify_companion_artifacts(pins: AuthorityEvidencePins) -> Tuple[str, ...]:
+    """Verify every M2 companion artifact the caller pinned, and refuse anything unsatisfiable.
+
+    The directory comes from the pins rather than from a parameter, so there is no argument a
+    caller can pass — or omit — that separates a pinned companion from its check. A missing file
+    is a refusal, not a skipped check.
+    """
+    pinned = pins.supplied_companion_filenames
+    if not pinned:
+        return ()
+
+    artifact_dir = Path(pins.decision_companion_dir)
+    if not artifact_dir.is_dir():
+        raise StableRecordAuthorityError(
+            f"companion artifact directory {artifact_dir} is pinned but is not a directory; "
+            f"{list(pinned)} cannot be verified"
+        )
+    expected_by_filename = {
+        filename: getattr(pins, attr) for filename, attr in COMPANION_ARTIFACTS if getattr(pins, attr)
+    }
+    verified: List[str] = []
+    for filename in pinned:
         path = artifact_dir / filename
         if not path.is_file():
             raise StableRecordAuthorityError(
@@ -515,9 +730,52 @@ def verify_companion_artifacts(
                 "skipped"
             )
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        _require_pin(actual, expected, f"companion artifact {path} sha256")
-        verified[filename] = actual
-    return verified
+        _require_pin(actual, expected_by_filename[filename], f"companion artifact {path} sha256")
+        verified.append(filename)
+    return tuple(verified)
+
+
+def verify_backup_evidence(pins: AuthorityEvidencePins) -> bool:
+    """Read and hash the pinned backup manifest, returning whether a backup was verified.
+
+    Returns ``False`` only when no backup was pinned at all. A pinned backup that is missing or
+    whose bytes disagree with the pin is a refusal: the alternative is a package that carries a
+    backup hash it never opened, which a later reader cannot tell apart from one that passed.
+    """
+    if not pins.backup_manifest_sha256:
+        return False
+    path = Path(pins.backup_manifest_path)
+    if not path.is_file():
+        raise StableRecordAuthorityError(
+            f"backup manifest {path} is pinned but missing; the package may not assert a backup "
+            "gate it never read"
+        )
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    _require_pin(actual, pins.backup_manifest_sha256, f"backup manifest {path} sha256")
+    return True
+
+
+def verify_supplied_evidence(pins: AuthorityEvidencePins) -> VerifiedEvidence:
+    """Verify every optional artifact this contract pins.
+
+    Called from both :func:`build_stable_record_authority` and :func:`write_authority_package`, so
+    neither the build-then-write path nor the single-call path can reach a manifest without it.
+    """
+    companions = verify_companion_artifacts(pins)
+    backup_verified = verify_backup_evidence(pins)
+    if sorted(companions) != sorted(pins.supplied_companion_filenames):
+        raise StableRecordAuthorityError(
+            f"companion verification covered {sorted(companions)} but {sorted(pins.supplied_companion_filenames)} "
+            "are pinned; refusing to publish a pin that was not checked"
+        )
+    if bool(pins.backup_manifest_sha256) != backup_verified:
+        raise StableRecordAuthorityError(
+            "backup verification state disagrees with the supplied pin; refusing to publish a "
+            "backup claim that was not checked"
+        )
+    return VerifiedEvidence(
+        companion_artifacts=companions, backup_manifest_verified=backup_verified
+    )
 
 
 # --- authority row schema -------------------------------------------------------------------------
@@ -631,7 +889,13 @@ def build_stable_record_authority(
     the two artifacts are independent evidence and must stay independently auditable. Every
     disagreement between them is a refusal — there is no reconciliation rule that prefers one
     side, because either side being wrong means the identity binding is unknown.
+
+    Every optional pin the contract carries is verified here as well as in the writer. A build is
+    the step that decides an authority *exists*, and a dry run reports that decision without
+    publishing it, so an unchecked pin must not survive this far either.
     """
+    verify_supplied_evidence(evidence_pins)
+
     crosswalk_by_id: Dict[str, Mapping[str, str]] = {}
     for row in proposal.crosswalk_rows:
         stable_id = row["stable_record_id"]
@@ -1023,11 +1287,28 @@ def validate_authority(authority: StableRecordAuthority) -> None:
 MANIFEST_CONTENT_DIGEST_FIELD = "content_digest"
 MANIFEST_HASH_FIELD = "manifest_hash"
 MANIFEST_CREATED_AT_FIELD = "created_at"
+MANIFEST_RECEIPT_SHA256_FIELD = "receipt_sha256"
+RECEIPT_HASH_FIELD = "receipt_hash"
 
+# ``receipt_sha256`` is excluded from ``content_digest`` for one specific reason, and getting it
+# wrong is the obvious way to build a package that can never be sealed. The receipt names the
+# manifest's *semantic* identity (``content_digest``) so it can be cross-checked; the manifest
+# names the receipt's *bytes* (``receipt_sha256``) so the outer seal covers them. If
+# ``content_digest`` also covered ``receipt_sha256``, then the digest the receipt quotes would
+# change the moment the receipt built from it was hashed into the manifest — each value an input to
+# the other, with no fixed point. Excluding it breaks the cycle in the one direction that costs
+# nothing: ``manifest_hash`` still covers ``receipt_sha256``, so the receipt bytes remain sealed,
+# and the receipt is deterministic in the inputs, so its hash stays stable across publications.
 MANIFEST_CONTENT_DIGEST_EXCLUDED_FIELDS = frozenset(
-    {MANIFEST_CREATED_AT_FIELD, MANIFEST_CONTENT_DIGEST_FIELD, MANIFEST_HASH_FIELD}
+    {
+        MANIFEST_CREATED_AT_FIELD,
+        MANIFEST_CONTENT_DIGEST_FIELD,
+        MANIFEST_HASH_FIELD,
+        MANIFEST_RECEIPT_SHA256_FIELD,
+    }
 )
 MANIFEST_HASH_EXCLUDED_FIELDS = frozenset({MANIFEST_HASH_FIELD})
+RECEIPT_HASH_EXCLUDED_FIELDS = frozenset({RECEIPT_HASH_FIELD})
 
 
 def _canonical_json(payload: Mapping[str, object]) -> bytes:
@@ -1056,10 +1337,19 @@ def compute_manifest_hash(manifest: Mapping[str, object]) -> str:
 def verify_authority_manifest_integrity(
     manifest: Mapping[str, object], source: str = MANIFEST_FILENAME
 ) -> None:
-    """Recompute both seals and refuse a manifest that does not reproduce them."""
+    """Recompute both seals and refuse a manifest that does not reproduce them.
+
+    ``receipt_sha256`` is required here as well. It is not a seal of the manifest, but a manifest
+    without it cannot bind the receipt at all, and a package whose receipt is unbound is one whose
+    receipt can be edited or deleted without trace.
+    """
     if not isinstance(manifest, Mapping):
         raise StableRecordAuthorityError(f"{source} is not a JSON object")
-    for field_name in (MANIFEST_CONTENT_DIGEST_FIELD, MANIFEST_HASH_FIELD):
+    for field_name in (
+        MANIFEST_CONTENT_DIGEST_FIELD,
+        MANIFEST_HASH_FIELD,
+        MANIFEST_RECEIPT_SHA256_FIELD,
+    ):
         if field_name not in manifest:
             raise StableRecordAuthorityError(
                 f"{source} declares no {field_name}; an unsealed manifest is never loadable"
@@ -1081,19 +1371,57 @@ def verify_authority_manifest_integrity(
             )
 
 
-def build_authority_manifest(
+def compute_receipt_hash(receipt: Mapping[str, object]) -> str:
+    """Digest the receipt body, excluding the receipt's own hash field."""
+    body = {key: value for key, value in receipt.items() if key not in RECEIPT_HASH_EXCLUDED_FIELDS}
+    return hashlib.sha256(_canonical_json(body)).hexdigest()
+
+
+def verify_receipt_integrity(
+    receipt: Mapping[str, object], source: str = RECEIPT_FILENAME
+) -> None:
+    """Recompute the receipt's self-seal and refuse a receipt that does not reproduce it."""
+    if not isinstance(receipt, Mapping):
+        raise StableRecordAuthorityError(f"{source} is not a JSON object")
+    declared = receipt.get(RECEIPT_HASH_FIELD)
+    if not isinstance(declared, str) or not _SHA256_HEX_RE.match(declared):
+        raise StableRecordAuthorityError(
+            f"{source} declares a missing or malformed {RECEIPT_HASH_FIELD} ({declared!r})"
+        )
+    recomputed = compute_receipt_hash(receipt)
+    if not hmac.compare_digest(recomputed, declared):
+        raise StableRecordAuthorityError(
+            f"{source} {RECEIPT_HASH_FIELD} does not match its contents (declared {declared}, "
+            f"recomputed {recomputed}); the receipt has been modified since it was published"
+        )
+
+
+def authority_manifest_body(
     authority: StableRecordAuthority,
     registry_bytes: bytes,
-    created_at: Optional[str] = None,
+    verified_evidence: VerifiedEvidence,
 ) -> Dict[str, object]:
-    """Build the authority manifest.
+    """Build the unsealed manifest body: everything the package means, and none of its seals.
 
     Every mutation counter below is a zero this module can prove rather than promise: it holds no
     handle to an alias projection, an asset authority, a vault, a decision store, or a content
     index, and imports none of them.
+
+    ``verified_evidence`` is what a verification pass actually read on this call, not what the pins
+    claim. The manifest reports that, so the sentence "this package verified its backup" is made by
+    the code that did the reading.
     """
     pins = authority.pins
     stable_ids = sorted(row["stable_record_id"] for row in authority.rows)
+
+    if sorted(verified_evidence.companion_artifacts) != sorted(pins.supplied_companion_filenames):
+        raise StableRecordAuthorityError(
+            "refusing to build a manifest whose companion pins were not all verified on this run"
+        )
+    if verified_evidence.backup_manifest_verified != bool(pins.backup_manifest_sha256):
+        raise StableRecordAuthorityError(
+            "refusing to build a manifest whose backup claim was not verified on this run"
+        )
 
     body: Dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
@@ -1101,15 +1429,17 @@ def build_authority_manifest(
         "materialization_version": MATERIALIZATION_VERSION,
         "record_identity_scheme": RECORD_IDENTITY_SCHEME,
         # Materialized is not activated. Both statements are made explicitly so no consumer has to
-        # infer the second from the first.
+        # infer the second from the first. The first is scoped to *this package* by name: it says a
+        # bundle of files exists, never that the project's governance gate moved.
         "authority_status": AUTHORITY_STATUS_MATERIALIZED_NOT_ACTIVATED,
         "activation_status": ACTIVATION_STATUS_NOT_ACTIVATED,
-        "authority_materialized": True,
-        "stable_record_v2_activated": False,
-        "row_v1_retired": False,
+        PACKAGE_MATERIALIZED_FIELD: True,
+        STABLE_RECORD_V2_ACTIVATED_FIELD: False,
+        ROW_V1_RETIRED_FIELD: False,
         "registry_filename": REGISTRY_FILENAME,
         "registry_sha256": hashlib.sha256(registry_bytes).hexdigest(),
         "registry_columns": list(AUTHORITY_COLUMNS),
+        "receipt_filename": RECEIPT_FILENAME,
         "record_count": authority.record_count,
         "identity_continuation_count": authority.identity_continuation_count,
         "new_identity_count": authority.new_identity_count,
@@ -1131,8 +1461,24 @@ def build_authority_manifest(
             "decisions_manifest_sha256": pins.decision_manifest_sha256,
             "apply_preview_sha256": pins.decision_apply_preview_sha256,
             "reissue_receipt_sha256": pins.decision_reissue_receipt_sha256,
+            "companion_artifacts_verified": list(verified_evidence.companion_artifacts),
         },
-        "backup_manifest_sha256": pins.backup_manifest_sha256,
+        "backup_evidence": {
+            "backup_manifest_sha256": pins.backup_manifest_sha256,
+            "backup_manifest_verified": verified_evidence.backup_manifest_verified,
+            "verification_status": (
+                BACKUP_EVIDENCE_VERIFIED
+                if verified_evidence.backup_manifest_verified
+                else BACKUP_EVIDENCE_NOT_SUPPLIED
+            ),
+            # Never "PASS" on the strength of an absent pin. A gate nobody asserted is recorded as
+            # unasserted, which is a different fact from one that was checked and held.
+            "m3_backup_gate": (
+                M3_BACKUP_GATE_PASS
+                if verified_evidence.backup_manifest_verified
+                else M3_BACKUP_GATE_NOT_ASSERTED
+            ),
+        },
         "reviewer": pins.reviewer,
         "review_date": pins.reviewed_at,
         "match_evidence_delimiter": MATCH_EVIDENCE_DELIMITER,
@@ -1149,28 +1495,36 @@ def build_authority_manifest(
         "row_v1_authority_mutations": 0,
         "proposal_mutations": 0,
         "decision_artifact_mutations": 0,
-        "production_reindex_authorized": False,
+        PRODUCTION_REINDEX_AUTHORIZED_FIELD: False,
         "contains_merchant_roster": False,
+        ACTIVATION_TRUST_FIELD: {
+            "self_validation_is_not_activation_trust": True,
+            "authority_output_external_pin": AUTHORITY_OUTPUT_EXTERNAL_PIN_REQUIRED,
+        },
     }
-
-    body[MANIFEST_CONTENT_DIGEST_FIELD] = compute_content_digest(body)
-    body[MANIFEST_CREATED_AT_FIELD] = created_at or datetime.now(timezone.utc).isoformat()
-    body[MANIFEST_HASH_FIELD] = compute_manifest_hash(body)
     return body
 
 
 def build_materialization_receipt(
     authority: StableRecordAuthority,
-    manifest: Mapping[str, object],
+    *,
+    registry_sha256: str,
+    manifest_content_digest: str,
+    verified_evidence: VerifiedEvidence,
 ) -> Dict[str, object]:
     """Build the audit receipt. It is evidence, never a runtime input.
 
-    It deliberately records no destination path. The receipt is published *inside* the directory
-    it describes, so the path would be redundant, and embedding an absolute one would both make
-    the bundle non-relocatable and make the same evidence render different bytes depending on
-    where it was written.
+    It quotes only the manifest's *stable semantic identity* — the registry hash, the content
+    digest, the identity-set digest — and never ``manifest_hash``. That is what keeps the two seals
+    acyclic: the receipt can be built, hashed, and sealed into the manifest before the manifest's
+    own outer seal exists.
+
+    It deliberately records no destination path. The receipt is published *inside* the directory it
+    describes, so the path would be redundant, and embedding an absolute one would both make the
+    bundle non-relocatable and make the same evidence render different bytes depending on where it
+    was written. It records no timestamp either, so the same inputs always render the same bytes.
     """
-    return {
+    receipt: Dict[str, object] = {
         "artifact_type": "stable_record_authority_materialization_receipt",
         "materialization_version": MATERIALIZATION_VERSION,
         "authority_schema_version": AUTHORITY_SCHEMA_VERSION,
@@ -1187,9 +1541,8 @@ def build_materialization_receipt(
             if row["authority_record_status"] == AUTHORITY_RECORD_STATUS_NEW
         ],
         "stable_id_set_digest": authority.stable_id_set_digest,
-        "manifest_content_digest": manifest.get(MANIFEST_CONTENT_DIGEST_FIELD),
-        "manifest_hash": manifest.get(MANIFEST_HASH_FIELD),
-        "registry_sha256": manifest.get("registry_sha256"),
+        "manifest_content_digest": manifest_content_digest,
+        "registry_sha256": registry_sha256,
         "deferred_decisions": {
             "alias_rebinding_requires_separate_decision": list(
                 authority.alias_decision_required_ids
@@ -1208,14 +1561,92 @@ def build_materialization_receipt(
             "proposal_mutations": 0,
             "decision_artifact_mutations": 0,
         },
-        "gate_state": {
-            "AUTHORITY_MATERIALIZED": "YES",
-            "STABLE_RECORD_V2_ACTIVATED": "NO",
-            "ROW_V1_RETIRED": "NO",
-            "PRODUCTION_REINDEX_AUTHORIZED": "NO",
-            "ALIAS_REBINDING_REQUIRES_SEPARATE_DECISION": "YES",
+        "backup_evidence": {
+            "backup_manifest_verified": verified_evidence.backup_manifest_verified,
+            "m3_backup_gate": (
+                M3_BACKUP_GATE_PASS
+                if verified_evidence.backup_manifest_verified
+                else M3_BACKUP_GATE_NOT_ASSERTED
+            ),
+        },
+        # Package-scoped, deliberately. An earlier draft wrote gate_state.AUTHORITY_MATERIALIZED =
+        # YES here, which names the project's governance gate — a gate that is still NO and that
+        # only a governance decision can move. Anyone who found this file, in a tmp directory or
+        # anywhere else, would have read it as that gate having flipped.
+        PACKAGE_STATE_FIELD: {
+            PACKAGE_MATERIALIZED_FIELD: True,
+            STABLE_RECORD_V2_ACTIVATED_FIELD: False,
+            ROW_V1_RETIRED_FIELD: False,
+            PRODUCTION_REINDEX_AUTHORIZED_FIELD: False,
+            ALIAS_REBINDING_SEPARATE_FIELD: True,
+        },
+        ACTIVATION_TRUST_FIELD: {
+            "self_validation_is_not_activation_trust": True,
+            "authority_output_external_pin": AUTHORITY_OUTPUT_EXTERNAL_PIN_REQUIRED,
         },
     }
+    receipt[RECEIPT_HASH_FIELD] = compute_receipt_hash(receipt)
+    return receipt
+
+
+def build_authority_manifest(
+    authority: StableRecordAuthority,
+    registry_bytes: bytes,
+    verified_evidence: VerifiedEvidence,
+    receipt_sha256: str,
+    created_at: Optional[str] = None,
+) -> Dict[str, object]:
+    """Seal the manifest body over the receipt bytes that were built from it."""
+    if not _SHA256_HEX_RE.match(str(receipt_sha256)):
+        raise StableRecordAuthorityError(
+            f"receipt_sha256 {receipt_sha256!r} is not a sha256 hexdigest; the manifest seal must "
+            "cover the receipt bytes"
+        )
+    body = authority_manifest_body(authority, registry_bytes, verified_evidence)
+    body[MANIFEST_CONTENT_DIGEST_FIELD] = compute_content_digest(body)
+    body[MANIFEST_RECEIPT_SHA256_FIELD] = receipt_sha256
+    body[MANIFEST_CREATED_AT_FIELD] = created_at or datetime.now(timezone.utc).isoformat()
+    body[MANIFEST_HASH_FIELD] = compute_manifest_hash(body)
+    return body
+
+
+def build_authority_payloads(
+    authority: StableRecordAuthority,
+    registry_bytes: bytes,
+    verified_evidence: VerifiedEvidence,
+    created_at: Optional[str] = None,
+) -> Tuple[Dict[str, object], bytes, Dict[str, object], bytes]:
+    """Build the manifest and receipt together, in the one order that has no cycle.
+
+    1. the unsealed manifest body, and its ``content_digest`` — the package's semantic identity
+    2. the receipt, which quotes that digest and seals itself
+    3. the receipt file bytes, and their sha256
+    4. the manifest, which carries that sha256 and then seals itself over everything
+
+    Step 4's ``content_digest`` must equal step 1's, or the receipt quotes a digest the published
+    manifest does not have. That is asserted rather than assumed.
+    """
+    body = authority_manifest_body(authority, registry_bytes, verified_evidence)
+    semantic_digest = compute_content_digest(body)
+
+    receipt = build_materialization_receipt(
+        authority,
+        registry_sha256=str(body["registry_sha256"]),
+        manifest_content_digest=semantic_digest,
+        verified_evidence=verified_evidence,
+    )
+    receipt_payload = _json_bytes(receipt)
+    receipt_sha256 = hashlib.sha256(receipt_payload).hexdigest()
+
+    manifest = build_authority_manifest(
+        authority, registry_bytes, verified_evidence, receipt_sha256, created_at=created_at
+    )
+    if manifest[MANIFEST_CONTENT_DIGEST_FIELD] != semantic_digest:
+        raise StableRecordAuthorityError(
+            "sealing the receipt into the manifest changed the manifest content digest the "
+            "receipt quotes; the two seals would be mutually recursive"
+        )
+    return manifest, _json_bytes(manifest), receipt, receipt_payload
 
 
 def _json_bytes(payload: Mapping[str, object]) -> bytes:
@@ -1229,8 +1660,33 @@ def _json_bytes(payload: Mapping[str, object]) -> bytes:
 
 
 def _is_production_authority_path(path: Path) -> bool:
-    parts = tuple(Path(path).resolve().parts)
-    return parts[-len(PRODUCTION_AUTHORITY_RELPATH) :] == PRODUCTION_AUTHORITY_RELPATH
+    """Is this path the canonical production authority root, or anywhere beneath it?
+
+    An earlier version compared only the *trailing* components, which asked "is this path named
+    ``.../data/identity/authority/stable_record_v2``?" — a question the real destination of a dated
+    publication never answers yes to. ``.../stable_record_v2/2026-08-24`` and
+    ``.../stable_record_v2/v3/rows`` sailed through, so the guard protected a directory name while
+    leaving the directory itself writable.
+
+    The question that matters is containment: does the resolved path lie at or under a directory
+    whose components are the canonical relative path? Resolution comes first, so ``..`` segments
+    and symlinks cannot be used to arrive there by another name. Comparison is by whole path
+    component, so ``stable_record_v2_preview`` and ``stable_record_v3`` — different directories
+    that merely start alike — are not caught by it.
+    """
+    try:
+        parts = tuple(Path(path).resolve().parts)
+    except OSError as exc:
+        # A path that cannot be resolved cannot be proved to lie outside production either.
+        raise StableRecordAuthorityError(
+            f"authority output path {path} could not be resolved ({exc}); refusing to publish to a "
+            "destination whose location cannot be established"
+        ) from exc
+    width = len(PRODUCTION_AUTHORITY_RELPATH)
+    return any(
+        parts[end - width : end] == PRODUCTION_AUTHORITY_RELPATH
+        for end in range(width, len(parts) + 1)
+    )
 
 
 def write_authority_package(
@@ -1245,16 +1701,21 @@ def write_authority_package(
     Order matters and is the contract:
 
     1. the destination is checked — an existing non-empty directory is a refusal, and the canonical
-       production path is a refusal unless explicitly authorized. Nothing is created yet, so a
-       refused destination does not even leave a parent directory behind
-    2. the authority is validated
-    3. every byte is built in memory, and the manifest's own seals are re-verified against the
+       production path *or anything beneath it* is a refusal unless explicitly authorized. Nothing
+       is created yet, so a refused destination does not even leave a parent directory behind
+    2. every optional pin the contract supplied is verified against the artifact it names
+    3. the authority is validated
+    4. every byte is built in memory, and the manifest's own seals are re-verified against the
        bytes that will actually be written
-    4. the bytes are staged into a sibling temporary directory
-    5. a single :func:`os.replace` moves the staging directory into place
+    5. the bytes are staged into a sibling temporary directory
+    6. a single :func:`os.replace` moves the staging directory into place
 
-    A run that dies at any point before step 5 leaves the destination untouched, so no reader can
+    A run that dies at any point before step 6 leaves the destination untouched, so no reader can
     ever observe a partially written authority. The staging directory is removed on failure.
+
+    Step 2 runs here and not only in the caller because this function is a public entry point: an
+    authority built elsewhere and handed straight to the writer would otherwise publish a manifest
+    carrying pins nothing on this run had read.
 
     ``authorize_production_destination`` defaults to ``False`` so that publishing the real
     authority is an explicit act by a caller that intends it, not a side effect of passing a path.
@@ -1263,7 +1724,7 @@ def write_authority_package(
 
     if _is_production_authority_path(output_dir) and not authorize_production_destination:
         raise StableRecordAuthorityError(
-            f"{output_dir} is the canonical production authority destination "
+            f"{output_dir} is at or beneath the canonical production authority destination "
             f"({'/'.join(PRODUCTION_AUTHORITY_RELPATH)}); publishing there requires "
             "authorize_production_destination=True and a governance decision that authorizes "
             "materialization"
@@ -1279,15 +1740,23 @@ def write_authority_package(
                 "refusing to overwrite an existing authority"
             )
 
+    verified_evidence = verify_supplied_evidence(authority.pins)
+
     validate_authority(authority)
 
     registry_bytes = render_csv(authority.rows, AUTHORITY_COLUMNS)
-    manifest = build_authority_manifest(authority, registry_bytes, created_at=created_at)
+    manifest, manifest_payload, receipt, receipt_payload = build_authority_payloads(
+        authority, registry_bytes, verified_evidence, created_at=created_at
+    )
     verify_authority_manifest_integrity(manifest)
-    receipt = build_materialization_receipt(authority, manifest)
-
-    manifest_payload = _json_bytes(manifest)
-    receipt_payload = _json_bytes(receipt)
+    verify_receipt_integrity(receipt)
+    if not hmac.compare_digest(
+        hashlib.sha256(receipt_payload).hexdigest(),
+        str(manifest[MANIFEST_RECEIPT_SHA256_FIELD]),
+    ):
+        raise StableRecordAuthorityError(
+            "the manifest does not seal the receipt bytes about to be written"
+        )
 
     parent = output_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -1310,7 +1779,22 @@ def load_authority_package(output_dir: Path) -> Tuple[Dict[str, object], List[Di
     """Load a published authority, refusing anything that is not a complete and intact one.
 
     Ordered like the proposal loader, and for the same reason: nothing the manifest *says* may
-    influence a decision before the manifest has proved it is the file that was published.
+    influence a decision before the manifest has proved it is the file that was published. Each
+    file is hashed before it is parsed, and each is bound by the manifest seal rather than only by
+    being present in the directory.
+
+    **This is self-validation, not an activation trust decision.** Everything proved here is
+    internal: the manifest reproduces its own seals, the registry matches the manifest, and the
+    receipt bytes match the hash the manifest seals. A package whose three files were rewritten
+    together passes every one of those checks, because there is nothing left inside the directory
+    to disagree with. Materializing this package required an external pin for exactly that reason
+    (see the module docstring), and *activating* one will require the same: an external pin of the
+    authority output itself, held in the governance record rather than in the artifact. No caller
+    here activates anything, so no such pin is enforced — the requirement is recorded in the
+    package as ``activation_trust.authority_output_external_pin =
+    REQUIRED_BEFORE_ACTIVATION`` and is deliberately still open. A future activation work package
+    that treats a successful return from this function as authorization would be reading a
+    guarantee it does not make.
     """
     output_dir = Path(output_dir)
     manifest_path = output_dir / MANIFEST_FILENAME
@@ -1366,7 +1850,88 @@ def load_authority_package(output_dir: Path) -> Tuple[Dict[str, object], List[Di
             )
         rows = [dict(row) for row in reader]
 
+    _load_and_verify_receipt(output_dir, manifest, manifest_path)
+
     return manifest, rows
+
+
+def _load_and_verify_receipt(
+    output_dir: Path, manifest: Mapping[str, object], manifest_path: Path
+) -> Dict[str, object]:
+    """Prove the receipt is the one this manifest sealed, then that it agrees with it.
+
+    Three layers, and all three are needed. The manifest seals the receipt's *bytes*, so a deleted
+    or edited receipt is caught even if the editor re-sealed the receipt itself. The receipt seals
+    its own body, so a receipt whose bytes were replaced wholesale by another valid receipt is
+    caught. And the two are cross-checked semantically, so an operator who re-sealed *both* files
+    still has to make them say the same thing about the same package.
+    """
+    declared_name = manifest.get("receipt_filename")
+    if (
+        not isinstance(declared_name, str)
+        or not declared_name
+        or Path(declared_name).name != declared_name
+    ):
+        raise StableRecordAuthorityError(
+            f"{manifest_path} declares receipt_filename={declared_name!r}; an authority file must "
+            "be named by a plain filename inside the authority directory"
+        )
+
+    receipt_path = output_dir / declared_name
+    if not receipt_path.is_file():
+        raise StableRecordAuthorityError(
+            f"materialization receipt {receipt_path} is missing; the manifest seals a receipt this "
+            "package does not contain"
+        )
+
+    receipt_bytes = receipt_path.read_bytes()
+    actual = hashlib.sha256(receipt_bytes).hexdigest()
+    declared_digest = manifest.get(MANIFEST_RECEIPT_SHA256_FIELD)
+    if not isinstance(declared_digest, str) or not hmac.compare_digest(actual, declared_digest):
+        raise StableRecordAuthorityError(
+            f"materialization receipt {receipt_path} sha256 {actual} does not match the manifest "
+            f"({declared_digest}); the receipt has been modified since it was published"
+        )
+
+    try:
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StableRecordAuthorityError(f"{receipt_path} could not be read: {exc}") from exc
+
+    verify_receipt_integrity(receipt, source=str(receipt_path))
+
+    for label, receipt_key, manifest_key in (
+        ("registry sha256", "registry_sha256", "registry_sha256"),
+        ("manifest content digest", "manifest_content_digest", MANIFEST_CONTENT_DIGEST_FIELD),
+        ("stable id set digest", "stable_id_set_digest", "stable_id_set_digest"),
+        ("record count", "record_count", "record_count"),
+        ("authority status", "authority_status", "authority_status"),
+        ("activation status", "activation_status", "activation_status"),
+    ):
+        if receipt.get(receipt_key) != manifest.get(manifest_key):
+            raise StableRecordAuthorityError(
+                f"{receipt_path} and {manifest_path} disagree on {label}: receipt says "
+                f"{receipt.get(receipt_key)!r}, manifest says {manifest.get(manifest_key)!r}"
+            )
+
+    package_state = receipt.get(PACKAGE_STATE_FIELD)
+    if not isinstance(package_state, Mapping):
+        raise StableRecordAuthorityError(
+            f"{receipt_path} declares no {PACKAGE_STATE_FIELD} object"
+        )
+    for field_name in (
+        PACKAGE_MATERIALIZED_FIELD,
+        STABLE_RECORD_V2_ACTIVATED_FIELD,
+        ROW_V1_RETIRED_FIELD,
+        PRODUCTION_REINDEX_AUTHORIZED_FIELD,
+    ):
+        if package_state.get(field_name) != manifest.get(field_name):
+            raise StableRecordAuthorityError(
+                f"{receipt_path} and {manifest_path} disagree on {field_name}: receipt says "
+                f"{package_state.get(field_name)!r}, manifest says {manifest.get(field_name)!r}"
+            )
+
+    return dict(receipt)
 
 
 # --- end-to-end materialization ----------------------------------------------------------------------
@@ -1379,20 +1944,24 @@ def materialize_stable_record_authority(
     output_dir: Optional[Path] = None,
     created_at: Optional[str] = None,
     *,
-    verify_companions: bool = True,
     authorize_production_destination: bool = False,
 ) -> Tuple[StableRecordAuthority, Optional[Dict[str, object]]]:
     """Load both evidence artifacts, build the authority, and optionally publish it.
 
     With ``output_dir=None`` this is a complete dry run: everything is loaded, pinned, reconciled,
     and validated, and nothing is written. That is the mode a reviewer uses to confirm what *would*
-    be published without authorizing it.
+    be published without authorizing it. A dry run verifies the pinned evidence too — a reviewer
+    asking "what would be published" is asking about a package whose pins held.
+
+    There is deliberately no parameter for skipping companion verification. An earlier version had
+    one, defaulting to on; but the only calls it could change the behaviour of were the ones where
+    a companion pin *was* supplied, so every legitimate use of it was a no-op and every effective
+    use of it published an unchecked claim. A caller with no companion artifacts supplies no
+    companion pins, and there is nothing to skip.
     """
     proposal = load_proposal_evidence(Path(proposal_dir), evidence_pins)
     decisions_path = Path(decisions_path)
     decisions = load_decision_artifact(decisions_path, evidence_pins)
-    if verify_companions:
-        verify_companion_artifacts(decisions_path.parent, evidence_pins)
 
     authority = build_stable_record_authority(proposal, decisions, evidence_pins)
 

@@ -21,7 +21,10 @@ MKA-MC-00004     NEW         authority_only   ASSET_REVIEW_REQUIRED_SEPARATELY
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import inspect
+import io
 import json
 from pathlib import Path
 
@@ -29,15 +32,20 @@ import pytest
 
 from marketing_knowledge_agent.stable_record_authority import (
     ACTIVATION_STATUS_NOT_ACTIVATED,
+    ACTIVATION_TRUST_FIELD,
     ALIAS_BINDING_REQUIRES_SEPARATE_DECISION,
     ALIAS_BINDING_UNCHANGED,
     ASSET_REVIEW_NOT_IN_SCOPE,
     ASSET_REVIEW_REQUIRED_SEPARATELY,
     AUTHORITY_COLUMNS,
+    AUTHORITY_OUTPUT_EXTERNAL_PIN_REQUIRED,
     AUTHORITY_RECORD_STATUS_CONTINUATION,
     AUTHORITY_RECORD_STATUS_NEW,
     AUTHORITY_SCHEMA_VERSION,
     AUTHORITY_STATUS_MATERIALIZED_NOT_ACTIVATED,
+    BACKUP_EVIDENCE_NOT_SUPPLIED,
+    BACKUP_EVIDENCE_VERIFIED,
+    COMPANION_ARTIFACTS,
     DECISION_APPROVE_NEW_RECORD,
     DECISION_APPROVE_SAME_RECORD,
     DECISION_COLUMNS,
@@ -48,19 +56,31 @@ from marketing_knowledge_agent.stable_record_authority import (
     IDENTITY_ORIGIN_LEGACY_CONTINUATION,
     LEGACY_SOURCE_ROW_ROLE_AUDIT_ONLY,
     LEGACY_SOURCE_SCHEME_ROW_V1,
+    M3_BACKUP_GATE_NOT_ASSERTED,
+    M3_BACKUP_GATE_PASS,
+    MANIFEST_CONTENT_DIGEST_FIELD,
     MANIFEST_FILENAME,
+    MANIFEST_HASH_FIELD,
+    MANIFEST_RECEIPT_SHA256_FIELD,
     MATCH_EVIDENCE_DELIMITER,
+    PACKAGE_MATERIALIZED_FIELD,
+    PACKAGE_STATE_FIELD,
     PAYLOAD_CHANGE_NONE_RECORDED,
     PAYLOAD_CHANGE_PRESENT_NOT_APPROVED,
     PRODUCTION_AUTHORITY_RELPATH,
+    PRODUCTION_REINDEX_AUTHORIZED_FIELD,
     RECEIPT_FILENAME,
+    RECEIPT_HASH_FIELD,
     RECORD_IDENTITY_SCHEME,
     REGISTRY_FILENAME,
+    ROW_V1_RETIRED_FIELD,
     ROW_V1_STATUS_RETAINED,
     SPECIAL_FLAGS_DELIMITER,
+    STABLE_RECORD_V2_ACTIVATED_FIELD,
     AuthorityEvidencePins,
     StableRecordAuthorityError,
     build_stable_record_authority,
+    compute_receipt_hash,
     load_authority_package,
     load_decision_artifact,
     load_proposal_evidence,
@@ -69,7 +89,12 @@ from marketing_knowledge_agent.stable_record_authority import (
     parse_match_evidence,
     parse_special_flags,
     qualify_legacy_record_id,
+    read_decision_csv,
     verify_authority_manifest_integrity,
+    verify_backup_evidence,
+    verify_companion_artifacts,
+    verify_receipt_integrity,
+    verify_supplied_evidence,
     write_authority_package,
 )
 from marketing_knowledge_agent.stable_record_crosswalk import (
@@ -98,6 +123,24 @@ FORMAL_PAYLOAD_CHANGE_IDS = ("MKA-MC-00014",)
 FORMAL_REVIEWER = "James Huang"
 FORMAL_REVIEWED_AT = "2026-08-24"
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+FORMAL_PROPOSAL_DIR = _REPO_ROOT / "data/identity/proposals/stable-record-crosswalk-m1-2026-08-21"
+FORMAL_DECISION_DIR = (
+    _REPO_ROOT / "data/identity/reviews/stable-record-crosswalk-m2-2026-08-21/final-r1"
+)
+FORMAL_DECISIONS_PATH = FORMAL_DECISION_DIR / "human_review_decisions_final.csv"
+
+# The M3 preflight backup lives off this volume by design, so its location is machine-specific and
+# is supplied by the caller rather than derived. It is a *test* constant: the engine holds no
+# production path and no production hash of its own.
+FORMAL_BACKUP_DIR = (
+    Path.home() / ".mka_identity_backup" / "stable-record-m3-preflight-2026-08-24"
+)
+FORMAL_BACKUP_MANIFEST_PATH = FORMAL_BACKUP_DIR / "backup_manifest.json"
+FORMAL_BACKUP_MANIFEST_SHA256 = (
+    "5f4ef010b109af5517159e82652d49876a46635317ae55ffeb876b2d2e8b1d11"
+)
+
 FORMAL_PINS = AuthorityEvidencePins(
     proposal_registry_sha256="5cbacc11813fc72ab9573a3a110eb65b04e4fde6536aa0c6a0bd7658056baf73",
     proposal_crosswalk_sha256="8bb5ca326a2d68ee8e50d7059868724737604320fe7c7fb5777f55e0d7eaae9a",
@@ -109,20 +152,21 @@ FORMAL_PINS = AuthorityEvidencePins(
     decision_manifest_sha256="b44b0036ff8d3eac722437af62809bf19283da865fcb4ac723e77b818e01962a",
     decision_apply_preview_sha256="75afbef063599f886f526d0d9437068ae768ce15dadb018dcab91fd72410019c",
     decision_reissue_receipt_sha256="f54ac619a7f2ab420eb86de08bc39e2b2723e223b09ae0af15f8e12642577d6f",
-    backup_manifest_sha256="5f4ef010b109af5517159e82652d49876a46635317ae55ffeb876b2d2e8b1d11",
+    decision_companion_dir=str(FORMAL_DECISION_DIR),
+    backup_manifest_sha256=FORMAL_BACKUP_MANIFEST_SHA256,
+    backup_manifest_path=str(FORMAL_BACKUP_MANIFEST_PATH),
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-FORMAL_PROPOSAL_DIR = _REPO_ROOT / "data/identity/proposals/stable-record-crosswalk-m1-2026-08-21"
-FORMAL_DECISIONS_PATH = (
-    _REPO_ROOT
-    / "data/identity/reviews/stable-record-crosswalk-m2-2026-08-21/final-r1"
-    / "human_review_decisions_final.csv"
-)
-
+# The backup joins the skip condition because the pins now enforce it: a machine that has the M1
+# and M2 evidence but not the backup would fail these tests rather than skip them, which reads as
+# a regression in the engine instead of an absent artifact.
 formal_evidence = pytest.mark.skipif(
-    not (FORMAL_PROPOSAL_DIR.is_dir() and FORMAL_DECISIONS_PATH.is_file()),
-    reason="formal M1/M2 identity evidence is not present on this machine",
+    not (
+        FORMAL_PROPOSAL_DIR.is_dir()
+        and FORMAL_DECISIONS_PATH.is_file()
+        and FORMAL_BACKUP_MANIFEST_PATH.is_file()
+    ),
+    reason="formal M1/M2/backup identity evidence is not present on this machine",
 )
 
 
@@ -344,6 +388,14 @@ def evidence(tmp_path):
 
         def rewrite_decisions(self, rows):
             self.decisions_path.write_bytes(render_csv(rows, DECISION_COLUMNS))
+            return self.repin()
+
+        def write_raw_decisions(self, text):
+            """Write the decision CSV verbatim, so row *shape* can be made hostile."""
+            self.decisions_path.write_bytes(text.encode("utf-8"))
+            return self.repin()
+
+        def repin(self):
             digest = hashlib.sha256(self.decisions_path.read_bytes()).hexdigest()
             self.pins = AuthorityEvidencePins(
                 proposal_registry_sha256=pins.proposal_registry_sha256,
@@ -364,6 +416,97 @@ def _row_by_id(rows, stable_id):
         if row["stable_record_id"] == stable_id:
             return row
     raise AssertionError(f"{stable_id} not present")
+
+
+def _sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _pins_with(evidence, **overrides):
+    """The fixture's pins with specific fields replaced, so one variable moves at a time."""
+    base = dict(
+        proposal_registry_sha256=evidence.pins.proposal_registry_sha256,
+        proposal_crosswalk_sha256=evidence.pins.proposal_crosswalk_sha256,
+        proposal_content_digest=evidence.pins.proposal_content_digest,
+        proposal_manifest_hash=evidence.pins.proposal_manifest_hash,
+        decision_artifact_sha256=evidence.pins.decision_artifact_sha256,
+        reviewer=SYNTHETIC_REVIEWER,
+        reviewed_at=SYNTHETIC_REVIEWED_AT,
+    )
+    base.update(overrides)
+    return AuthorityEvidencePins(**base)
+
+
+def _write_backup(tmp_path, content=b'{"backup": "synthetic m3 preflight"}\n', name="backup_manifest.json"):
+    path = tmp_path / "backup" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path
+
+
+def _write_companions(evidence, *, filenames=None):
+    """Write the companion artifacts beside the decision CSV and return their pins."""
+    directory = evidence.decisions_path.parent
+    wanted = filenames if filenames is not None else [name for name, _attr in COMPANION_ARTIFACTS]
+    pins_kwargs = {"decision_companion_dir": str(directory)}
+    for filename, attr in COMPANION_ARTIFACTS:
+        if filename not in wanted:
+            continue
+        path = directory / filename
+        path.write_bytes(json.dumps({"artifact": filename}, sort_keys=True).encode("utf-8") + b"\n")
+        pins_kwargs[attr] = _sha256(path)
+    return pins_kwargs
+
+
+def _csv_line(fields):
+    buffer = io.StringIO(newline="")
+    csv.writer(buffer, lineterminator="").writerow(fields)
+    return buffer.getvalue()
+
+
+def _decision_fields(evidence, index=0, **overrides):
+    """One valid decision row as a positional field list, optionally with values replaced."""
+    row = dict(_synthetic_decision_rows(evidence.pins_source)[index])
+    row.update(overrides)
+    return [row[column] for column in DECISION_COLUMNS]
+
+
+def _decision_csv(evidence, body_rows, header=None):
+    """Render a decision CSV verbatim. ``None`` in ``body_rows`` emits a blank line."""
+    lines = [_csv_line(list(header if header is not None else DECISION_COLUMNS))]
+    for fields in body_rows:
+        lines.append("" if fields is None else _csv_line(fields))
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _bundle_bytes(output):
+    return {path.name: path.read_bytes() for path in sorted(Path(output).iterdir())}
+
+
+def _read_receipt(output):
+    return json.loads((Path(output) / RECEIPT_FILENAME).read_text(encoding="utf-8"))
+
+
+def _rewrite_receipt(output, receipt, *, reseal_receipt=False, reseal_manifest=False):
+    """Write a modified receipt back, optionally re-deriving the seals an attacker could."""
+    receipt = dict(receipt)
+    if reseal_receipt:
+        receipt.pop(RECEIPT_HASH_FIELD, None)
+        receipt[RECEIPT_HASH_FIELD] = compute_receipt_hash(receipt)
+    payload = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    (Path(output) / RECEIPT_FILENAME).write_bytes(payload)
+    if reseal_manifest:
+        manifest_path = Path(output) / MANIFEST_FILENAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest[MANIFEST_RECEIPT_SHA256_FIELD] = hashlib.sha256(payload).hexdigest()
+        manifest.pop(MANIFEST_HASH_FIELD, None)
+        from marketing_knowledge_agent.stable_record_authority import compute_manifest_hash
+
+        manifest[MANIFEST_HASH_FIELD] = compute_manifest_hash(manifest)
+        manifest_path.write_bytes(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        )
+    return payload
 
 
 # --- delimiter / parsing contract (the M3C bug class) -----------------------------------------------
@@ -569,9 +712,12 @@ def test_a_materialized_authority_is_not_an_activated_one(evidence, tmp_path):
     authority = evidence.build()
     manifest = write_authority_package(authority, tmp_path / "authority")
 
-    assert manifest["authority_materialized"] is True
-    assert manifest["stable_record_v2_activated"] is False
-    assert manifest["row_v1_retired"] is False
+    # Package-scoped naming: this says a bundle exists, never that the project's
+    # AUTHORITY_MATERIALIZED governance gate moved.
+    assert manifest[PACKAGE_MATERIALIZED_FIELD] is True
+    assert "authority_materialized" not in manifest
+    assert manifest[STABLE_RECORD_V2_ACTIVATED_FIELD] is False
+    assert manifest[ROW_V1_RETIRED_FIELD] is False
     assert manifest["activation_status"] == ACTIVATION_STATUS_NOT_ACTIVATED
     assert manifest["authority_status"] == AUTHORITY_STATUS_MATERIALIZED_NOT_ACTIVATED
 
@@ -617,20 +763,17 @@ def test_the_manifest_binds_every_required_fact(evidence, tmp_path):
     assert isinstance(manifest["manifest_hash"], str) and len(manifest["manifest_hash"]) == 64
 
 
-def test_the_manifest_backup_pin_is_carried_when_supplied(evidence, tmp_path):
-    pins = AuthorityEvidencePins(
-        proposal_registry_sha256=evidence.pins.proposal_registry_sha256,
-        proposal_crosswalk_sha256=evidence.pins.proposal_crosswalk_sha256,
-        proposal_content_digest=evidence.pins.proposal_content_digest,
-        proposal_manifest_hash=evidence.pins.proposal_manifest_hash,
-        decision_artifact_sha256=evidence.pins.decision_artifact_sha256,
-        reviewer=SYNTHETIC_REVIEWER,
-        reviewed_at=SYNTHETIC_REVIEWED_AT,
-        backup_manifest_sha256="c" * 64,
-    )
+def test_a_verified_backup_is_recorded_as_verified(evidence, tmp_path):
+    backup = _write_backup(tmp_path)
+    pins = _pins_with(evidence, backup_manifest_sha256=_sha256(backup), backup_manifest_path=str(backup))
+
     authority = evidence.build(override_pins=pins)
     manifest = write_authority_package(authority, tmp_path / "authority")
-    assert manifest["backup_manifest_sha256"] == "c" * 64
+
+    assert manifest["backup_evidence"]["backup_manifest_sha256"] == _sha256(backup)
+    assert manifest["backup_evidence"]["backup_manifest_verified"] is True
+    assert manifest["backup_evidence"]["verification_status"] == BACKUP_EVIDENCE_VERIFIED
+    assert manifest["backup_evidence"]["m3_backup_gate"] == M3_BACKUP_GATE_PASS
 
 
 def test_the_authority_manifest_seals_reproduce(evidence, tmp_path):
@@ -948,15 +1091,10 @@ def test_a_substituted_decision_artifact_is_refused_before_it_is_parsed(evidence
 
 
 def test_a_pinned_companion_artifact_that_is_missing_is_refused(evidence):
-    pins = AuthorityEvidencePins(
-        proposal_registry_sha256=evidence.pins.proposal_registry_sha256,
-        proposal_crosswalk_sha256=evidence.pins.proposal_crosswalk_sha256,
-        proposal_content_digest=evidence.pins.proposal_content_digest,
-        proposal_manifest_hash=evidence.pins.proposal_manifest_hash,
-        decision_artifact_sha256=evidence.pins.decision_artifact_sha256,
-        reviewer=SYNTHETIC_REVIEWER,
-        reviewed_at=SYNTHETIC_REVIEWED_AT,
+    pins = _pins_with(
+        evidence,
         decision_manifest_sha256="f" * 64,
+        decision_companion_dir=str(evidence.decisions_path.parent),
     )
     with pytest.raises(StableRecordAuthorityError, match="pinned but missing"):
         materialize_stable_record_authority(
@@ -1486,3 +1624,783 @@ def test_the_formal_evidence_is_refused_under_a_wrong_pin(tmp_path):
     )
     with pytest.raises(StableRecordAuthorityError, match="not the one that was reviewed"):
         materialize_stable_record_authority(FORMAL_PROPOSAL_DIR, FORMAL_DECISIONS_PATH, wrong)
+
+
+# --- F1: a backup pin is a check, not a decoration ---------------------------------------------------
+#
+# The engine used to copy ``backup_manifest_sha256`` from the pins straight into the manifest. The
+# published package then carried a hash nothing had ever compared against a file — indistinguishable,
+# to the reader it exists for, from one that had been verified. These tests hold the two apart.
+
+
+def test_a_backup_pin_without_a_location_is_refused(evidence):
+    with pytest.raises(StableRecordAuthorityError, match="backup_manifest_path is empty"):
+        _pins_with(evidence, backup_manifest_sha256="c" * 64)
+
+
+def test_a_backup_location_without_a_pin_is_refused(evidence, tmp_path):
+    backup = _write_backup(tmp_path)
+    with pytest.raises(StableRecordAuthorityError, match="backup_manifest_sha256 is empty"):
+        _pins_with(evidence, backup_manifest_path=str(backup))
+
+
+def test_a_wrong_backup_pin_is_refused(evidence, tmp_path):
+    backup = _write_backup(tmp_path)
+    pins = _pins_with(
+        evidence, backup_manifest_sha256="c" * 64, backup_manifest_path=str(backup)
+    )
+    with pytest.raises(StableRecordAuthorityError, match="backup manifest .* sha256"):
+        evidence.build(override_pins=pins)
+
+
+def test_a_backup_artifact_that_moved_after_pinning_is_refused(evidence, tmp_path):
+    backup = _write_backup(tmp_path)
+    pins = _pins_with(
+        evidence, backup_manifest_sha256=_sha256(backup), backup_manifest_path=str(backup)
+    )
+    backup.unlink()
+    with pytest.raises(StableRecordAuthorityError, match="pinned but missing"):
+        evidence.build(override_pins=pins)
+
+
+def test_a_backup_edited_after_pinning_is_refused(evidence, tmp_path):
+    backup = _write_backup(tmp_path)
+    pins = _pins_with(
+        evidence, backup_manifest_sha256=_sha256(backup), backup_manifest_path=str(backup)
+    )
+    backup.write_bytes(b'{"backup": "a different backup entirely"}\n')
+    with pytest.raises(StableRecordAuthorityError, match="backup manifest .* sha256"):
+        evidence.build(override_pins=pins)
+
+
+def test_verify_backup_evidence_returns_false_only_when_nothing_was_pinned(evidence, tmp_path):
+    assert verify_backup_evidence(evidence.pins) is False
+
+    backup = _write_backup(tmp_path)
+    pins = _pins_with(
+        evidence, backup_manifest_sha256=_sha256(backup), backup_manifest_path=str(backup)
+    )
+    assert verify_backup_evidence(pins) is True
+
+
+def test_an_unpinned_backup_never_reads_as_a_passed_gate(evidence, tmp_path):
+    """Absent evidence is recorded as absent. ``PASS`` by omission is the failure mode."""
+    authority = evidence.build()
+    output = tmp_path / "authority"
+    manifest = write_authority_package(authority, output)
+
+    assert manifest["backup_evidence"]["backup_manifest_verified"] is False
+    assert manifest["backup_evidence"]["verification_status"] == BACKUP_EVIDENCE_NOT_SUPPLIED
+    assert manifest["backup_evidence"]["m3_backup_gate"] == M3_BACKUP_GATE_NOT_ASSERTED
+    assert manifest["backup_evidence"]["backup_manifest_sha256"] == ""
+
+    receipt = _read_receipt(output)
+    assert receipt["backup_evidence"]["backup_manifest_verified"] is False
+    assert receipt["backup_evidence"]["m3_backup_gate"] == M3_BACKUP_GATE_NOT_ASSERTED
+
+
+def test_a_wrong_backup_pin_is_refused_by_the_writer_too(evidence, tmp_path):
+    """The writer is a public entry point, so it cannot rely on the builder having checked."""
+    import dataclasses
+
+    backup = _write_backup(tmp_path)
+    good = _pins_with(
+        evidence, backup_manifest_sha256=_sha256(backup), backup_manifest_path=str(backup)
+    )
+    authority = evidence.build(override_pins=good)
+
+    backup.write_bytes(b'{"backup": "swapped after the build"}\n')
+    output = tmp_path / "authority"
+    with pytest.raises(StableRecordAuthorityError, match="backup manifest .* sha256"):
+        write_authority_package(authority, output)
+    assert not output.exists()
+
+    unpinned_path = dataclasses.replace(
+        authority, pins=_pins_with(evidence)
+    )
+    write_authority_package(unpinned_path, tmp_path / "unpinned")
+
+
+def test_a_backup_pin_is_refused_at_every_entry_point(evidence, tmp_path):
+    backup = _write_backup(tmp_path)
+    pins = _pins_with(
+        evidence, backup_manifest_sha256="d" * 64, backup_manifest_path=str(backup)
+    )
+    with pytest.raises(StableRecordAuthorityError, match="backup manifest .* sha256"):
+        materialize_stable_record_authority(evidence.proposal_dir, evidence.decisions_path, pins)
+    with pytest.raises(StableRecordAuthorityError, match="backup manifest .* sha256"):
+        materialize_stable_record_authority(
+            evidence.proposal_dir, evidence.decisions_path, pins, tmp_path / "authority"
+        )
+    assert not (tmp_path / "authority").exists()
+
+
+# --- F8: a supplied pin cannot be skipped -------------------------------------------------------------
+
+
+def test_there_is_no_parameter_that_skips_companion_verification():
+    """The bypass this replaces defaulted to on, so every effective use of it published a lie."""
+    parameters = inspect.signature(materialize_stable_record_authority).parameters
+    assert "verify_companions" not in parameters
+
+
+def test_passing_the_removed_bypass_is_an_error_rather_than_a_silent_no_op(evidence):
+    with pytest.raises(TypeError):
+        materialize_stable_record_authority(
+            evidence.proposal_dir,
+            evidence.decisions_path,
+            evidence.pins,
+            verify_companions=False,
+        )
+
+
+def test_a_companion_pin_without_a_location_is_refused(evidence):
+    for _filename, attr in COMPANION_ARTIFACTS:
+        with pytest.raises(StableRecordAuthorityError, match="decision_companion_dir is empty"):
+            _pins_with(evidence, **{attr: "e" * 64})
+
+
+def test_a_companion_location_without_a_pin_is_refused(evidence):
+    with pytest.raises(StableRecordAuthorityError, match="no companion artifact is pinned"):
+        _pins_with(evidence, decision_companion_dir=str(evidence.decisions_path.parent))
+
+
+@pytest.mark.parametrize("filename, attr", list(COMPANION_ARTIFACTS))
+def test_a_wrong_companion_pin_is_refused_in_every_api_combination(
+    evidence, tmp_path, filename, attr
+):
+    kwargs = _write_companions(evidence)
+    kwargs[attr] = "a" * 64
+    pins = _pins_with(evidence, **kwargs)
+
+    # 1. the builder
+    with pytest.raises(StableRecordAuthorityError, match="companion artifact .* sha256"):
+        build_stable_record_authority(
+            evidence.loaded_proposal(evidence.pins), evidence.decisions(evidence.pins), pins
+        )
+    # 2. the dry run
+    with pytest.raises(StableRecordAuthorityError, match="companion artifact .* sha256"):
+        materialize_stable_record_authority(evidence.proposal_dir, evidence.decisions_path, pins)
+    # 3. the publishing run
+    with pytest.raises(StableRecordAuthorityError, match="companion artifact .* sha256"):
+        materialize_stable_record_authority(
+            evidence.proposal_dir, evidence.decisions_path, pins, tmp_path / "a"
+        )
+    # 4. the publishing run against the canonical destination, authorized
+    with pytest.raises(StableRecordAuthorityError, match="companion artifact .* sha256"):
+        materialize_stable_record_authority(
+            evidence.proposal_dir,
+            evidence.decisions_path,
+            pins,
+            tmp_path.joinpath(*PRODUCTION_AUTHORITY_RELPATH),
+            authorize_production_destination=True,
+        )
+    # 5. the writer, handed an authority built while the artifact still matched
+    import dataclasses
+
+    good = _pins_with(evidence, **_write_companions(evidence))
+    authority = evidence.build(override_pins=good)
+    (evidence.decisions_path.parent / filename).write_bytes(b'{"artifact": "swapped"}\n')
+    with pytest.raises(StableRecordAuthorityError, match="companion artifact .* sha256"):
+        write_authority_package(dataclasses.replace(authority, pins=good), tmp_path / "b")
+
+    assert not (tmp_path / "a").exists()
+    assert not (tmp_path / "b").exists()
+    assert not (tmp_path / "data").exists()
+
+
+def test_every_supplied_companion_pin_is_reported_as_verified(evidence, tmp_path):
+    pins = _pins_with(evidence, **_write_companions(evidence))
+    authority = evidence.build(override_pins=pins)
+    manifest = write_authority_package(authority, tmp_path / "authority")
+
+    assert manifest["source_decision_artifact"]["companion_artifacts_verified"] == [
+        name for name, _attr in COMPANION_ARTIFACTS
+    ]
+
+
+def test_a_partially_pinned_companion_set_reports_only_what_it_verified(evidence, tmp_path):
+    only = COMPANION_ARTIFACTS[1][0]
+    pins = _pins_with(evidence, **_write_companions(evidence, filenames=[only]))
+    authority = evidence.build(override_pins=pins)
+    manifest = write_authority_package(authority, tmp_path / "authority")
+
+    assert manifest["source_decision_artifact"]["companion_artifacts_verified"] == [only]
+    assert verify_companion_artifacts(pins) == (only,)
+
+
+def test_verify_supplied_evidence_covers_exactly_what_was_pinned(evidence, tmp_path):
+    backup = _write_backup(tmp_path)
+    kwargs = _write_companions(evidence)
+    kwargs.update(
+        backup_manifest_sha256=_sha256(backup), backup_manifest_path=str(backup)
+    )
+    verified = verify_supplied_evidence(_pins_with(evidence, **kwargs))
+
+    assert verified.backup_manifest_verified is True
+    assert sorted(verified.companion_artifacts) == sorted(
+        name for name, _attr in COMPANION_ARTIFACTS
+    )
+
+    bare = verify_supplied_evidence(_pins_with(evidence))
+    assert bare.companion_artifacts == ()
+    assert bare.backup_manifest_verified is False
+
+
+def test_a_pinned_companion_directory_that_does_not_exist_is_refused(evidence, tmp_path):
+    kwargs = _write_companions(evidence)
+    kwargs["decision_companion_dir"] = str(tmp_path / "nowhere")
+    pins = _pins_with(evidence, **kwargs)
+    with pytest.raises(StableRecordAuthorityError, match="is not a directory"):
+        evidence.build(override_pins=pins)
+
+
+def _publish(evidence, tmp_path, name="authority", pins=None, **kwargs):
+    authority = evidence.build(override_pins=pins)
+    output = tmp_path / name
+    write_authority_package(authority, output, **kwargs)
+    return output
+
+
+# --- F2: the production destination is a subtree, not a filename -----------------------------------
+#
+# The old guard compared only the trailing path components, so it answered "is this path *named*
+# .../stable_record_v2?". A dated publication is never named that. Every case below is a directory
+# an activation run would plausibly write to, and every one of them used to be unguarded.
+#
+# Every path here is a tmp_path mirror. This work package publishes nothing to the real tree.
+
+
+@pytest.mark.parametrize(
+    "descendant",
+    [
+        pytest.param((), id="the-canonical-root-itself"),
+        pytest.param(("2026-08-24",), id="a-dated-child"),
+        pytest.param(("v3",), id="a-version-child"),
+        pytest.param(("2026-08-24", "batch-1", "rows"), id="a-deep-descendant"),
+    ],
+)
+def test_the_production_root_and_every_descendant_are_refused(evidence, tmp_path, descendant):
+    authority = evidence.build()
+    target = tmp_path.joinpath(*PRODUCTION_AUTHORITY_RELPATH).joinpath(*descendant)
+
+    with pytest.raises(
+        StableRecordAuthorityError, match="canonical production authority destination"
+    ):
+        write_authority_package(authority, target)
+
+    # The refusal precedes every mkdir, so a refused destination leaves no parent behind either.
+    assert not (tmp_path / "data").exists()
+
+
+def test_a_relative_production_descendant_is_refused(evidence, tmp_path, monkeypatch):
+    """Resolution comes first, so a relative path cannot arrive there under another name."""
+    authority = evidence.build()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(
+        StableRecordAuthorityError, match="canonical production authority destination"
+    ):
+        write_authority_package(authority, Path(*PRODUCTION_AUTHORITY_RELPATH) / "2026-08-24")
+
+    assert not (tmp_path / "data").exists()
+
+
+def test_a_symlinked_production_descendant_is_refused(evidence, tmp_path):
+    authority = evidence.build()
+    mirror = tmp_path.joinpath(*PRODUCTION_AUTHORITY_RELPATH)
+    mirror.mkdir(parents=True)
+    link = tmp_path / "elsewhere"
+    link.symlink_to(mirror, target_is_directory=True)
+
+    with pytest.raises(
+        StableRecordAuthorityError, match="canonical production authority destination"
+    ):
+        write_authority_package(authority, link / "2026-08-24")
+
+    assert sorted(item.name for item in mirror.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "leaf", ["stable_record_v2_preview", "stable_record_v3", "stable_record_v2_backup"]
+)
+def test_a_near_miss_of_the_production_name_is_not_refused(evidence, tmp_path, leaf):
+    """Containment is compared by whole path component, so a neighbouring directory is not caught."""
+    authority = evidence.build()
+    target = tmp_path / "data" / "identity" / "authority" / leaf
+    write_authority_package(authority, target)
+    assert (target / MANIFEST_FILENAME).is_file()
+
+
+def test_an_authorized_production_descendant_publishes(evidence, tmp_path):
+    authority = evidence.build()
+    target = tmp_path.joinpath(*PRODUCTION_AUTHORITY_RELPATH) / "2026-08-24"
+    write_authority_package(authority, target, authorize_production_destination=True)
+    assert (target / MANIFEST_FILENAME).is_file()
+
+
+def test_the_real_production_authority_tree_does_not_exist():
+    """This work package materializes nothing to the real tree, and nothing here creates it."""
+    assert not _REPO_ROOT.joinpath(*PRODUCTION_AUTHORITY_RELPATH).exists()
+    assert not (_REPO_ROOT / "data" / "identity" / "authority").exists()
+
+
+# --- F3 and F4: the decision CSV has an exact row shape ---------------------------------------------
+#
+# ``csv.DictReader`` fails in two opposite and equally silent ways here. A short row is padded with
+# ``restval``, so it passes a column-set check carrying ``None`` where a decision belongs; a long
+# row lands under a ``None`` restkey, so reporting the mismatch raises ``TypeError`` instead of this
+# module's error. Both are refusals now, and both are refusals of the same kind.
+
+
+def test_the_decision_contract_is_exactly_twenty_two_columns():
+    assert len(DECISION_COLUMNS) == 22
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda fields: fields[:-1], id="missing-one-trailing-field"),
+        pytest.param(lambda fields: fields[:-2], id="missing-two-trailing-fields"),
+        pytest.param(lambda fields: fields + ["extra"], id="one-extra-field"),
+        pytest.param(lambda fields: fields + ["extra", "another"], id="two-extra-fields"),
+        pytest.param(lambda fields: fields[:3], id="a-short-row"),
+        pytest.param(lambda fields: fields + ["x"] * 5, id="a-long-row"),
+        pytest.param(lambda fields: [], id="an-empty-row"),
+    ],
+)
+def test_a_decision_row_of_the_wrong_width_is_refused(evidence, mutate):
+    rows = [_decision_fields(evidence, index) for index in range(len(_SYNTHETIC_SPEC))]
+    rows[1] = mutate(rows[1])
+    pins = evidence.write_raw_decisions(_decision_csv(evidence, rows))
+
+    with pytest.raises(StableRecordAuthorityError, match="but the decision contract is exactly 22"):
+        load_decision_artifact(evidence.decisions_path, pins)
+
+
+def test_a_blank_line_between_decisions_is_refused(evidence):
+    rows = [_decision_fields(evidence, index) for index in range(len(_SYNTHETIC_SPEC))]
+    rows.insert(1, None)
+    pins = evidence.write_raw_decisions(_decision_csv(evidence, rows))
+
+    with pytest.raises(StableRecordAuthorityError, match="but the decision contract is exactly 22"):
+        load_decision_artifact(evidence.decisions_path, pins)
+
+
+def test_an_extra_field_is_this_modules_refusal_and_not_a_typeerror(evidence):
+    """The DictReader restkey of ``None`` made ``sorted(row)`` raise, which no caller catches."""
+    rows = [_decision_fields(evidence, index) for index in range(len(_SYNTHETIC_SPEC))]
+    rows[0] = rows[0] + ["a twenty-third value"]
+    pins = evidence.write_raw_decisions(_decision_csv(evidence, rows))
+
+    with pytest.raises(StableRecordAuthorityError):
+        load_decision_artifact(evidence.decisions_path, pins)
+
+
+def test_a_truncated_row_is_not_quietly_completed(evidence):
+    """A padded row used to materialize, carrying the literal string ``None`` as a decision."""
+    rows = [_decision_fields(evidence, index) for index in range(len(_SYNTHETIC_SPEC))]
+    rows[0] = rows[0][:-2]
+    pins = evidence.write_raw_decisions(_decision_csv(evidence, rows))
+
+    with pytest.raises(StableRecordAuthorityError, match="short row leaves a decision undefined"):
+        load_decision_artifact(evidence.decisions_path, pins)
+
+
+def test_a_refusal_never_quotes_the_row_it_refused(evidence):
+    """The artifact carries the merchant roster and free-text notes. A refusal is not a licence."""
+    secret = "REVIEW-NOTE-DO-NOT-LEAK-某某品牌-2026"
+    rows = [_decision_fields(evidence, index) for index in range(len(_SYNTHETIC_SPEC))]
+    rows[0] = _decision_fields(evidence, 0, review_note=secret) + ["extra"]
+    pins = evidence.write_raw_decisions(_decision_csv(evidence, rows))
+
+    with pytest.raises(StableRecordAuthorityError) as excinfo:
+        load_decision_artifact(evidence.decisions_path, pins)
+    assert secret not in str(excinfo.value)
+
+
+def test_a_decision_header_with_a_renamed_column_is_refused(evidence):
+    header = list(DECISION_COLUMNS)
+    header[header.index("review_note")] = "reviewer_comment"
+    rows = [_decision_fields(evidence, index) for index in range(len(_SYNTHETIC_SPEC))]
+    pins = evidence.write_raw_decisions(_decision_csv(evidence, rows, header=header))
+
+    with pytest.raises(StableRecordAuthorityError, match="do not match"):
+        load_decision_artifact(evidence.decisions_path, pins)
+
+
+def test_a_decision_header_in_the_wrong_order_is_refused(evidence):
+    header = list(DECISION_COLUMNS)
+    header[1], header[2] = header[2], header[1]
+    rows = [_decision_fields(evidence, index) for index in range(len(_SYNTHETIC_SPEC))]
+    pins = evidence.write_raw_decisions(_decision_csv(evidence, rows, header=header))
+
+    with pytest.raises(StableRecordAuthorityError, match="exactly and in order"):
+        load_decision_artifact(evidence.decisions_path, pins)
+
+
+def test_a_decision_header_with_an_extra_column_is_refused(evidence):
+    header = list(DECISION_COLUMNS) + ["reviewer_mood"]
+    rows = [_decision_fields(evidence, index) + ["fine"] for index in range(len(_SYNTHETIC_SPEC))]
+    pins = evidence.write_raw_decisions(_decision_csv(evidence, rows, header=header))
+
+    with pytest.raises(StableRecordAuthorityError, match="do not match"):
+        load_decision_artifact(evidence.decisions_path, pins)
+
+
+def test_an_empty_decision_artifact_is_refused():
+    with pytest.raises(StableRecordAuthorityError, match="is empty"):
+        read_decision_csv(b"", source="synthetic")
+
+
+def test_a_decision_artifact_with_a_header_and_no_rows_is_refused():
+    header = _csv_line(list(DECISION_COLUMNS)).encode("utf-8") + b"\r\n"
+    with pytest.raises(StableRecordAuthorityError, match="no decision rows"):
+        read_decision_csv(header, source="synthetic")
+
+
+def test_a_decision_artifact_that_is_not_utf8_is_refused():
+    with pytest.raises(StableRecordAuthorityError, match="not valid UTF-8"):
+        read_decision_csv(b"\xff\xfe not utf-8 at all", source="synthetic")
+
+
+def test_an_exactly_shaped_decision_artifact_still_loads(evidence):
+    rows = [_decision_fields(evidence, index) for index in range(len(_SYNTHETIC_SPEC))]
+    pins = evidence.write_raw_decisions(_decision_csv(evidence, rows))
+
+    decisions = load_decision_artifact(evidence.decisions_path, pins)
+    assert [decision.stable_record_id for decision in decisions] == [
+        spec[0] for spec in _SYNTHETIC_SPEC
+    ]
+
+
+# --- F5: the receipt is sealed, not merely present ---------------------------------------------------
+#
+# The receipt could previously be edited or deleted and the package would still load. It is the file
+# that records what was materialized and under whose decision, so an unsealed one is an audit trail
+# an operator can rewrite. It is now bound three ways: the manifest seals its bytes, it seals its own
+# body, and the two are cross-checked for agreement.
+
+
+def test_the_manifest_seals_the_receipt_bytes(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    manifest, _rows = load_authority_package(output)
+    assert manifest[MANIFEST_RECEIPT_SHA256_FIELD] == _sha256(output / RECEIPT_FILENAME)
+
+
+def test_a_deleted_receipt_is_refused(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    (output / RECEIPT_FILENAME).unlink()
+
+    with pytest.raises(StableRecordAuthorityError, match="receipt .* is missing"):
+        load_authority_package(output)
+
+
+def test_a_receipt_whose_package_state_was_edited_is_refused(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    receipt = _read_receipt(output)
+    receipt[PACKAGE_STATE_FIELD][STABLE_RECORD_V2_ACTIVATED_FIELD] = True
+    _rewrite_receipt(output, receipt)
+
+    with pytest.raises(StableRecordAuthorityError, match="does not match the manifest"):
+        load_authority_package(output)
+
+
+def test_a_receipt_whose_identity_digest_was_edited_is_refused(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    receipt = _read_receipt(output)
+    receipt["stable_id_set_digest"] = "0" * 64
+    _rewrite_receipt(output, receipt)
+
+    with pytest.raises(StableRecordAuthorityError, match="does not match the manifest"):
+        load_authority_package(output)
+
+
+def test_a_receipt_resealed_only_to_itself_is_still_refused(evidence, tmp_path):
+    """Re-deriving the receipt's own hash proves the file is well-formed, not that it is the one
+    published. The manifest seals the bytes, and the bytes changed."""
+    output = _publish(evidence, tmp_path)
+    receipt = _read_receipt(output)
+    receipt["record_count"] = 999
+    _rewrite_receipt(output, receipt, reseal_receipt=True)
+
+    with pytest.raises(StableRecordAuthorityError, match="does not match the manifest"):
+        load_authority_package(output)
+
+
+def test_a_manifest_whose_receipt_pointer_moved_without_a_reseal_is_refused(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    manifest_path = output / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[MANIFEST_RECEIPT_SHA256_FIELD] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(StableRecordAuthorityError, match="does not match its contents"):
+        load_authority_package(output)
+
+
+def test_a_manifest_that_declares_no_receipt_pointer_is_refused(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    manifest_path = output / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop(MANIFEST_RECEIPT_SHA256_FIELD)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(StableRecordAuthorityError, match="declares no receipt_sha256"):
+        load_authority_package(output)
+
+
+def test_a_receipt_and_manifest_resealed_together_must_still_agree(evidence, tmp_path):
+    """The last defence: an operator who re-derives *both* seals still has to make the two files
+    say the same thing about the same package."""
+    output = _publish(evidence, tmp_path)
+    receipt = _read_receipt(output)
+    receipt[PACKAGE_STATE_FIELD][STABLE_RECORD_V2_ACTIVATED_FIELD] = True
+    _rewrite_receipt(output, receipt, reseal_receipt=True, reseal_manifest=True)
+
+    with pytest.raises(
+        StableRecordAuthorityError, match="disagree on stable_record_v2_activated"
+    ):
+        load_authority_package(output)
+
+
+def test_a_receipt_missing_its_package_state_is_refused(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    receipt = _read_receipt(output)
+    receipt.pop(PACKAGE_STATE_FIELD)
+    _rewrite_receipt(output, receipt, reseal_receipt=True, reseal_manifest=True)
+
+    with pytest.raises(StableRecordAuthorityError, match="declares no package_state"):
+        load_authority_package(output)
+
+
+def test_the_receipt_self_seal_reproduces(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    verify_receipt_integrity(_read_receipt(output))
+
+
+def test_a_receipt_without_a_self_seal_is_refused(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    receipt = _read_receipt(output)
+    receipt.pop(RECEIPT_HASH_FIELD)
+
+    with pytest.raises(StableRecordAuthorityError, match="missing or malformed receipt_hash"):
+        verify_receipt_integrity(receipt)
+
+
+def test_the_two_seals_are_not_mutually_recursive(evidence, tmp_path):
+    """The receipt quotes the manifest's semantic identity; the manifest seals the receipt's bytes.
+
+    If ``content_digest`` also covered ``receipt_sha256``, each value would be an input to the other
+    and neither would have a fixed point. Excluding the pointer from the semantic digest is what
+    breaks the cycle, and ``manifest_hash`` still covers it, so the receipt stays sealed.
+    """
+    from marketing_knowledge_agent.stable_record_authority import content_digest_body
+
+    output = _publish(evidence, tmp_path)
+    manifest = json.loads((output / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    receipt = _read_receipt(output)
+
+    assert receipt["manifest_content_digest"] == manifest[MANIFEST_CONTENT_DIGEST_FIELD]
+    assert MANIFEST_HASH_FIELD not in receipt
+    assert MANIFEST_RECEIPT_SHA256_FIELD not in content_digest_body(manifest)
+    assert MANIFEST_RECEIPT_SHA256_FIELD in manifest
+    # The outer seal is computed over the pointer, so the receipt bytes are covered by it.
+    manifest_without_pointer = dict(manifest)
+    manifest_without_pointer[MANIFEST_RECEIPT_SHA256_FIELD] = "0" * 64
+    from marketing_knowledge_agent.stable_record_authority import compute_manifest_hash
+
+    assert compute_manifest_hash(manifest_without_pointer) != manifest[MANIFEST_HASH_FIELD]
+
+
+def test_the_receipt_carries_no_destination_and_no_timestamp(evidence, tmp_path):
+    output = _publish(evidence, tmp_path, name="a-very-distinctive-destination-name")
+    payload = (output / RECEIPT_FILENAME).read_bytes()
+
+    assert b"a-very-distinctive-destination-name" not in payload
+    assert b"created_at" not in payload
+
+
+# --- F6: package scope is not the project governance gate --------------------------------------------
+
+
+def test_no_published_file_asserts_the_project_governance_gate(evidence, tmp_path):
+    """``AUTHORITY_MATERIALIZED: YES`` names a project gate that is still NO, and only a governance
+    decision moves it. A tmp bundle carrying that sentence would be read as the gate having flipped.
+    """
+    output = _publish(evidence, tmp_path)
+    for name, payload in _bundle_bytes(output).items():
+        assert b"AUTHORITY_MATERIALIZED" not in payload, name
+        assert b"gate_state" not in payload, name
+
+
+def test_the_package_state_is_named_for_the_package(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    state = _read_receipt(output)[PACKAGE_STATE_FIELD]
+
+    assert state[PACKAGE_MATERIALIZED_FIELD] is True
+    assert state[STABLE_RECORD_V2_ACTIVATED_FIELD] is False
+    assert state[ROW_V1_RETIRED_FIELD] is False
+    assert state[PRODUCTION_REINDEX_AUTHORIZED_FIELD] is False
+    assert all(not key.isupper() for key in state)
+
+
+def test_the_materialized_not_activated_semantics_survive_the_rename(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    manifest, rows = load_authority_package(output)
+
+    assert manifest["authority_status"] == AUTHORITY_STATUS_MATERIALIZED_NOT_ACTIVATED
+    assert manifest["activation_status"] == ACTIVATION_STATUS_NOT_ACTIVATED
+    assert manifest[PACKAGE_MATERIALIZED_FIELD] is True
+    assert manifest[STABLE_RECORD_V2_ACTIVATED_FIELD] is False
+    assert manifest[ROW_V1_RETIRED_FIELD] is False
+    assert manifest[PRODUCTION_REINDEX_AUTHORIZED_FIELD] is False
+    for row in rows:
+        assert row["authority_status"] == AUTHORITY_STATUS_MATERIALIZED_NOT_ACTIVATED
+        assert row["row_v1_status"] == ROW_V1_STATUS_RETAINED
+
+
+# --- F7: activation still needs an external pin, and the package says so ------------------------------
+
+
+def test_the_package_records_activation_as_still_requiring_an_external_pin(evidence, tmp_path):
+    output = _publish(evidence, tmp_path)
+    manifest, _rows = load_authority_package(output)
+    receipt = _read_receipt(output)
+
+    for document in (manifest, receipt):
+        trust = document[ACTIVATION_TRUST_FIELD]
+        assert trust["self_validation_is_not_activation_trust"] is True
+        assert trust["authority_output_external_pin"] == AUTHORITY_OUTPUT_EXTERNAL_PIN_REQUIRED
+
+
+def test_loading_a_package_is_documented_as_not_an_activation_decision():
+    """A future activation work package must not read a successful load as authorization."""
+    doc = load_authority_package.__doc__ or ""
+    assert "not an activation trust decision" in doc
+    assert AUTHORITY_OUTPUT_EXTERNAL_PIN_REQUIRED in doc
+
+
+def test_a_wholly_rewritten_package_still_loads_which_is_why_activation_needs_more(
+    evidence, tmp_path
+):
+    """Stated as a test rather than a comment: self-validation cannot detect this, by construction.
+
+    An operator who rebuilds all three files from altered inputs produces a package that passes
+    every internal check, because there is nothing left inside the directory to disagree with. That
+    is exactly the gap an external pin of the authority output closes, and it is still open.
+    """
+    output = _publish(evidence, tmp_path)
+    manifest_before, _rows = load_authority_package(output)
+
+    rebuilt = tmp_path / "rebuilt"
+    authority = evidence.build()
+    write_authority_package(authority, rebuilt, created_at="2031-01-01T00:00:00+00:00")
+    manifest_after, _rows_after = load_authority_package(rebuilt)
+
+    assert manifest_after[MANIFEST_HASH_FIELD] != manifest_before[MANIFEST_HASH_FIELD]
+    # Both load. Only an external pin distinguishes them.
+    assert manifest_after[MANIFEST_CONTENT_DIGEST_FIELD] == manifest_before[
+        MANIFEST_CONTENT_DIGEST_FIELD
+    ]
+
+
+# --- determinism across the new schema -----------------------------------------------------------------
+
+
+def test_all_three_files_are_byte_identical_across_destinations(evidence, tmp_path):
+    created_at = "2026-08-24T00:00:00+00:00"
+    first = tmp_path / "destination-alpha"
+    second = tmp_path / "destination-beta"
+
+    materialize_stable_record_authority(
+        evidence.proposal_dir, evidence.decisions_path, evidence.pins, first, created_at
+    )
+    materialize_stable_record_authority(
+        evidence.proposal_dir, evidence.decisions_path, evidence.pins, second, created_at
+    )
+
+    for filename in (REGISTRY_FILENAME, MANIFEST_FILENAME, RECEIPT_FILENAME):
+        assert (first / filename).read_bytes() == (second / filename).read_bytes(), filename
+
+    # The destination never enters the canonical bytes.
+    for payload in _bundle_bytes(first).values():
+        assert b"destination-alpha" not in payload
+        assert str(first).encode("utf-8") not in payload
+
+
+def test_a_volatile_timestamp_leaves_the_receipt_untouched(evidence, tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+
+    _a, manifest_a = materialize_stable_record_authority(
+        evidence.proposal_dir,
+        evidence.decisions_path,
+        evidence.pins,
+        first,
+        "2026-08-24T00:00:00+00:00",
+    )
+    _b, manifest_b = materialize_stable_record_authority(
+        evidence.proposal_dir,
+        evidence.decisions_path,
+        evidence.pins,
+        second,
+        "2026-09-01T12:34:56+00:00",
+    )
+
+    assert (first / RECEIPT_FILENAME).read_bytes() == (second / RECEIPT_FILENAME).read_bytes()
+    assert manifest_a[MANIFEST_RECEIPT_SHA256_FIELD] == manifest_b[MANIFEST_RECEIPT_SHA256_FIELD]
+    assert manifest_a[MANIFEST_CONTENT_DIGEST_FIELD] == manifest_b[MANIFEST_CONTENT_DIGEST_FIELD]
+    assert manifest_a["stable_id_set_digest"] == manifest_b["stable_id_set_digest"]
+    assert manifest_a["registry_sha256"] == manifest_b["registry_sha256"]
+    # Only the seal that deliberately covers created_at moves.
+    assert manifest_a[MANIFEST_HASH_FIELD] != manifest_b[MANIFEST_HASH_FIELD]
+
+
+# --- formal evidence: the backup gate is re-verified ------------------------------------------------
+
+
+@formal_evidence
+def test_the_formal_backup_manifest_is_verified_before_publication(tmp_path):
+    assert _sha256(FORMAL_BACKUP_MANIFEST_PATH) == FORMAL_BACKUP_MANIFEST_SHA256
+
+    _authority, manifest = materialize_stable_record_authority(
+        FORMAL_PROPOSAL_DIR,
+        FORMAL_DECISIONS_PATH,
+        FORMAL_PINS,
+        tmp_path / "authority",
+        "2026-08-24T00:00:00+00:00",
+    )
+
+    assert manifest["backup_evidence"]["backup_manifest_sha256"] == FORMAL_BACKUP_MANIFEST_SHA256
+    assert manifest["backup_evidence"]["backup_manifest_verified"] is True
+    assert manifest["backup_evidence"]["m3_backup_gate"] == M3_BACKUP_GATE_PASS
+    assert manifest["source_decision_artifact"]["companion_artifacts_verified"] == [
+        name for name, _attr in COMPANION_ARTIFACTS
+    ]
+
+    loaded, rows = load_authority_package(tmp_path / "authority")
+    assert loaded[MANIFEST_HASH_FIELD] == manifest[MANIFEST_HASH_FIELD]
+    assert len(rows) == FORMAL_RECORD_COUNT
+
+
+@formal_evidence
+def test_the_formal_evidence_is_refused_under_a_wrong_backup_pin(tmp_path):
+    import dataclasses
+
+    wrong = dataclasses.replace(FORMAL_PINS, backup_manifest_sha256="0" * 64)
+    with pytest.raises(StableRecordAuthorityError, match="backup manifest .* sha256"):
+        materialize_stable_record_authority(FORMAL_PROPOSAL_DIR, FORMAL_DECISIONS_PATH, wrong)
+
+
+@formal_evidence
+def test_the_formal_package_carries_no_governance_gate_assertion(tmp_path):
+    materialize_stable_record_authority(
+        FORMAL_PROPOSAL_DIR,
+        FORMAL_DECISIONS_PATH,
+        FORMAL_PINS,
+        tmp_path / "authority",
+        "2026-08-24T00:00:00+00:00",
+    )
+    for name, payload in _bundle_bytes(tmp_path / "authority").items():
+        assert b"AUTHORITY_MATERIALIZED" not in payload, name
