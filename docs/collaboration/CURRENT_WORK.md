@@ -4,16 +4,15 @@
 
 ## Lock
 
-- State: inactive
-- Task: none
-- Implementer: none
-- Reviewer: none
-- Branch: none
-- Baseline commit: none
-- Intended scope: none
-- Started at: none
-- Last updated: 2026-08-26T13:52:35+08:00
-
+- State: active
+- Task: Stable Record V2 Shadow Integration
+- Implementer: James Huang (ChatGPT-guided development)
+- Reviewer: milestone review deferred
+- Branch: codex/impl/stable-record-v2-shadow-integration
+- Baseline commit: dd215c6b4199c221288720d6d702eff0c15ed0a9
+- Intended scope: introduce stable record IDs as shadow identity in the internal Vault/content-index pipeline without activating Stable Record V2, retiring row_v1, renaming Vault files, mutating production data, or running production re-index.
+- Started at: 2026-08-26T15:49:48+08:00
+- Last updated: 2026-08-26T15:49:48+08:00
 
 ## Objective and done definition
 
