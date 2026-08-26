@@ -197,6 +197,12 @@ from .pipeline import (
 )
 from .query_gating import precheck_restricted_query
 from .retrieval import result_to_dict
+from .search_evaluation import (
+    SearchEvaluationError,
+    evaluate_search_cases,
+    load_search_quality_cases,
+    render_evaluation_markdown,
+)
 from .search_taxonomy import SearchTaxonomyError, load_search_taxonomy
 from .review_template import ReviewTemplateError, generate_review_template
 from .review_decision_validation import ReviewDecisionValidationError, validate_review_decisions
@@ -294,6 +300,26 @@ def main(argv=None) -> int:
                 payload["warnings"] = [load_warning]
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
+
+        if args.command == "evaluate-search":
+            cases = load_search_quality_cases(args.cases)
+            report = evaluate_search_cases(
+                cases,
+                db_path=args.db,
+                taxonomy=_search_taxonomy_from_args(args),
+                limit=args.limit,
+            )
+            if args.output is not None:
+                args.output.mkdir(parents=True, exist_ok=True)
+                (args.output / "search_evaluation.json").write_text(
+                    json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                (args.output / "search_evaluation.md").write_text(
+                    render_evaluation_markdown(report), encoding="utf-8"
+                )
+            print(json.dumps(report.summary, ensure_ascii=False, indent=2))
+            # A failing Golden case is a search-quality regression, not a crash.
+            return 0 if report.summary["golden_fail"] == 0 else 1
 
         if args.command == "agent-ask":
             filters = _filters_from_args(args)
@@ -1113,6 +1139,9 @@ def main(argv=None) -> int:
     except SearchTaxonomyError as exc:
         print(f"search taxonomy error: {exc}", file=sys.stderr)
         return 2
+    except SearchEvaluationError as exc:
+        print(f"search evaluation error: {exc}", file=sys.stderr)
+        return 2
     except FileNotFoundError as exc:
         print(f"file error: {exc}", file=sys.stderr)
         return 2
@@ -1171,6 +1200,36 @@ def build_parser() -> argparse.ArgumentParser:
     _add_retrieval_args(explain_parser)
     _add_governance_args(explain_parser)
     _add_search_taxonomy_args(explain_parser)
+
+    evaluate_search_parser = subparsers.add_parser(
+        "evaluate-search",
+        help=(
+            "Run the Golden/Negative search-quality case set read-only against one index and one "
+            "pinned taxonomy"
+        ),
+    )
+    # No --db default on purpose: an evaluation must never fall through to whichever index happens
+    # to sit at the conventional path, and a production index must be handed in as a copy because
+    # the index reader opens read-write.
+    evaluate_search_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="Index to evaluate; pass a copy when measuring a production index",
+    )
+    evaluate_search_parser.add_argument(
+        "--cases",
+        type=Path,
+        default=Path("tests/fixtures/search_quality_cases.json"),
+    )
+    evaluate_search_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Directory to write the JSON and Markdown report into; omit to print the summary only",
+    )
+    evaluate_search_parser.add_argument("--limit", type=int, default=20)
+    _add_search_taxonomy_args(evaluate_search_parser)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="Run built-in prototype evaluation cases")
     evaluate_parser.add_argument("--vault", type=Path, default=DEFAULT_VAULT)

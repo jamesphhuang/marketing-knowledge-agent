@@ -518,6 +518,7 @@ def build_query_plan(
     matched_fragments: List[str] = []
     identity_fragments: List[str] = []
     taxonomy_decided_fields: set = set()
+    taxonomy_fragments: List[str] = []
     taxonomy_abstain_reason: Optional[str] = None
     operator = "OR" if re.search(r"(?:或|任一|其中之一)", normalized) else "AND"
 
@@ -543,6 +544,10 @@ def build_query_plan(
                     constraints.append(outcome.constraint)
                 parsed_terms.append(match.group(0))
                 matched_fragments.append(match.group(0))
+                # The user named the field, so this text is spent. Without removing it the catalog
+                # pass below re-reads the value against the *other* level's catalog and widens an
+                # explicitly scoped query into a second taxonomy field.
+                taxonomy_fragments.append(match.group(0))
                 continue
         constraints.append(_constraint(field_name, value, explicit_operator, "explicit_field_parser", raw_value=raw_value))
         parsed_terms.append(match.group(0))
@@ -622,7 +627,6 @@ def build_query_plan(
 
     catalog_query = field_query
     if taxonomy is not None:
-        taxonomy_fragments: List[str] = []
         # Runs on what is left after identity resolution has claimed its fragments, so a brand whose
         # name happens to equal a taxonomy term is never re-read as vocabulary.
         for outcome in _scan_taxonomy_terms(
