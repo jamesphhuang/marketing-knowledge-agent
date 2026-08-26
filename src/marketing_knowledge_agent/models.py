@@ -71,6 +71,7 @@ class DocumentMetadata(BaseModel):
     source_path: str = ""
     source_sheet: Optional[str] = None
     source_row: Optional[int] = None
+    stable_record_id: Optional[str] = None
     canonical_url: Optional[str] = None
     language: str = "zh-TW"
     author: Optional[str] = None
@@ -205,6 +206,23 @@ class DocumentMetadata(BaseModel):
                 return False
         return value
 
+    @validator("stable_record_id", pre=True)
+    def validate_stable_record_id(cls, value: Any) -> Optional[str]:
+        # Imported lazily because the crosswalk's Excel/governance imports eventually reference
+        # DocumentMetadata; the regex remains canonical without creating a module-import cycle.
+        from .stable_record_crosswalk import STABLE_ID_RE
+
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        if not STABLE_ID_RE.match(normalized):
+            raise ValueError(
+                f"stable_record_id must match canonical pattern {STABLE_ID_RE.pattern}"
+            )
+        return normalized
+
     @property
     def effective_date(self) -> date:
         return self.last_reviewed or self.updated_date or self.captured_date or self.publish_date
@@ -233,6 +251,7 @@ class DocumentMetadata(BaseModel):
             "source_path": self.source_path,
             "source_sheet": self.source_sheet,
             "source_row": self.source_row,
+            "stable_record_id": self.stable_record_id,
             "canonical_url": self.canonical_url,
             "language": self.language,
             "author": self.author,
@@ -282,6 +301,28 @@ class DocumentMetadata(BaseModel):
             "multi_interview_record": self.multi_interview_record,
             "suspected_duplicate_review": self.suspected_duplicate_review,
         }
+
+
+# Shadow-scheme keys that carry no meaning until Stable Record V2 is activated. They exist in
+# memory and in the SQLite ``metadata_json`` round-trip, but an unresolved one must never be
+# rendered into a governed Markdown file: ``row_v1`` is still the mutation authority, and a Vault
+# file carrying ``stable_record_id: null`` states a successor scheme that nobody has activated.
+UNRESOLVED_SHADOW_IDENTITY_KEYS = ("stable_record_id",)
+
+
+def governed_markdown_frontmatter(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``payload`` with unresolved shadow identity keys omitted.
+
+    This is the single serialization boundary every governed Markdown writer shares. It drops a
+    shadow key only when its value is ``None``; a resolved ``MKA-MC-#####`` is preserved verbatim,
+    because omitting a real identity would be its own kind of silent loss. Nothing else is
+    filtered -- other ``None`` values are part of the existing frontmatter contract and stay.
+    """
+    frontmatter = dict(payload)
+    for key in UNRESOLVED_SHADOW_IDENTITY_KEYS:
+        if frontmatter.get(key) is None:
+            frontmatter.pop(key, None)
+    return frontmatter
 
 
 class Document(BaseModel):

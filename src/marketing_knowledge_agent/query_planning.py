@@ -4,9 +4,12 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
 
 from .models import DocumentMetadata
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard, not runtime behaviour
+    from .search_taxonomy import SearchTaxonomy, TaxonomyResolution
 
 
 @dataclass(frozen=True)
@@ -223,9 +226,42 @@ ASSET_TYPE_ALIASES = {
 }
 
 # Aliases are curated and deliberately small. Substring inference is forbidden.
+# Superseded, not deleted, when a Search Taxonomy Authority is supplied: two alias sources answering
+# the same question at once is the competing-truth failure this parser must not have.
 CATEGORY_ALIASES = {
     "家居生活": "居家生活",
 }
+
+# The three controlled-vocabulary fields a pinned Search Taxonomy Authority may speak for. Defined
+# here, beside the registry that names them, so the Authority module can import one definition
+# rather than restate it.
+TAXONOMY_FIELDS = ("sales_category_lv1", "sales_category_lv2", "content_tags")
+TAXONOMY_OPERATORS = {
+    "sales_category_lv1": "canonical_exact",
+    "sales_category_lv2": "canonical_exact",
+    "content_tags": "contains_exact_tag",
+}
+TAXONOMY_SOURCE = "search_taxonomy_authority"
+# A query states a bounded number of vocabulary terms. The cap stops a pathological query from
+# driving the longest-alias scan indefinitely; it never changes which term wins.
+TAXONOMY_SCAN_LIMIT = 8
+ABSTAIN_TAXONOMY_AMBIGUOUS = "ambiguous_taxonomy_term"
+ABSTAIN_TAXONOMY_NOT_INDEXED = "taxonomy_known_but_not_indexed"
+
+# CJK writes without spaces, so a short alias matches inside longer words that mean something
+# else: "狗" inside "熱狗堡", "停業" inside "停業後重新開店", "鎂" inside "鎂光燈". An ASCII alias
+# is already protected -- ``_contains_exact_phrase`` asserts a boundary for it, which is why "tv"
+# does not match inside "tvbs" -- but no such boundary exists in the script here. A short CJK
+# alias therefore binds a constraint only where the script itself provides the boundary: at least
+# one occurrence must sit outside a longer run of CJK characters. Explicitly typed
+# ``sales_category_lv2=寵物`` never reaches this rule, because naming the field is the user
+# supplying the boundary. The cost is recall inside natural sentences -- "我想找寵物案例" no
+# longer binds a category -- and that cost is deliberate: this parser must not answer confidently
+# from an accidental substring.
+SHORT_CJK_ALIAS_MAX_LENGTH = 2
+# Unified Ideographs Extension A, Unified Ideographs, and Compatibility Ideographs. Written as
+# escapes so the range is auditable rather than dependent on how this file renders.
+_CJK_CHAR_RE = re.compile("[\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff]")
 
 PUBLICATION_STATUS_ALIASES = {
     "已上線": "published",
@@ -474,7 +510,19 @@ def validate_constraint(constraint: QueryConstraint) -> QueryConstraint:
     return replace(constraint, raw_value=raw_value)
 
 
-def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
+def build_query_plan(
+    raw_query: str,
+    catalog: QueryCatalog,
+    taxonomy: Optional["SearchTaxonomy"] = None,
+) -> TypedQueryPlan:
+    """Build a typed plan, optionally reading vocabulary from a pinned Search Taxonomy Authority.
+
+    ``taxonomy=None`` is the whole existing contract, unchanged: the runtime catalog and the small
+    curated ``CATEGORY_ALIASES`` map remain the only alias sources. Supplying an Authority makes it
+    the alias source for its three fields, and adds two ways to refuse rather than guess -- a term
+    that names more than one canonical value, and a term the Authority knows that the formal index
+    does not carry.
+    """
     normalized = normalize_query_text(raw_query)
     constraints: List[QueryConstraint] = []
     resolved_entities: List[ResolvedEntity] = []
@@ -484,11 +532,40 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
     parser_warnings: List[str] = []
     matched_fragments: List[str] = []
     identity_fragments: List[str] = []
+    taxonomy_decided_fields: set = set()
+    taxonomy_fragments: List[str] = []
+    # Text an explicitly typed constraint has claimed. The user named the field, so that span is
+    # spent whatever the Authority went on to say about the value -- including when it says
+    # nothing. Leaving it readable let the catalog pass below re-read the value against the *other*
+    # level and widen an explicitly scoped query into a second taxonomy field.
+    explicit_fragments: List[str] = []
+    taxonomy_abstain_reason: Optional[str] = None
     operator = "OR" if re.search(r"(?:或|任一|其中之一)", normalized) else "AND"
 
     for match in re.finditer(EXPLICIT_CONSTRAINT_PATTERN, normalized):
         field_name, raw_value = match.group(1), match.group(2)
         value, explicit_operator = _explicit_constraint_value(field_name, raw_value)
+        explicit_fragments.append(match.group(0))
+        if taxonomy is not None and field_name in TAXONOMY_FIELDS:
+            # An explicitly typed field states the taxonomy domain, so the Authority resolves inside
+            # that domain only. This is the one way past a cross-level collision.
+            outcome = _taxonomy_outcome(
+                taxonomy.resolve(raw_value, field=field_name),
+                catalog,
+                source="explicit_field_parser",
+                raw_value=raw_value,
+            )
+            if outcome.decided:
+                taxonomy_decided_fields.add(field_name)
+                taxonomy_decided_fields.update(outcome.fields)
+                taxonomy_abstain_reason = taxonomy_abstain_reason or outcome.abstain_reason
+                _extend_unique(ambiguity_flags, outcome.ambiguity_flags)
+                _extend_unique(parser_warnings, outcome.parser_warnings)
+                if outcome.constraint is not None:
+                    constraints.append(outcome.constraint)
+                parsed_terms.append(match.group(0))
+                matched_fragments.append(match.group(0))
+                continue
         constraints.append(_constraint(field_name, value, explicit_operator, "explicit_field_parser", raw_value=raw_value))
         parsed_terms.append(match.group(0))
         matched_fragments.append(match.group(0))
@@ -564,14 +641,45 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
         matched_fragments.append("夥伴名稱")
 
     field_query = _remove_fragments(normalized, identity_fragments)
-    category_match = _first_catalog_match(field_query, catalog.sales_category_lv1)
-    category_field = "sales_category_lv1"
-    if not category_match:
-        category_match = _first_catalog_match(field_query, catalog.sales_category_lv2)
-        category_field = "sales_category_lv2"
-    if not category_match:
+
+    # The catalog pass reads only text no earlier stage has already claimed. Explicit constraints
+    # are removed in both modes -- with or without an Authority -- because naming the field is the
+    # user stating which field that text belongs to.
+    catalog_query = _remove_fragments(field_query, explicit_fragments)
+    if taxonomy is not None:
+        # Runs on what is left after identity resolution has claimed its fragments, so a brand whose
+        # name happens to equal a taxonomy term is never re-read as vocabulary.
+        for outcome in _scan_taxonomy_terms(
+            _remove_fragments(field_query, matched_fragments), catalog, taxonomy
+        ):
+            if outcome.fields and all(name in taxonomy_decided_fields for name in outcome.fields):
+                continue
+            taxonomy_decided_fields.update(outcome.fields)
+            taxonomy_abstain_reason = taxonomy_abstain_reason or outcome.abstain_reason
+            _extend_unique(ambiguity_flags, outcome.ambiguity_flags)
+            _extend_unique(parser_warnings, outcome.parser_warnings)
+            if outcome.constraint is not None:
+                constraints.append(outcome.constraint)
+                parsed_terms.append(str(outcome.constraint.value))
+            if outcome.matched_text:
+                matched_fragments.append(outcome.matched_text)
+                taxonomy_fragments.append(outcome.matched_text)
+        # A term the Authority has already claimed is spent too. Without this the catalog pass
+        # would re-read the shorter value inside it -- "居家生活相關" claimed as LV2 still contains
+        # the LV1 value "居家生活" -- and add a second, unasked-for constraint beside the first.
+        catalog_query = _remove_fragments(catalog_query, taxonomy_fragments)
+
+    category_match = None
+    category_field = None
+    if "sales_category_lv1" not in taxonomy_decided_fields:
+        category_match = _first_catalog_match(catalog_query, catalog.sales_category_lv1)
+        category_field = "sales_category_lv1" if category_match else None
+    if not category_match and "sales_category_lv2" not in taxonomy_decided_fields:
+        category_match = _first_catalog_match(catalog_query, catalog.sales_category_lv2)
+        category_field = "sales_category_lv2" if category_match else None
+    if not category_match and taxonomy is None:
         for alias, canonical in CATEGORY_ALIASES.items():
-            if _contains_exact_phrase(field_query, alias) and canonical in catalog.sales_category_lv1:
+            if _contains_exact_phrase(catalog_query, alias) and canonical in catalog.sales_category_lv1:
                 category_match = canonical
                 category_field = "sales_category_lv1"
                 matched_fragments.append(alias)
@@ -581,7 +689,11 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
         parsed_terms.append(category_match)
         matched_fragments.append(category_match)
 
-    tag_match = _first_catalog_match(field_query, catalog.content_tags)
+    tag_match = (
+        _first_catalog_match(catalog_query, catalog.content_tags)
+        if "content_tags" not in taxonomy_decided_fields
+        else None
+    )
     if tag_match:
         constraints.append(_constraint("content_tags", tag_match, "contains_exact_tag", "field_resolver"))
         parsed_terms.append(tag_match)
@@ -691,7 +803,11 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
     free_text_terms = _remaining_terms(normalized, matched_fragments)
     semantic_markers = ("如何", "為什麼", "原因", "策略", "比較", "分析", "摘要", "共同", "提升", "成效")
     has_semantic_intent = any(marker in normalized for marker in semantic_markers)
-    if any(item.hard_filter and item.support_status != "supported" for item in constraints):
+    if taxonomy_abstain_reason:
+        # The Authority recognised a term in this query. Whatever else the query looks like, it is a
+        # structured lookup that could not be executed -- not free text to search broadly.
+        query_mode = "structured_lookup"
+    elif any(item.hard_filter and item.support_status != "supported" for item in constraints):
         query_mode = "structured_lookup"
     elif constraints and not has_semantic_intent:
         query_mode = "structured_lookup"
@@ -705,7 +821,12 @@ def build_query_plan(raw_query: str, catalog: QueryCatalog) -> TypedQueryPlan:
         query_mode = "semantic_question"
 
     abstain_reason = None
-    if any(item.hard_filter for item in unsupported_constraints):
+    if taxonomy_abstain_reason:
+        # Deliberately outranks ``unresolved_structured_lookup``: that reason is the one
+        # ``allow_semantic_fallback`` is allowed to clear, and clearing a recognised-but-unusable
+        # taxonomy term would turn a refusal into the broad search this parser must never run.
+        abstain_reason = taxonomy_abstain_reason
+    elif any(item.hard_filter for item in unsupported_constraints):
         abstain_reason = "unsupported_hard_constraint"
     elif any(item.hard_filter for item in invalid_constraints):
         abstain_reason = "invalid_hard_constraint"
@@ -879,6 +1000,205 @@ def _constraint_warning(constraint: QueryConstraint) -> str:
     if constraint.support_status == "invalid":
         return f"搜尋條件「{label}」格式或 operator 無效，未執行近似搜尋。"
     return f"目前正式索引不支援搜尋條件「{label}」，未執行近似搜尋。"
+
+
+@dataclass(frozen=True)
+class _TaxonomyOutcome:
+    """What the Authority decided about one term, before the plan is assembled."""
+
+    decided: bool
+    fields: tuple = ()
+    constraint: Optional[QueryConstraint] = None
+    matched_text: Optional[str] = None
+    ambiguity_flags: tuple = ()
+    parser_warnings: tuple = ()
+    abstain_reason: Optional[str] = None
+
+
+def _taxonomy_outcome(
+    resolution: "TaxonomyResolution",
+    catalog: QueryCatalog,
+    *,
+    source: str,
+    raw_value: object,
+) -> _TaxonomyOutcome:
+    """Turn one Authority resolution into a constraint, or into a refusal.
+
+    The Authority states what a term means; it does not state what the formal index carries. A term
+    it resolves cleanly but the index has never seen is refused here rather than passed through as a
+    constraint that would quietly match nothing, or worse, be relaxed into a broad search.
+    """
+    # Compared as plain strings: ``TaxonomyResolutionStatus`` is a ``str`` enum, so this module does
+    # not import it and the one-way import from the Authority module back to here stays acyclic.
+    if resolution.status == "not_found":
+        return _TaxonomyOutcome(decided=False)
+
+    if resolution.status == "ambiguous":
+        fields = tuple(sorted({candidate_field for candidate_field, _ in resolution.candidates}))
+        labels = "、".join(
+            f"{FIELD_REGISTRY[candidate_field].output_label}：{canonical}"
+            if candidate_field in FIELD_REGISTRY
+            else f"{candidate_field}：{canonical}"
+            for candidate_field, canonical in resolution.candidates
+        )
+        return _TaxonomyOutcome(
+            decided=True,
+            fields=fields,
+            ambiguity_flags=(f"taxonomy_ambiguous_term:{resolution.normalized_alias}",),
+            parser_warnings=(
+                f"搜尋詞「{raw_value}」在 Search Taxonomy Authority 對應多個正式值（{labels}），"
+                "請指定 sales_category_lv1、sales_category_lv2 或 content_tags，未自行選一個。",
+            ),
+            abstain_reason=ABSTAIN_TAXONOMY_AMBIGUOUS,
+        )
+
+    field_name = resolution.field
+    indexed_value = _catalog_display_value(catalog, field_name, resolution.normalized_canonical)
+    label = FIELD_REGISTRY[field_name].output_label if field_name in FIELD_REGISTRY else field_name
+    if indexed_value is None:
+        return _TaxonomyOutcome(
+            decided=True,
+            fields=(field_name,),
+            ambiguity_flags=(f"taxonomy_known_but_not_indexed:{field_name}",),
+            parser_warnings=(
+                f"搜尋詞「{raw_value}」在 Search Taxonomy Authority 對應「{label}："
+                f"{resolution.canonical_value}」，但目前正式索引沒有這個值，未改以廣泛語意搜尋。",
+            ),
+            abstain_reason=ABSTAIN_TAXONOMY_NOT_INDEXED,
+        )
+
+    # The constraint carries the value the index actually holds, not the Authority's display value:
+    # the workbook keeps names such as ``"居家生活 "`` verbatim while ingestion strips them, and the
+    # executor compares against indexed metadata.
+    return _TaxonomyOutcome(
+        decided=True,
+        fields=(field_name,),
+        constraint=_constraint(
+            field_name,
+            indexed_value,
+            TAXONOMY_OPERATORS[field_name],
+            source,
+            raw_value=raw_value,
+        ),
+    )
+
+
+def _is_short_cjk_alias(alias: str) -> bool:
+    """True for a one- or two-character alias in a script that writes without word boundaries."""
+    return 0 < len(alias) <= SHORT_CJK_ALIAS_MAX_LENGTH and not alias.isascii()
+
+
+def _short_cjk_alias_is_free_standing(query: str, alias: str) -> bool:
+    """Whether a short CJK alias may bind here, i.e. it is not only an embedded substring.
+
+    Anything that is not a short CJK alias passes untouched: ASCII terms already carry their own
+    boundary assertion, and a longer term is specific enough that an incidental match is not the
+    failure mode. For the short ones, one occurrence outside a longer CJK run is enough -- a query
+    naming the term plainly still resolves, while ``狗`` inside ``熱狗堡`` does not.
+    """
+    if not _is_short_cjk_alias(alias):
+        return True
+    start = query.find(alias)
+    while start != -1:
+        end = start + len(alias)
+        before = query[start - 1] if start else ""
+        after = query[end] if end < len(query) else ""
+        if not _CJK_CHAR_RE.match(before) and not _CJK_CHAR_RE.match(after):
+            return True
+        start = query.find(alias, start + 1)
+    return False
+
+
+def _scan_taxonomy_terms(
+    query: str, catalog: QueryCatalog, taxonomy: "SearchTaxonomy"
+) -> List[_TaxonomyOutcome]:
+    """Read every Authority term stated in the remaining free text, longest term first.
+
+    Longest-first with removal is what keeps ``美食相關`` from also registering the ``美食`` inside
+    it: the winning term is taken out of the query before the next pass looks. Length is a property
+    of the terms themselves, so this is not workbook row order deciding anything.
+    """
+    outcomes: List[_TaxonomyOutcome] = []
+    remaining = query
+    aliases = taxonomy.aliases_longest_first()
+    for _ in range(TAXONOMY_SCAN_LIMIT):
+        if not remaining:
+            break
+        alias = next(
+            (
+                item
+                for item in aliases
+                # The cheap containment test first, then the parser's own phrase rule, so an ASCII
+                # term such as ``pet`` still needs a boundary and does not match inside ``carpet``.
+                if item in remaining
+                and _contains_exact_phrase(remaining, item)
+                and _short_cjk_alias_is_free_standing(remaining, item)
+            ),
+            None,
+        )
+        if alias is None:
+            break
+        outcome = _taxonomy_outcome(
+            taxonomy.resolve(alias), catalog, source=TAXONOMY_SOURCE, raw_value=alias
+        )
+        if outcome.decided:
+            outcomes.append(replace(outcome, matched_text=alias))
+        remaining = _remove_fragments(remaining, [alias])
+
+    if not outcomes and _looks_like_lookup(query):
+        suggestion = _taxonomy_suggestion(query, taxonomy)
+        if suggestion is not None:
+            outcomes.append(suggestion)
+    return outcomes
+
+
+def _taxonomy_suggestion(query: str, taxonomy: "SearchTaxonomy") -> Optional[_TaxonomyOutcome]:
+    """Offer the nearest official terms for an unrecognised lookup, and nothing else.
+
+    A suggestion decides no field, adds no constraint and sets no abstain reason. It cannot pick a
+    side of an ambiguity either: a term one edit away from two canonical values is reported as two
+    suggestions for a human to choose between.
+    """
+    for term in _unique([query, *re.split(r"\s+", query)]):
+        suggestions = taxonomy.suggest_similar(term)
+        if not suggestions:
+            continue
+        names = "、".join(
+            f"{FIELD_REGISTRY[item.field].output_label}：{item.canonical_value}"
+            if item.field in FIELD_REGISTRY
+            else f"{item.field}：{item.canonical_value}"
+            for item in suggestions
+        )
+        return _TaxonomyOutcome(
+            decided=True,
+            ambiguity_flags=(f"taxonomy_typo_suggestion:{term}",),
+            parser_warnings=(
+                f"搜尋詞「{term}」不在 Search Taxonomy Authority；最接近的正式詞彙為 {names}。"
+                "未自動更正，也未建立搜尋條件。",
+            ),
+        )
+    return None
+
+
+def _catalog_display_value(
+    catalog: QueryCatalog, field_name: Optional[str], normalized_canonical: Optional[str]
+) -> Optional[str]:
+    """The runtime catalog's own value for a canonical the Authority resolved, if the index has one."""
+    values = {
+        "sales_category_lv1": catalog.sales_category_lv1,
+        "sales_category_lv2": catalog.sales_category_lv2,
+        "content_tags": catalog.content_tags,
+    }.get(field_name or "", [])
+    for value in values:
+        if normalize_exact_value(value) == normalized_canonical:
+            return value
+    return None
+
+
+def _extend_unique(target: List[str], values: Iterable[str]) -> None:
+    for value in values:
+        if value not in target:
+            target.append(value)
 
 
 def _first_catalog_match(query: str, values: Sequence[str], handle: bool = False) -> Optional[str]:

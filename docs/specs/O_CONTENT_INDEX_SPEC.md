@@ -73,6 +73,51 @@ mka build-content-index [--vault obsidian_vault] [--namespace MKA]
 - [ ] 全套 pytest 全綠;不改既有測試斷言
 - [ ] Real-data smoke:對真實 vault 跑 plan → 預期 13 掃描 / 12 可索引 / 1 `vault_only`;再跑 `--confirm` → 斷言全過;然後 `mka ask "<某已知內容詞>" --db .mka/content_index.sqlite --restricted-customers reports/excel_preview/restricted_customers.json` 能回答且 citation 帶溯源。回報只貼計數與斷言結果,不貼品牌名
 
+## 6b. Confirmed production re-index 的 lineage 前提(2026-08-26 加入)
+
+`build-content-index --confirm` 現在有 row_v1 lineage gate。沒有明確 evidence 一律拒絕,
+並且在寫任何 report、刪除既有 DB、chunking 或重建 SQLite **之前**就拒絕;既有 DB 連同
+`-wal`/`-shm` sidecar 維持 byte-identical。
+
+三個路徑必須同時提供,缺一即拒:
+
+```text
+--lineage-apply-dir
+--lineage-sync-plan
+--lineage-sync-manifest
+```
+
+gate 驗證 sync manifest 綁定以下欄位:
+
+```text
+plan_sha256
+plan_state_hash
+apply_dir
+record_identity_scheme_version
+row_v1_workbook_sha256
+```
+
+**操作前提(independent review 2026-08-26 實測確認):**
+現存所有正式 obsidian sync manifest 都在這些欄位加入之前產生,因此**一份都無法通過 gate**。
+這是正確的 fail-closed,不是缺陷:舊 receipt 沒有把 plan bytes、plan state 與 workbook lineage
+綁在一起,無法證明它同步的就是現在 Vault 裡的那批 merchant 檔案。
+
+因此在 CONFIRMED PRODUCTION REINDEX 之前,必須先:
+
+1. 在 candidate code 下重新執行 `sync-obsidian execute`,產生符合新 contract 的 manifest;
+2. 該次 sync 的 apply 目錄、plan 與 manifest 經人工 review;
+3. 才能把三個 `--lineage-*` 路徑交給 `build-content-index --confirm`。
+
+`lineage_gate=PASSED` 與 `production_reindex_ready=true` 只代表證據鏈可驗,**不等於**
+production re-index 已被授權;授權是獨立的人工決策。
+
+本輪(Consolidated Blocker Remediation R1)只更新本文件,未執行 production sync:
+
+```text
+PRODUCTION_REINDEX_AUTHORIZED=NO
+PRODUCTION_REINDEX_RUN=NO
+```
+
 ## 7. 完成判準(= ROADMAP Stage 1 的關卡)
 
 `mka ask` 能對真實 12 篇內容回答、citation 完整、internal-only 內容帶 warning、denylist 查詢被既有 GR-1 防線攔截。達成後 Stage 2(gating)開工。

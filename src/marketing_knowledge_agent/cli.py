@@ -30,6 +30,7 @@ from .content_index import (
     ContentIndexError,
     build_content_index,
 )
+from .content_index_lineage import ContentIndexLineageEvidence
 from .evaluation import evaluate
 from .excel_preview import ExcelPreviewError, generate_excel_preview
 from .ingestion import IngestionError
@@ -196,6 +197,13 @@ from .pipeline import (
 )
 from .query_gating import precheck_restricted_query
 from .retrieval import result_to_dict
+from .search_evaluation import (
+    SearchEvaluationError,
+    evaluate_search_cases,
+    load_search_quality_cases,
+    render_evaluation_markdown,
+)
+from .search_taxonomy import SearchTaxonomyError, load_search_taxonomy
 from .review_template import ReviewTemplateError, generate_review_template
 from .review_decision_validation import ReviewDecisionValidationError, validate_review_decisions
 from .stable_record_crosswalk import (
@@ -250,6 +258,7 @@ def main(argv=None) -> int:
                 filters=filters,
                 limit=args.limit,
                 mode=args.mode,
+                taxonomy=_search_taxonomy_from_args(args),
             )
             payload = [result_to_dict(result) for result in results]
             print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -266,6 +275,7 @@ def main(argv=None) -> int:
                 restricted_customers_path=args.restricted_customers,
                 provider_name=args.provider,
                 dry_run_llm=args.dry_run_llm,
+                taxonomy=_search_taxonomy_from_args(args),
             )
             _print_answer(answer)
             return 0
@@ -284,11 +294,40 @@ def main(argv=None) -> int:
                 limit=args.limit,
                 mode=args.mode,
                 governance_index=governance_index,
+                taxonomy=_search_taxonomy_from_args(args),
             )
             if load_warning:
                 payload["warnings"] = [load_warning]
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
+
+        if args.command == "evaluate-search":
+            cases = load_search_quality_cases(args.cases)
+            report = evaluate_search_cases(
+                cases,
+                db_path=args.db,
+                taxonomy=_search_taxonomy_from_args(args),
+                limit=args.limit,
+            )
+            if args.output is not None:
+                args.output.mkdir(parents=True, exist_ok=True)
+                (args.output / "search_evaluation.json").write_text(
+                    json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                (args.output / "search_evaluation.md").write_text(
+                    render_evaluation_markdown(report), encoding="utf-8"
+                )
+            print(json.dumps(report.summary, ensure_ascii=False, indent=2))
+            # A search-quality regression, not a crash. Both halves matter: any Golden failure,
+            # and any failure the dataset has not already recorded by exact failure class. A
+            # Negative case is what stands between a refusal and a confident wrong answer, so a
+            # new Negative failure has to fail this command too.
+            return (
+                0
+                if report.summary["golden_fail"] == 0
+                and report.summary["unexpected_failures"] == 0
+                else 1
+            )
 
         if args.command == "agent-ask":
             filters = _filters_from_args(args)
@@ -301,6 +340,7 @@ def main(argv=None) -> int:
                 restricted_customers_path=args.restricted_customers,
                 provider_name=args.provider,
                 dry_run_llm=args.dry_run_llm,
+                taxonomy=_search_taxonomy_from_args(args),
             )
             _print_answer(answer)
             if args.show_trace:
@@ -947,12 +987,32 @@ def main(argv=None) -> int:
                 return 0
 
         if args.command == "build-content-index":
+            lineage_paths = (
+                args.lineage_apply_dir,
+                args.lineage_sync_plan,
+                args.lineage_sync_manifest,
+            )
+            if any(lineage_paths) and not all(lineage_paths):
+                raise ContentIndexError(
+                    "lineage evidence requires --lineage-apply-dir, --lineage-sync-plan, "
+                    "and --lineage-sync-manifest together"
+                )
+            lineage_evidence = (
+                ContentIndexLineageEvidence(
+                    apply_dir=args.lineage_apply_dir,
+                    sync_plan_path=args.lineage_sync_plan,
+                    sync_manifest_path=args.lineage_sync_manifest,
+                )
+                if all(lineage_paths)
+                else None
+            )
             summary = build_content_index(
                 vault_path=args.vault,
                 namespace=args.namespace,
                 db_path=args.db,
                 report_dir=args.report_dir,
                 confirm=args.confirm,
+                lineage_evidence=lineage_evidence,
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return summary["exit_code"]
@@ -1084,6 +1144,12 @@ def main(argv=None) -> int:
     except SlackInterfaceError as exc:
         print(f"slack interface error: {exc}", file=sys.stderr)
         return 2
+    except SearchTaxonomyError as exc:
+        print(f"search taxonomy error: {exc}", file=sys.stderr)
+        return 2
+    except SearchEvaluationError as exc:
+        print(f"search evaluation error: {exc}", file=sys.stderr)
+        return 2
     except FileNotFoundError as exc:
         print(f"file error: {exc}", file=sys.stderr)
         return 2
@@ -1114,12 +1180,14 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("query")
     _add_retrieval_args(search_parser)
     _add_governance_args(search_parser)
+    _add_search_taxonomy_args(search_parser)
 
     ask_parser = subparsers.add_parser("ask", help="Generate a mock RAG answer with citations")
     ask_parser.add_argument("question")
     _add_retrieval_args(ask_parser)
     _add_governance_args(ask_parser)
     _add_llm_args(ask_parser)
+    _add_search_taxonomy_args(ask_parser)
 
     agent_ask_parser = subparsers.add_parser(
         "agent-ask",
@@ -1129,6 +1197,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_retrieval_args(agent_ask_parser)
     _add_governance_args(agent_ask_parser)
     _add_llm_args(agent_ask_parser)
+    _add_search_taxonomy_args(agent_ask_parser)
     agent_ask_parser.add_argument("--show-trace", action="store_true")
 
     explain_parser = subparsers.add_parser(
@@ -1138,6 +1207,37 @@ def build_parser() -> argparse.ArgumentParser:
     explain_parser.add_argument("query")
     _add_retrieval_args(explain_parser)
     _add_governance_args(explain_parser)
+    _add_search_taxonomy_args(explain_parser)
+
+    evaluate_search_parser = subparsers.add_parser(
+        "evaluate-search",
+        help=(
+            "Run the Golden/Negative search-quality case set read-only against one index and one "
+            "pinned taxonomy"
+        ),
+    )
+    # No --db default on purpose: an evaluation must never fall through to whichever index happens
+    # to sit at the conventional path, and a production index must be handed in as a copy because
+    # the index reader opens read-write.
+    evaluate_search_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="Index to evaluate; pass a copy when measuring a production index",
+    )
+    evaluate_search_parser.add_argument(
+        "--cases",
+        type=Path,
+        default=Path("tests/fixtures/search_quality_cases.json"),
+    )
+    evaluate_search_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Directory to write the JSON and Markdown report into; omit to print the summary only",
+    )
+    evaluate_search_parser.add_argument("--limit", type=int, default=20)
+    _add_search_taxonomy_args(evaluate_search_parser)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="Run built-in prototype evaluation cases")
     evaluate_parser.add_argument("--vault", type=Path, default=DEFAULT_VAULT)
@@ -2223,6 +2323,9 @@ def build_parser() -> argparse.ArgumentParser:
     content_index_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
     content_index_parser.add_argument("--report-dir", type=Path, default=DEFAULT_CONTENT_INDEX_REPORT_DIR)
     content_index_parser.add_argument("--confirm", action="store_true")
+    content_index_parser.add_argument("--lineage-apply-dir", type=Path, default=None)
+    content_index_parser.add_argument("--lineage-sync-plan", type=Path, default=None)
+    content_index_parser.add_argument("--lineage-sync-manifest", type=Path, default=None)
 
     slack_parser = subparsers.add_parser(
         "slack-bot",
@@ -2254,6 +2357,42 @@ def _add_schema_v2_confirmation_authority_args(parser: argparse.ArgumentParser) 
     )
     parser.add_argument("--target", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_TARGET)
     parser.add_argument("--temporary-root", type=Path, default=None)
+
+
+def _add_search_taxonomy_args(parser: argparse.ArgumentParser) -> None:
+    """Opt in to a pinned Search Taxonomy Authority. There is no production default.
+
+    The path and the hash are one argument in two halves. A path alone would let whatever file sits
+    there today decide what search terms mean, and a hash alone names nothing, so either both are
+    given or neither is.
+    """
+    parser.add_argument(
+        "--search-taxonomy-workbook",
+        type=Path,
+        default=None,
+        help=(
+            "Read-only Search Taxonomy Authority workbook to resolve Sales Category LV1/LV2 and "
+            "content tags; requires --search-taxonomy-sha256"
+        ),
+    )
+    parser.add_argument(
+        "--search-taxonomy-sha256",
+        default=None,
+        help="Expected sha256 of --search-taxonomy-workbook; both must be given together",
+    )
+
+
+def _search_taxonomy_from_args(args: argparse.Namespace):
+    workbook = getattr(args, "search_taxonomy_workbook", None)
+    expected_sha256 = getattr(args, "search_taxonomy_sha256", None)
+    if workbook is None and expected_sha256 is None:
+        return None
+    if workbook is None or expected_sha256 is None:
+        raise SearchTaxonomyError(
+            "--search-taxonomy-workbook and --search-taxonomy-sha256 must be given together; "
+            "a taxonomy workbook is only trusted when it is pinned"
+        )
+    return load_search_taxonomy(workbook_path=workbook, expected_sha256=expected_sha256)
 
 
 def _add_retrieval_args(parser: argparse.ArgumentParser) -> None:

@@ -170,7 +170,8 @@ def execute_sync_plan(
     if conflict_count and not allow_conflicts_skip:
         raise ObsidianSyncError("plan contains conflict entries; resolve them or use --allow-conflicts-skip")
 
-    assert_row_v1_lineage(resolve_apply_lineage(apply_dir), operation="sync-obsidian execute")
+    lineage_status = resolve_apply_lineage(apply_dir)
+    assert_row_v1_lineage(lineage_status, operation="sync-obsidian execute")
     _assert_apply_summary_safe(apply_dir)
     restricted_index = _load_restricted_index(apply_dir)
     _assert_denylist_final_gate(plan, apply_dir, restricted_index)
@@ -193,8 +194,17 @@ def execute_sync_plan(
         "status": "running",
         "batch_id": batch_id,
         "plan_path": str(plan_path),
+        "plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+        "plan_state_hash": plan.get("plan_state_hash"),
+        "apply_dir": str(apply_dir),
         "vault": str(vault_path),
         "namespace": plan.get("namespace", DEFAULT_NAMESPACE),
+        "record_identity_scheme_version": lineage_status.get(
+            "record_identity_scheme_version"
+        ),
+        "row_v1_workbook_sha256": (
+            lineage_status.get("expected_workbook") or {}
+        ).get("sha256"),
         "actions": [],
     }
     _write_json(manifest_path, manifest)

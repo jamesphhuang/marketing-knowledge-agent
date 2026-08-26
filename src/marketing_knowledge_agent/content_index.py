@@ -12,12 +12,22 @@ from typing import Any, Dict, List, Optional
 from pydantic import ValidationError
 
 from .chunking import chunk_documents
+from .content_index_lineage import (
+    LINEAGE_GATE_PASSED,
+    ContentIndexLineageEvidence,
+    evaluate_content_index_lineage,
+)
 from .frontmatter import FrontmatterError, parse_markdown_with_frontmatter
 from .governance import GovernanceIndex, RestrictedCustomerRecord, split_restricted_aliases
 from .indexing import SQLiteIndex
 from .ingestion import stable_id
 from .models import Document, DocumentMetadata
 from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, search_index
+from .stable_record_shadow import (
+    ShadowResolution,
+    ShadowResolutionStatus,
+    StableRecordShadow,
+)
 
 
 MANAGED_BY = "marketing-knowledge-agent"
@@ -56,6 +66,8 @@ class ContentIndexPlan:
     latest_sync_batch_id: Optional[str]
     included: List[IncludedRecord]
     excluded: List[ExcludedRecord]
+    lineage_summary: Dict[str, object]
+    stable_record_shadow_summary: Optional[Dict[str, object]] = None
 
     @property
     def exclusion_counts(self) -> Dict[str, int]:
@@ -83,7 +95,12 @@ def normalize_vault_frontmatter(meta: dict) -> dict:
     return normalized
 
 
-def create_content_index_plan(vault_path: Path, namespace: str = "MKA") -> ContentIndexPlan:
+def create_content_index_plan(
+    vault_path: Path,
+    namespace: str = "MKA",
+    stable_record_shadow: Optional[StableRecordShadow] = None,
+    lineage_evidence: Optional[ContentIndexLineageEvidence] = None,
+) -> ContentIndexPlan:
     vault_path = Path(vault_path)
     namespace_path = vault_path / namespace
     if not namespace_path.is_dir():
@@ -98,6 +115,7 @@ def create_content_index_plan(vault_path: Path, namespace: str = "MKA") -> Conte
     excluded: List[ExcludedRecord] = []
     managed_count = 0
     sync_batch_ids = []
+    shadow_resolutions: List[ShadowResolution] = []
 
     for path in markdown_files:
         relative_path = path.relative_to(namespace_path).as_posix()
@@ -149,6 +167,24 @@ def create_content_index_plan(vault_path: Path, namespace: str = "MKA") -> Conte
             metadata_payload = normalize_vault_frontmatter(frontmatter)
             metadata_payload.setdefault("source_path", f"{namespace}/{relative_path}")
             metadata = DocumentMetadata(**metadata_payload)
+            if stable_record_shadow is not None:
+                resolution = stable_record_shadow.resolve(
+                    record_type=metadata.record_type,
+                    source_sheet=metadata.source_sheet,
+                    source_row=metadata.source_row,
+                )
+                if metadata.record_type == "merchant_case":
+                    shadow_resolutions.append(resolution)
+                if resolution.status is ShadowResolutionStatus.RESOLVED:
+                    if (
+                        metadata.stable_record_id is not None
+                        and metadata.stable_record_id != resolution.stable_record_id
+                    ):
+                        raise ContentIndexError(
+                            "frontmatter stable_record_id disagrees with the pinned shadow authority"
+                        )
+                    metadata_payload["stable_record_id"] = resolution.stable_record_id
+                    metadata = DocumentMetadata(**metadata_payload)
         except (ContentIndexError, ValidationError, TypeError, ValueError) as exc:
             excluded.append(
                 ExcludedRecord(relative_path, "metadata_parse_error", record_type=record_type, detail=str(exc))
@@ -170,6 +206,16 @@ def create_content_index_plan(vault_path: Path, namespace: str = "MKA") -> Conte
         latest_sync_batch_id=max(sync_batch_ids) if sync_batch_ids else None,
         included=included,
         excluded=excluded,
+        lineage_summary=evaluate_content_index_lineage(
+            vault_path=vault_path,
+            namespace=namespace,
+            evidence=lineage_evidence,
+        ),
+        stable_record_shadow_summary=(
+            stable_record_shadow.coverage_summary(shadow_resolutions)
+            if stable_record_shadow is not None
+            else None
+        ),
     )
 
 
@@ -180,12 +226,28 @@ def build_content_index(
     report_dir: Path = DEFAULT_CONTENT_INDEX_REPORT_DIR,
     confirm: bool = False,
     restricted_customers_path: Path = DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    stable_record_shadow: Optional[StableRecordShadow] = None,
+    lineage_evidence: Optional[ContentIndexLineageEvidence] = None,
 ) -> dict:
     db_path = Path(db_path)
     report_dir = Path(report_dir)
-    plan = create_content_index_plan(vault_path, namespace=namespace)
+    plan = create_content_index_plan(
+        vault_path,
+        namespace=namespace,
+        stable_record_shadow=stable_record_shadow,
+        lineage_evidence=lineage_evidence,
+    )
     assertions = _not_run_assertions()
     summary = _summary(plan, db_path, report_dir, confirm, assertions)
+
+    # Confirm is a mutation path. Refuse before reports, anomaly cleanup, or SQLite writes so a
+    # missing/invalid row_v1 receipt cannot alter an existing formal database in any way.
+    if confirm and plan.lineage_summary.get("lineage_gate") != LINEAGE_GATE_PASSED:
+        raise ContentIndexError(
+            "content index row_v1 lineage gate failed before database write: "
+            + str(plan.lineage_summary.get("lineage_detail"))
+        )
+
     _write_build_report(plan, summary, report_dir / "build_report.md")
 
     if not confirm:
@@ -317,7 +379,7 @@ def _summary(
     confirm: bool,
     assertions: Dict[str, str],
 ) -> dict:
-    return {
+    summary = {
         "mode": "confirm" if confirm else "plan",
         "vault_path": str(plan.vault_path),
         "namespace": plan.namespace,
@@ -331,7 +393,11 @@ def _summary(
         "anomaly_count": plan.anomaly_count,
         "latest_sync_batch_id": plan.latest_sync_batch_id,
         "assertions": dict(assertions),
+        **plan.lineage_summary,
     }
+    if plan.stable_record_shadow_summary is not None:
+        summary["stable_record_shadow"] = dict(plan.stable_record_shadow_summary)
+    return summary
 
 
 def _write_build_report(plan: ContentIndexPlan, summary: dict, path: Path) -> None:
@@ -350,6 +416,11 @@ def _write_build_report(plan: ContentIndexPlan, summary: dict, path: Path) -> No
         f"- Indexable files: {summary['indexable_count']}",
         f"- Excluded files: {summary['excluded_count']}",
         f"- Latest sync_batch_id: `{summary['latest_sync_batch_id'] or ''}`",
+        f"- Record identity scheme: `{summary['record_identity_scheme']}`",
+        f"- Lineage gate: `{summary['lineage_gate']}`",
+        f"- Lineage evidence: `{summary['lineage_evidence']}`",
+        f"- Production reindex ready: `{str(summary['production_reindex_ready']).lower()}`",
+        f"- Lineage detail: {_md(summary.get('lineage_detail'))}",
         "",
         "## Exclusion Counts",
         "",
