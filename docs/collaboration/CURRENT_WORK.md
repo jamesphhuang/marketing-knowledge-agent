@@ -6,73 +6,72 @@
 
 - State: active
 - Task: Development Governance Fast Lane v1
-- Implementer: James Huang (ChatGPT-guided terminal execution)
+- Implementer: OpenAI Codex
 - Reviewer: independent review pending
 - Branch: codex/impl/governance-fast-lane-v1
-- Baseline commit: dd215c6b4199c221288720d6d702eff0c15ed0a9
-- Intended scope: automate repetitive Git/governance verification and safe main promotion while preserving fail-closed checks, explicit staging, independent review, and high-risk authorization boundaries.
+- Baseline commit: 668e401131128933975cac1523c6165f3ece2dd7
+- Intended scope: `tools/governance_*.py`, `tools/review_packet.py`, `tools/promote_main.py`, their targeted tests, `docs/governance/FAST_LANE.md`, and the minimum collaboration-process updates required for START / REVIEW_READY / CLOSED.
+- Lifecycle: REVIEW_READY
 - Started at: 2026-08-26T15:04:16+08:00
-- Last updated: 2026-08-26T15:04:16+08:00
+- Last updated: 2026-08-26T15:24:34+08:00
 
 ## Objective and done definition
 
-- Objective: prepare, independently review, and govern the accepted M3E integration candidate without changing activation or production state.
-- Done when: the exact M3E lineage is integrated into the isolated candidate branch, independently reviewed and accepted, governance evidence is committed and pushed, and the candidate task lock is released without updating `main`.
+- Objective: replace repetitive Git/governance checks with deterministic, fail-closed candidate verification, reviewer-packet generation, and an explicitly authorized, dry-run-by-default main-promotion tool.
+- Done when: the three CLIs share one risk policy, reject HIGH-risk Fast Lane promotion, emit machine-readable evidence, pass targeted and relevant tests, document the external authorization boundary, and reach `REVIEW_READY` without staging, committing, pushing, changing `main`, or mutating production/Authority/Vault/content-index state.
 
 ## Progress
 
 ### Completed
 
-- Integration worktree created from main at `f4988e346bb1dc5c9534feafbea81c45a2a958b0`.
-- M3E source branch independently accepted and closed at `5673cf766027454efc98be3ae19fac5ba2742f31`.
-- Integration task lock acquired in commit `4c9ac9fb222fd2038fe6f5dcc1e419c9070be1a0`.
-- Source lineage and exact integration scope verified before merge.
-- M3E governance lineage merged in commit `eebf5344e0fd0a0aff86e6bd5596df1e53ecd6c5`.
-- `M3E_INTEGRATION_VERIFICATION=PASS`.
-- `NON_GOVERNANCE_DRIFT=NONE`.
-- Integration-verification governance commit `49a2b038f7ac58f34d5af1cf731d911b4630909e` created and pushed.
-- Independent integration review completed with verdict `PASS_WITH_NONBLOCKING_FINDINGS`.
-- Governance decision `DEC-20260826-03`: `M3E_INTEGRATION_ACCEPTANCE=APPROVED`.
-- IR1 stale workflow state corrected by this governance update.
-- IR2 AppleDouble Git-ref metadata retained as a separate repository-hygiene backlog item.
-- Independent-acceptance governance commit `93e1b6fe4674afa4bab48e43fce1cc853a58e694` created, verified, and pushed.
-- Integration candidate governance phase closed without updating `main`.
-- Stable Record V2 activation, row_v1 retirement, and production re-index remain unauthorized.
-- Source `DECISIONS.md`, M3E handoff, and independent-review record match the accepted M3E source.
-- Governance boundaries remain unchanged: Stable Record V2 not activated, row_v1 not retired, and production re-index not authorized.
+- START lifecycle point recorded for Development Governance Fast Lane v1.
+- Isolated worktree, branch, baseline, clean state, same-task active lock, and prior integration-task release verified.
+- Added centralized fail-closed policy in `tools/governance_policy.py` for Git inspection, FAST / STANDARD / HIGH classification, rename-safe path evaluation, formal authorization-transition detection, and exact-SHA evidence validation.
+- Added `governance_gate.py` candidate verification / promotion preflight with deterministic env or JSON evidence and non-zero safety failures.
+- Added deterministic read-only `review_packet.py` Markdown output and explicit reviewer mutation-verification instructions.
+- Added dry-run-by-default `promote_main.py`; execution requires both explicit switches, uses only `<candidate-sha>:refs/heads/main`, never force, and verifies remote main after push.
+- Added 25 targeted temporary-repository / local-bare-remote tests covering clean/failure/risk/evidence/dry-run/execute/post-push/injection boundaries.
+- Added `docs/governance/FAST_LANE.md`, the proposed decision record, and the future START / REVIEW_READY / CLOSED lifecycle rule.
+- Stable Record V2 activation, row_v1 retirement, Authority/Vault/content-index mutation, production re-index, production changes, and main update remain out of scope and unauthorized.
 
 ### In progress
 
-- none
+- Independent review pending; reviewer remains read-only and does not acquire the implementation lock.
 
 ### Not started
 
-- Update `main` only under a separate explicit authorization and governance step.
+- Candidate commit, reviewer packet for that immutable candidate SHA, independent review, acceptance adjudication, push, main promotion, and CLOSED lifecycle update.
 
 ## Verification
 
-- Run: integration worktree HEAD/clean preflight; source ancestry; exact commit/file scope; merge-parent verification; four-file governance scope; no non-governance drift; source-governance file equality; governance-boundary preservation; diff checks; independent integration review.
-- Result: `M3E_INTEGRATION_VERIFICATION=PASS`.
-- Independent review: `PASS_WITH_NONBLOCKING_FINDINGS`.
-- Governance adjudication: `M3E_INTEGRATION_ACCEPTANCE=APPROVED`.
-- Reviewer mutation check: `REVIEWER_MODIFIED_CANDIDATE=NO`.
+- Initial: `git status --short --branch`, branch/HEAD/baseline verification, required collaboration/governance document readback, and repository/tool/test inventory. Initial worktree was clean at `668e401131128933975cac1523c6165f3ece2dd7`; branch has no upstream, so `git pull --ff-only` was not possible without changing tracking configuration.
+- Targeted: `pytest -q tests/test_governance_gate.py tests/test_review_packet.py tests/test_promote_main.py` — 25 passed.
+- Relevant existing: `pytest -q tests/test_git_provenance.py` — 8 passed.
+- Combined final run: 33 passed in 10.39s using the primary checkout's existing `.venv` against this isolated worktree; no dependency download.
+- Python compatibility: Python 3.9 `py_compile` passed for all four tool modules.
+- Static safety readback: no `shell=True`; no stage/commit/merge/rebase/amend/reset/switch path; execute-path Git trace proved explicit non-force refspec; hostile ref input did not execute shell content.
+- CLI surface: all three `--help` paths executed successfully.
+- `git diff --check`: passed after final implementation/docs changes before this REVIEW_READY record update.
+- Independent review: pending.
+- Candidate risk: `STANDARD` because the scope contains tools, tests, protected governance docs, and lifecycle records; STANDARD requires independent-review plus acceptance evidence before any Fast Lane promotion.
+- Known limitations: path/contract classification is conservative rather than semantic proof; evidence schema cannot authenticate a human identity; concurrent main coordination remains external; reviewer packet requires an immutable committed candidate SHA.
 - `MAIN_UPDATE_AUTHORIZED=NO`.
-- Not run: final `main` update or post-main-update verification.
+- `MAIN_UPDATED=NO`; `PRODUCTION_CHANGED=NO`; no stage, commit, push, Authority/Vault/content-index mutation, production call, or production process action performed.
+- Not run: full application suite (standalone development-governance tool surface; targeted plus existing Git-provenance coverage run), lint/type checks (no configured ruff/black/mypy/flake8 command), or independent review.
 
 ## Next exact action
 
-- Integration candidate governance is closed. Obtain separate explicit authorization before any update to `main`.
+- After explicit file-scope review, an authorized operator may create one narrow candidate commit; then an independent reviewer runs the generated reviewer packet and records exact-SHA evidence. Do not update main under this task's current authorization state.
 
 ## Blockers and unresolved user questions
 
 - Stable Record V2 activation remains unauthorized.
 - `row_v1` retirement remains unauthorized.
 - Production re-index remains unauthorized.
-- Existing build-content-index lineage finding remains a hard blocker for production re-index.
+- Independent review and acceptance evidence are required before promotion eligibility can be assessed.
 - Unresolved user questions: none.
 
 ## Release or transfer
 
-- Lock released/transfer accepted by: James Huang (ChatGPT-guided terminal execution)
-- Released/transferred at: 2026-08-26T13:52:35+08:00
-- Handoff reference: `docs/collaboration/REVIEW_WP0-4b-M3E-INTEGRATION_2026-08-26.md`
+- Lock remains active; independent reviewer does not acquire the implementation lock.
+- Handoff reference: this REVIEW_READY record plus `docs/governance/FAST_LANE.md`; implementation remains uncommitted by explicit user instruction.

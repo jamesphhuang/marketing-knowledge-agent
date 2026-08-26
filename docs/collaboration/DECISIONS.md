@@ -190,3 +190,27 @@ Future Stable Record V2 activation must continue to externally bind the reviewed
 `content_digest` alone is not sufficient as an activation trust anchor.
 
 This decision does not authorize updating `main`, Stable Record V2 activation, row_v1 retirement, Authority mutation, Vault/content-index mutation, alias/asset/payload mutation, or production re-index.
+
+## DEC-20260826-04 — Development Governance Fast Lane v1 candidate policy
+
+- Status: proposed; pending independent review.
+- Task: Development Governance Fast Lane v1.
+- Decision: centralize deterministic candidate verification, risk classification, reviewer-packet
+  generation, and dry-run-by-default main-promotion preflight in a shared executable policy.
+- Risk tiers: explicitly allowlisted low-risk docs are `FAST`; normal engineering and unknown paths
+  are at least `STANDARD`; Authority/stable-identity/content-index/formal-data/Vault/security/
+  credential/migration/production/deployment boundaries are `HIGH`.
+- Fail-closed boundary: `HIGH` is never Fast Lane eligible, including when Git checks pass or the
+  operator supplies review, acceptance, execute, and authorization-confirmation flags.
+- Evidence: FAST requires exact base/candidate-bound acceptance evidence; STANDARD additionally
+  requires independent-review evidence and a verified no-reviewer-mutation assertion.
+- Authorization: CLI execution flags only record the operator's declaration that external human
+  authorization already exists. The script cannot create authorization.
+- Push contract: dry-run is default; execution uses only the resolved candidate SHA to the explicit
+  `refs/heads/main` destination, never force, and verifies remote main after push.
+- Collaboration lifecycle: future `CURRENT_WORK` records use the primary points `START`,
+  `REVIEW_READY`, and `CLOSED`; machine-generated intermediate command detail stays in evidence
+  artifacts instead of being copied line-by-line into the durable task record.
+- Governance state: this proposed decision does not authorize a main update or any Stable Record V2,
+  row_v1, Authority, Vault/content-index, alias/asset/payload, production config/process, deployment,
+  or production re-index change.

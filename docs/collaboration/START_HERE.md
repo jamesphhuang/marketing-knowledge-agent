@@ -36,6 +36,13 @@
 2. 發生重大或不可逆決策時：立即追加至 `DECISIONS.md`。
 3. 任務完成或中斷時：記錄完成、進行中、未開始、驗證、下一步與待決問題，然後釋放或轉移任務鎖定。
 
+Fast Lane v1 起，未來任務的主要 lifecycle 紀錄收斂為 `START`、`REVIEW_READY`、
+`CLOSED`：開始時取得 lock；implementation candidate 完成時記錄實際變更、驗證、風險與
+independent review pending，並保留 lock；review / adjudication / integration 完成後才關閉或
+移交。逐次 `stage`、`status`、`diff`、`grep`、commit、push 的 deterministic 細節不再逐項
+永久搬進 `CURRENT_WORK.md`，但重大決策仍須即時追加 `DECISIONS.md`，需要審查的
+machine-readable evidence 仍須保存。此規則不重寫既有歷史。
+
 ## Obsidian collaboration vault
 
 另建獨立 Vault，例如 `MKA Collaboration`，以 Obsidian Sync 的標準加密同步兩台電腦與手機；不要同時交由其他雲端服務同步。
