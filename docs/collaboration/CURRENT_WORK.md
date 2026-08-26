@@ -5,74 +5,66 @@
 ## Lock
 
 - State: active
+- Milestone state: REVIEW_READY_DEVELOPMENT_FIRST
 - Task: Stable Record V2 Shadow Integration
-- Implementer: James Huang (ChatGPT-guided development)
-- Reviewer: milestone review deferred
+- Implementer: Codex
+- Reviewer: comprehensive review deferred (development-first)
 - Branch: codex/impl/stable-record-v2-shadow-integration
-- Baseline commit: dd215c6b4199c221288720d6d702eff0c15ed0a9
-- Intended scope: introduce stable record IDs as shadow identity in the internal Vault/content-index pipeline without activating Stable Record V2, retiring row_v1, renaming Vault files, mutating production data, or running production re-index.
-- Started at: 2026-08-26T15:49:48+08:00
-- Last updated: 2026-08-26T15:49:48+08:00
+- Baseline commit: 6287862964fc9a03e00e9dc8f8fc99077b2eacdf
+- Intended scope: add a read-only, externally pinned Stable Record V2 shadow resolver; carry optional stable_record_id metadata through temporary/test content-index planning and SQLite metadata_json; add targeted tests and a minimal spec. No activation, mutation-authority change, Vault mutation, or production re-index.
+- Started at: 2026-08-26
+- Last updated: 2026-08-26
 
 ## Objective and done definition
 
-- Objective: prepare, independently review, and govern the accepted M3E integration candidate without changing activation or production state.
-- Done when: the exact M3E lineage is integrated into the isolated candidate branch, independently reviewed and accepted, governance evidence is committed and pushed, and the candidate task lock is released without updating `main`.
+- Objective: allow qualified row_v1 workbook lineage to resolve Stable Record V2 IDs as additive read-side metadata while row_v1 remains mutation authority.
+- Done when: the shadow resolver validates an externally pinned materialized-not-activated Authority, bare rows cannot resolve, optional stable IDs round-trip through metadata_json without changing Document/Chunk IDs, opt-in content-index enrichment is covered by targeted tests, the minimal spec records all governance boundaries, and the worktree remains uncommitted for review.
 
 ## Progress
 
 ### Completed
 
-- Integration worktree created from main at `f4988e346bb1dc5c9534feafbea81c45a2a958b0`.
-- M3E source branch independently accepted and closed at `5673cf766027454efc98be3ae19fac5ba2742f31`.
-- Integration task lock acquired in commit `4c9ac9fb222fd2038fe6f5dcc1e419c9070be1a0`.
-- Source lineage and exact integration scope verified before merge.
-- M3E governance lineage merged in commit `eebf5344e0fd0a0aff86e6bd5596df1e53ecd6c5`.
-- `M3E_INTEGRATION_VERIFICATION=PASS`.
-- `NON_GOVERNANCE_DRIFT=NONE`.
-- Integration-verification governance commit `49a2b038f7ac58f34d5af1cf731d911b4630909e` created and pushed.
-- Independent integration review completed with verdict `PASS_WITH_NONBLOCKING_FINDINGS`.
-- Governance decision `DEC-20260826-03`: `M3E_INTEGRATION_ACCEPTANCE=APPROVED`.
-- IR1 stale workflow state corrected by this governance update.
-- IR2 AppleDouble Git-ref metadata retained as a separate repository-hygiene backlog item.
-- Independent-acceptance governance commit `93e1b6fe4674afa4bab48e43fce1cc853a58e694` created, verified, and pushed.
-- Integration candidate governance phase closed without updating `main`.
-- Stable Record V2 activation, row_v1 retirement, and production re-index remain unauthorized.
-- Source `DECISIONS.md`, M3E handoff, and independent-review record match the accepted M3E source.
-- Governance boundaries remain unchanged: Stable Record V2 not activated, row_v1 not retired, and production re-index not authorized.
+- Isolated worktree and branch verified at the requested baseline.
+- Implementation lock accepted by Codex.
+- Added a read-only Stable Record V2 shadow resolver that requires an explicit Authority path, external expected manifest hash, and row_v1 workbook sha256.
+- Reused the canonical Authority loader, `validate_authority()`, `STABLE_ID_RE`, and `qualify_legacy_record_id()`; added shadow-specific manifest, row, unique-binding, and row-classification count gates.
+- Added `DocumentMetadata.stable_record_id` as optional validated additive metadata and preserved it through `metadata_dict()` / SQLite `metadata_json` round-trip.
+- Added explicit API-only opt-in shadow enrichment to content-index planning/building, including calculated read-only coverage summary.
+- Preserved default no-shadow behavior and existing Document/Chunk ID derivation.
+- Added the minimal shadow integration spec and targeted synthetic hostile tests.
+- Ran a read-only formal Authority pinned coverage smoke: 120 merchant continuations seen, 120 resolved, 0 unresolved, 1 authority-only.
+- Confirmed no Authority bytes, Vault files, production SQLite index, activation state, row_v1 state, main, commit, or remote were mutated.
 
 ### In progress
 
-- none
+- Development-first implementation candidate is ready for the next milestone review; implementation lock remains active as requested.
 
 ### Not started
 
-- Update `main` only under a separate explicit authorization and governance step.
+- Comprehensive/adversarial review.
+- Full application suite.
+- Search Taxonomy or stable-ID search filtering.
+- Production activation, row_v1 retirement, Vault migration, or production re-index.
 
 ## Verification
 
-- Run: integration worktree HEAD/clean preflight; source ancestry; exact commit/file scope; merge-parent verification; four-file governance scope; no non-governance drift; source-governance file equality; governance-boundary preservation; diff checks; independent integration review.
-- Result: `M3E_INTEGRATION_VERIFICATION=PASS`.
-- Independent review: `PASS_WITH_NONBLOCKING_FINDINGS`.
-- Governance adjudication: `M3E_INTEGRATION_ACCEPTANCE=APPROVED`.
-- Reviewer mutation check: `REVIEWER_MODIFIED_CANDIDATE=NO`.
-- `MAIN_UPDATE_AUTHORIZED=NO`.
-- Not run: final `main` update or post-main-update verification.
+- Run: preflight branch/HEAD/worktree/staged-file checks; `pytest -q tests/test_stable_record_authority.py tests/test_stable_record_shadow.py tests/test_content_index.py tests/test_chunking.py`; `git diff --check`; read-only formal Authority pinned coverage smoke.
+- Result: `207 passed, 7 skipped`; `git diff --check` passed; formal pin `f7e6c278b0b503791d8f679d4ac19b7f856a517978c34e7015da7b4980c5cd7c` verified; formal coverage 120 resolved / 0 unresolved / 1 authority-only.
+- Skips: seven pre-existing conditional Authority tests whose separate external evidence paths are absent from this isolated worktree; formal three-file Authority was verified separately by the read-only smoke.
+- Warnings: seven Pydantic V1-validator deprecation warnings, including existing validators and the new validator written in repository style.
+- Not run: full application suite and comprehensive/adversarial review (explicitly deferred); lint/type checks (not requested in this development-first targeted pass); production smoke/re-index/sync (forbidden).
 
 ## Next exact action
 
-- Integration candidate governance is closed. Obtain separate explicit authorization before any update to `main`.
+- Next milestone: independent review of the uncommitted implementation candidate, with special attention to external pin trust, row invariant coverage, and content-index opt-in boundaries.
 
 ## Blockers and unresolved user questions
 
-- Stable Record V2 activation remains unauthorized.
-- `row_v1` retirement remains unauthorized.
-- Production re-index remains unauthorized.
-- Existing build-content-index lineage finding remains a hard blocker for production re-index.
+- Existing build-content-index lineage finding remains `BLOCKING_FOR_PRODUCTION_REINDEX`; this work package does not fix it.
+- Stable Record V2 activation, row_v1 retirement, and production re-index remain unauthorized.
 - Unresolved user questions: none.
 
 ## Release or transfer
 
-- Lock released/transfer accepted by: James Huang (ChatGPT-guided terminal execution)
-- Released/transferred at: 2026-08-26T13:52:35+08:00
-- Handoff reference: `docs/collaboration/REVIEW_WP0-4b-M3E-INTEGRATION_2026-08-26.md`
+- Lock remains active through the development-first implementation candidate.
+- Release/transfer: not requested in this round.

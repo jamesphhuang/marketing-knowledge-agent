@@ -71,6 +71,7 @@ class DocumentMetadata(BaseModel):
     source_path: str = ""
     source_sheet: Optional[str] = None
     source_row: Optional[int] = None
+    stable_record_id: Optional[str] = None
     canonical_url: Optional[str] = None
     language: str = "zh-TW"
     author: Optional[str] = None
@@ -205,6 +206,23 @@ class DocumentMetadata(BaseModel):
                 return False
         return value
 
+    @validator("stable_record_id", pre=True)
+    def validate_stable_record_id(cls, value: Any) -> Optional[str]:
+        # Imported lazily because the crosswalk's Excel/governance imports eventually reference
+        # DocumentMetadata; the regex remains canonical without creating a module-import cycle.
+        from .stable_record_crosswalk import STABLE_ID_RE
+
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        if not STABLE_ID_RE.match(normalized):
+            raise ValueError(
+                f"stable_record_id must match canonical pattern {STABLE_ID_RE.pattern}"
+            )
+        return normalized
+
     @property
     def effective_date(self) -> date:
         return self.last_reviewed or self.updated_date or self.captured_date or self.publish_date
@@ -233,6 +251,7 @@ class DocumentMetadata(BaseModel):
             "source_path": self.source_path,
             "source_sheet": self.source_sheet,
             "source_row": self.source_row,
+            "stable_record_id": self.stable_record_id,
             "canonical_url": self.canonical_url,
             "language": self.language,
             "author": self.author,
