@@ -548,6 +548,111 @@ def test_a_governed_markdown_writer_never_emits_a_null_shadow_identity():
     assert parse_markdown_with_frontmatter(resolved)[0]["stable_record_id"] == "MKA-MC-00001"
 
 
+# --------------------------------------------------------------------------------------
+# The same invariant, asserted through the real writers (B2 Real Writer Regression Hardening)
+# --------------------------------------------------------------------------------------
+#
+# Everything above this point either calls ``governed_markdown_frontmatter()`` directly or hands
+# an already-filtered payload to a renderer. That checks the helper, not the writers: an
+# independent reviewer removed the boundary call from *both* writers and this file still reported
+# 20 passed. The tests below close that hole by calling the writer functions themselves --
+# ``apply_review_decisions._markdown_file_for_record`` and
+# ``store_data_sync_plan_v2_execution._create_parent_markdown`` -- and asserting on what they
+# actually return. Removing either boundary call fails them.
+#
+# Both writers are pure: they build frontmatter and return rendered text without touching the
+# Vault, so the fixtures below are minimal synthetic records rather than production data.
+
+
+def test_the_apply_review_decisions_writer_omits_an_unresolved_shadow_identity():
+    """The real approved-Vault-preview writer, called end to end."""
+    path, rendered = _render_approved_vault_preview()
+
+    metadata, _ = parse_markdown_with_frontmatter(rendered)
+    assert "stable_record_id" not in metadata
+    assert "stable_record_id: null" not in rendered
+    # The writer really did render governed frontmatter, so the assertion above cannot pass
+    # vacuously on an empty or short-circuited result.
+    assert metadata["record_type"] == "merchant_case"
+    assert metadata["review_decision"] == "approve"
+    assert path.name.endswith(".md")
+
+
+def test_the_apply_review_decisions_writer_preserves_a_resolved_shadow_identity():
+    """Only the unresolved case is dropped; omitting a real identity would be its own loss."""
+    _, rendered = _render_approved_vault_preview(stable_record_id="MKA-MC-00001")
+
+    metadata, _ = parse_markdown_with_frontmatter(rendered)
+    assert metadata["stable_record_id"] == "MKA-MC-00001"
+
+
+def test_the_managed_parent_writer_omits_an_unresolved_shadow_identity():
+    """The real Managed Parent writer, called end to end."""
+    rendered = _render_managed_parent()
+
+    metadata, _ = parse_markdown_with_frontmatter(rendered)
+    assert "stable_record_id" not in metadata
+    assert "stable_record_id: null" not in rendered
+    assert metadata["record_type"] == "merchant_case"
+    assert metadata["managed_by"] == "marketing-knowledge-agent"
+
+
+def test_the_managed_parent_writer_preserves_a_resolved_shadow_identity():
+    rendered = _render_managed_parent(stable_record_id="MKA-MC-00001")
+
+    metadata, _ = parse_markdown_with_frontmatter(rendered)
+    assert metadata["stable_record_id"] == "MKA-MC-00001"
+
+
+def test_the_managed_parent_writer_drops_a_shadow_identity_the_projection_re_adds():
+    """Ordering, not just presence: the projection is merged after ``metadata_dict()``.
+
+    ``_create_parent_markdown`` overlays the materialized projection onto the frontmatter, so a
+    projection carrying the key could put an unresolved identity back after the metadata was
+    built. The boundary is applied last precisely so it cannot.
+    """
+    unresolved = _render_managed_parent(projection={"stable_record_id": None})
+    assert "stable_record_id" not in parse_markdown_with_frontmatter(unresolved)[0]
+    assert "stable_record_id: null" not in unresolved
+
+    resolved = _render_managed_parent(projection={"stable_record_id": "MKA-MC-00001"})
+    assert parse_markdown_with_frontmatter(resolved)[0]["stable_record_id"] == "MKA-MC-00001"
+
+
+def _writer_record(**overrides) -> dict:
+    """Minimal synthetic governed record. Never a production Vault row."""
+    values = {
+        "title": "Example Merchant",
+        "source_type": "database",
+        "record_type": "merchant_case",
+        "publish_date": "2026-08-26",
+        "source_sheet": SHEET,
+        "source_row": 10,
+        "brand_name": "Example Brand",
+        "notes": "",
+    }
+    values.update(overrides)
+    return values
+
+
+def _render_approved_vault_preview(**overrides) -> tuple:
+    return apply_review_decisions._markdown_file_for_record(
+        _writer_record(**overrides),
+        {"reviewer": "reviewer", "reviewed_at": "2026-08-26", "notes": ""},
+        Path("review_decisions.csv"),
+        "2026-08-26T00:00:00Z",
+        "approve",
+    )
+
+
+def _render_managed_parent(projection: dict = None, **overrides) -> str:
+    return store_data_sync_plan_v2_execution._create_parent_markdown(
+        _writer_record(**overrides),
+        {"can_external_reference": False, **(projection or {})},
+        {"current_review_decision": "approve"},
+    )
+
+
 def _metadata(**overrides) -> DocumentMetadata:
     values = {
         "title": "Example",

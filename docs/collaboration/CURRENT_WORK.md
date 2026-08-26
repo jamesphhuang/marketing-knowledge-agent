@@ -5,6 +5,80 @@
 ## Lock
 
 - State: active
+- Milestone state: B2_REAL_WRITER_REGRESSION_TESTS_ADDED_UNCOMMITTED
+- Task: B2 Real Writer Regression Test Hardening
+- Implementer: Claude Code
+- Reviewer: not yet reviewed for this WP; it closes accepted nonblocking backlog item 6 raised by
+  the independent delta review of `472f5c3`
+- Branch: codex/test/b2-governed-writer-regression
+- Baseline commit: 6002f0c4888d3f88fcb1cbcfe5db1a6f7e872457
+- Product behavior changed: NO
+- Test-only hardening: YES
+- Intended scope: add regression tests that call the two governed Markdown writers themselves.
+  No product source change, no Search Taxonomy / query planner / Authority workbook /
+  `stable_record_id` schema / `governed_markdown_frontmatter()` semantics change, no refactor,
+  no production sync, no production re-index, no Stable Record V2 activation, no row_v1
+  retirement, no Slack activation, no UAT.
+- Started at: 2026-08-26
+- Last updated: 2026-08-26
+
+### B2 Real Writer Regression Test Hardening (this WP)
+
+Accepted nonblocking backlog item 6 said the B2 fix was correct but unguarded: the two writer
+tests in `test_stable_record_shadow.py` applied `governed_markdown_frontmatter()` themselves and
+then asserted on their own output, so removing the boundary call from both writers left all 20
+tests passing. That mutation was reproduced in this worktree before any test was written, and it
+reproduced exactly: `20 passed`.
+
+Five tests were added that call the writers directly —
+`apply_review_decisions._markdown_file_for_record` and
+`store_data_sync_plan_v2_execution._create_parent_markdown` — and assert on the frontmatter those
+writers actually return, parsed rather than string-matched. `src/` is byte-identical to the
+baseline.
+
+```text
+PRODUCT_SOURCE_CHANGED=NO
+TEST_ONLY_CHANGE=YES
+WRITER_INVENTORY_UNCHANGED=YES
+MUTATION_PROBE_CAUGHT=YES
+STABLE_RECORD_V2_ACTIVATED=NO
+ROW_V1_RETIRED=NO
+PRODUCTION_REINDEX_AUTHORIZED=NO
+PRODUCTION_REINDEX_RUN=NO
+SLACK_TAXONOMY_ACTIVATED=NO
+MAIN_UPDATED=NO
+```
+
+#### Mutation-strength evidence
+
+Each probe is a copy of `src/` and `tests/` under `/private/tmp`, mutated there so the repository
+source is never touched, and confirmed by the imported module path in the pytest output.
+
+| Probe | Boundary call removed from | Result |
+| --- | --- | --- |
+| Baseline, pre-existing 20 tests | both writers | `20 passed` — the reported hole, reproduced |
+| Both writers, new test set | both writers | `3 failed, 22 passed` |
+| Apply writer only | `_markdown_file_for_record` | `1 failed, 24 passed` |
+| Managed Parent writer only | `_create_parent_markdown` | `2 failed, 23 passed` |
+
+Each writer is therefore guarded independently, not only in combination.
+
+#### Writer inventory
+
+Re-verified rather than assumed. `DocumentMetadata.metadata_dict()` still has five callers —
+`indexing.py` (SQLite `metadata_json`), `store_data_sync_plan_v2_execution.py` (one SQLite write,
+one governed Markdown writer), `retrieval.py` (search-result payload), and
+`apply_review_decisions.py` (governed Markdown writer). `obsidian_sync._synced_content` re-renders
+frontmatter it parsed from an existing file and calls `metadata_dict()` nowhere, so it propagates
+the key rather than originating it. Two governed Markdown originators, both now covered by a real
+-writer test. No new originator found.
+
+### Superseded milestone lock record
+
+The lock below describes the preceding milestone — Stable Shadow + Content Index Lineage + Search
+Taxonomy acceptance and main integration preparation. It is retained unchanged as the record of
+that work; nothing in this WP alters its state, and `main` is still not updated.
+
 - Milestone state: MAIN_INTEGRATION_CANDIDATE_PREPARED_AWAITING_AUTHORIZATION
 - Task: Stable Shadow + Content Index Lineage + Search Taxonomy — acceptance and main integration preparation
 - Implementer: Claude Code
@@ -181,6 +255,35 @@ MAIN_UPDATED=NO
 - Warnings: seven Pydantic V1-validator deprecation warnings, including existing validators and the new validator written in repository style.
 - Not run: full application suite and comprehensive/adversarial review (explicitly deferred); standalone lint/type tools (not configured/requested in this development-first targeted pass); production smoke/re-index/sync (forbidden).
 
+### B2 Real Writer Regression Test Hardening (Claude Code, 2026-08-26)
+
+- Scope: `tests/test_stable_record_shadow.py` only. `src/` verified byte-identical to baseline
+  `6002f0c` by `git diff --stat 6002f0c -- src/` returning empty.
+- Targeted run: `tests/test_stable_record_shadow.py`, `tests/test_apply_review_decisions.py`,
+  `tests/test_obsidian_sync.py`, `tests/test_content_index.py`,
+  `tests/test_content_index_lineage.py`, `tests/test_row_v1_workbook_lineage_guard.py` —
+  `151 passed, 3 skipped`. `test_stable_record_shadow.py` alone: 20 → `25 passed`.
+- Skips: three pre-existing row_v1 lineage tests whose local-only workbook
+  (`reports/excel_preview/…-20260708.xlsx`) is absent from this isolated worktree. Unchanged by
+  this work.
+- `tests/test_store_data_sync_plan_v2_execution.py`: `10 failed`, root cause
+  `FileNotFoundError: …/obsidian_vault/MKA` — gitignored runtime state absent from this isolated
+  worktree. The failure-name set is the recorded frozen-candidate set, and both `src/` and that
+  test file are byte-identical to the baseline, so the set is definitionally unchanged by this WP.
+  No production runtime state was created to make them pass; the two writers are covered by the
+  new synthetic real-writer tests instead.
+- Mutation probes: four runs against mutated copies under `/private/tmp`, never against the
+  repository source. Baseline (pre-existing tests, both writers mutated) `20 passed` — the hole,
+  reproduced. New set: both writers mutated `3 failed, 22 passed`; apply writer only
+  `1 failed, 24 passed`; Managed Parent writer only `2 failed, 23 passed`. Each probe's pytest
+  output was checked to confirm it imported the mutated copy, not the worktree.
+- Import-origin guard: pytest resolves `marketing_knowledge_agent` to this worktree's `src`,
+  confirmed from the module paths in the warning output.
+- `compileall` on the changed test file and `git diff --check` both pass. No duplicate top-level
+  definition was introduced into the test module.
+- Not run: full application suite; standalone lint/type tools (not configured in this repo);
+  production sync, re-index, deploy or UAT; independent review of this WP.
+
 ### Consolidated Blocker Remediation R1 (Claude Code, 2026-08-26)
 
 - Targeted run (§12 set): `test_search_quality_evaluation.py`, `test_search_taxonomy.py`,
@@ -278,11 +381,13 @@ verified to behave identically on the frozen candidate `8af7382`.
 4. **LV1 canonical ambiguity** — a product/Authority semantics decision, split into two kinds in
    the blockers section below.
 5. **Ingestion data-quality WP** — the two content tags the index and Authority disagree on.
-6. **Real-writer B2 regression test hardening.** The two writer tests in
-   `test_stable_record_shadow.py` apply `governed_markdown_frontmatter()` themselves and then
-   assert on their own output; they never call `_markdown_file_for_record` or
-   `_create_parent_markdown`. Removing the fix from both writers leaves all 20 tests passing. The
-   fix is correct — verified by calling the real writers — but nothing guards it.
+6. **Real-writer B2 regression test hardening — CLOSED** by the B2 Real Writer Regression Test
+   Hardening WP on branch `codex/test/b2-governed-writer-regression`, test-only. The finding was
+   that the two writer tests in `test_stable_record_shadow.py` applied
+   `governed_markdown_frontmatter()` themselves and asserted on their own output, so removing the
+   fix from both writers left all 20 tests passing. Five tests that call `_markdown_file_for_record`
+   and `_create_parent_markdown` directly now guard it, and each writer fails independently when
+   its boundary call is removed.
 7. **Slack taxonomy activation** — the Authority is still not wired to the Slack surface, so none
    of this fail-closed behaviour reaches end users yet.
 8. **Golden/Negative dataset expansion** — v1 remains a 44-case smoke set.
@@ -300,8 +405,10 @@ MAIN_UPDATED=NO
 
 ## Next exact action
 
-- Await explicit user authorization to promote `codex/integrate/stable-shadow-search-taxonomy`
-  to `main`. The integration candidate is prepared and verified; nothing has been pushed to
+- Review the B2 real-writer regression tests on `codex/test/b2-governed-writer-regression`. They
+  are uncommitted; nothing has been staged, committed or pushed.
+- Then, separately, await explicit user authorization to promote
+  `codex/integrate/stable-shadow-search-taxonomy` to `main`. The integration candidate is prepared and verified; nothing has been pushed to
   `main`. Do not activate Stable Record V2, retire row_v1, authorize a production re-index, or
   wire the taxonomy to Slack as part of that promotion — each is a separate decision.
 
