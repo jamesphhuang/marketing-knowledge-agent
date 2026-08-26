@@ -4,21 +4,21 @@
 
 ## Lock
 
-- State: active
-- Task: WP0.4b-M3E Integration into main
-- Implementer: James Huang (ChatGPT-guided terminal execution)
-- Reviewer: independent integration reviewer — `PASS_WITH_NONBLOCKING_FINDINGS`
-- Branch: codex/integrate/wp0-4b-m3e-into-main
-- Baseline commit: f4988e346bb1dc5c9534feafbea81c45a2a958b0
-- Intended scope: integrate the independently accepted M3E governance lineage ending at 5673cf766027454efc98be3ae19fac5ba2742f31 into main. No Stable Record V2 activation, row_v1 retirement, Authority mutation, Vault/content-index mutation, alias/asset/payload mutation, or production re-index.
-- Started at: 2026-08-26T10:57:08+08:00
-- Last updated: 2026-08-26T13:14:11+08:00
+- State: inactive
+- Task: none
+- Implementer: none
+- Reviewer: none
+- Branch: none
+- Baseline commit: none
+- Intended scope: none
+- Started at: none
+- Last updated: 2026-08-26T13:52:35+08:00
 
 
 ## Objective and done definition
 
-- Objective: integrate the accepted M3E governance history into main without changing activation or production state.
-- Done when: the exact M3E lineage is reviewed, merged through an isolated integration branch, integration verification passes, main is updated normally, and Stable Record V2 remains not activated.
+- Objective: prepare, independently review, and govern the accepted M3E integration candidate without changing activation or production state.
+- Done when: the exact M3E lineage is integrated into the isolated candidate branch, independently reviewed and accepted, governance evidence is committed and pushed, and the candidate task lock is released without updating `main`.
 
 ## Progress
 
@@ -36,18 +36,19 @@
 - Governance decision `DEC-20260826-03`: `M3E_INTEGRATION_ACCEPTANCE=APPROVED`.
 - IR1 stale workflow state corrected by this governance update.
 - IR2 AppleDouble Git-ref metadata retained as a separate repository-hygiene backlog item.
+- Independent-acceptance governance commit `93e1b6fe4674afa4bab48e43fce1cc853a58e694` created, verified, and pushed.
+- Integration candidate governance phase closed without updating `main`.
+- Stable Record V2 activation, row_v1 retirement, and production re-index remain unauthorized.
 - Source `DECISIONS.md`, M3E handoff, and independent-review record match the accepted M3E source.
 - Governance boundaries remain unchanged: Stable Record V2 not activated, row_v1 not retired, and production re-index not authorized.
 
 ### In progress
 
-- Record independent integration acceptance and synchronize collaboration governance state.
+- none
 
 ### Not started
 
-- Commit and push the independent-acceptance governance update.
-- Release the current integration task lock after governance closeout.
-- Any update to `main` requires a separate explicit authorization and governance step.
+- Update `main` only under a separate explicit authorization and governance step.
 
 ## Verification
 
@@ -61,7 +62,7 @@
 
 ## Next exact action
 
-- Verify and commit `CURRENT_WORK.md`, `DECISIONS.md`, and `REVIEW_WP0-4b-M3E-INTEGRATION_2026-08-26.md` as the independent-integration-acceptance governance record. Do not update `main`.
+- Integration candidate governance is closed. Obtain separate explicit authorization before any update to `main`.
 
 ## Blockers and unresolved user questions
 
@@ -73,6 +74,6 @@
 
 ## Release or transfer
 
-- Lock released/transfer accepted by: none
-- Released/transferred at: none
-- Handoff reference: none
+- Lock released/transfer accepted by: James Huang (ChatGPT-guided terminal execution)
+- Released/transferred at: 2026-08-26T13:52:35+08:00
+- Handoff reference: `docs/collaboration/REVIEW_WP0-4b-M3E-INTEGRATION_2026-08-26.md`
