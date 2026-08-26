@@ -395,6 +395,8 @@ def _markdown_file_for_record(
 
     metadata = DocumentMetadata(**payload)
     frontmatter = metadata.metadata_dict()
+    if frontmatter.get("stable_record_id") is None:
+        frontmatter.pop("stable_record_id", None)
     frontmatter.update(
         {
             "review_decision": decision,

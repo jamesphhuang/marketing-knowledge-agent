@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures import build_row_v1_sync_evidence
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.content_index import (
     ContentIndexError,
@@ -15,6 +16,7 @@ from marketing_knowledge_agent.content_index import (
     normalize_vault_frontmatter,
 )
 from marketing_knowledge_agent.indexing import SQLiteIndex
+from marketing_knowledge_agent.obsidian_sync import _synced_content
 
 
 def test_normalize_vault_frontmatter_restores_dict_and_removes_sync_keys():
@@ -150,11 +152,10 @@ def test_plan_mode_returns_one_for_anomalous_exclusion(tmp_path):
 
 def test_confirm_cli_returns_two_and_deletes_database_on_assertion_failure(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    vault = _vault(tmp_path)
-    _write_synced(
-        vault / "MKA" / "merchant_cases" / "eligible.md",
-        body="Restricted Brand confidential fact",
+    fixture = _lineage_fixture(
+        tmp_path, body="Restricted Brand confidential fact"
     )
+    vault = fixture["vault"]
     default_denylist = tmp_path / "reports" / "excel_preview" / "restricted_customers.json"
     default_denylist.parent.mkdir(parents=True)
     default_denylist.write_text(
@@ -173,6 +174,12 @@ def test_confirm_cli_returns_two_and_deletes_database_on_assertion_failure(tmp_p
             "--report-dir",
             str(tmp_path / "reports" / "content_index"),
             "--confirm",
+            "--lineage-apply-dir",
+            str(fixture["evidence"].apply_dir),
+            "--lineage-sync-plan",
+            str(fixture["evidence"].sync_plan_path),
+            "--lineage-sync-manifest",
+            str(fixture["evidence"].sync_manifest_path),
         ]
     )
 
@@ -211,8 +218,8 @@ def test_synced_vault_copy_plans_thirteen_with_twelve_indexable(tmp_path):
 
 
 def test_confirm_builds_index_and_passes_all_safety_assertions(tmp_path):
-    vault = _vault(tmp_path)
-    _write_synced(vault / "MKA" / "merchant_cases" / "eligible.md")
+    fixture = _lineage_fixture(tmp_path)
+    vault = fixture["vault"]
     denylist = _denylist(tmp_path, [])
 
     result = build_content_index(
@@ -221,6 +228,7 @@ def test_confirm_builds_index_and_passes_all_safety_assertions(tmp_path):
         report_dir=tmp_path / "reports" / "content_index",
         restricted_customers_path=denylist,
         confirm=True,
+        lineage_evidence=fixture["evidence"],
     )
 
     assert result["assertions"] == {
@@ -233,11 +241,8 @@ def test_confirm_builds_index_and_passes_all_safety_assertions(tmp_path):
 
 
 def test_forbidden_record_type_refuses_confirm_and_deletes_database(tmp_path):
-    vault = _vault(tmp_path)
-    _write_synced(
-        vault / "MKA" / "merchant_cases" / "restricted.md",
-        record_type="restricted_customer",
-    )
+    fixture = _lineage_fixture(tmp_path, record_type="restricted_customer")
+    vault = fixture["vault"]
     db_path = tmp_path / "content.sqlite"
     db_path.write_text("stale", encoding="utf-8")
 
@@ -248,17 +253,17 @@ def test_forbidden_record_type_refuses_confirm_and_deletes_database(tmp_path):
             report_dir=tmp_path / "reports" / "content_index",
             restricted_customers_path=_denylist(tmp_path, []),
             confirm=True,
+            lineage_evidence=fixture["evidence"],
         )
 
     assert not db_path.exists()
 
 
 def test_denylist_assertion_refuses_content_and_deletes_database(tmp_path):
-    vault = _vault(tmp_path)
-    _write_synced(
-        vault / "MKA" / "merchant_cases" / "eligible.md",
-        body="Restricted Brand confidential fact",
+    fixture = _lineage_fixture(
+        tmp_path, body="Restricted Brand confidential fact"
     )
+    vault = fixture["vault"]
     db_path = tmp_path / "content.sqlite"
 
     with pytest.raises(ContentIndexError, match="denylist"):
@@ -268,6 +273,7 @@ def test_denylist_assertion_refuses_content_and_deletes_database(tmp_path):
             report_dir=tmp_path / "reports" / "content_index",
             restricted_customers_path=_denylist(tmp_path, [{"brand_name": "Restricted Brand"}]),
             confirm=True,
+            lineage_evidence=fixture["evidence"],
         )
 
     assert not db_path.exists()
@@ -300,12 +306,25 @@ def test_conservation_assertion_fails_for_document_count_mismatch(tmp_path):
 
 
 def test_retrieval_trace_assertion_fails_without_source_coordinates(tmp_path):
-    vault = _vault(tmp_path)
-    _write_synced(
-        vault / "MKA" / "merchant_cases" / "missing-trace.md",
-        source_sheet=None,
-        source_row=None,
+    fixture = build_row_v1_sync_evidence(
+        tmp_path,
+        {"public_metrics/missing-trace.md": _source_markdown(
+            record_type="public_metric",
+            allowed_exposure_channels=["saleskits"],
+        )},
     )
+    vault = fixture["vault"]
+    target = vault / "MKA" / "public_metrics" / "missing-trace.md"
+    changed, _ = _synced_content(
+        _source_markdown(
+            record_type="public_metric",
+            allowed_exposure_channels=["saleskits"],
+            source_sheet=None,
+            source_row=None,
+        ),
+        "missing-trace-test",
+    )
+    target.write_text(changed, encoding="utf-8")
     denylist = _denylist(tmp_path, [])
 
     with pytest.raises(ContentIndexError, match="source_sheet/source_row"):
@@ -315,6 +334,7 @@ def test_retrieval_trace_assertion_fails_without_source_coordinates(tmp_path):
             report_dir=tmp_path / "reports" / "content_index",
             restricted_customers_path=denylist,
             confirm=True,
+            lineage_evidence=fixture["evidence"],
         )
 
     assert not (tmp_path / "content.sqlite").exists()
@@ -374,6 +394,50 @@ def _write_synced(path: Path, **overrides) -> None:
             lines.append(f"{key}: '{value}'")
     lines.extend(["---", "", body, ""])
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _lineage_fixture(tmp_path: Path, **overrides):
+    return build_row_v1_sync_evidence(
+        tmp_path,
+        {"merchant_cases/eligible.md": _source_markdown(**overrides)},
+    )
+
+
+def _source_markdown(**overrides) -> str:
+    values = {
+        "title": "Example approved record",
+        "source_type": "database",
+        "record_type": "merchant_case",
+        "status": "published",
+        "publish_date": "2026-07-01",
+        "source_path": "Cases:1",
+        "source_sheet": "Cases",
+        "source_row": 1,
+        "data_classification": "internal",
+        "can_quote_externally": False,
+        "can_enter_content_index": True,
+        "allowed_exposure_channels": [],
+        "invalid_asset_values": "{}",
+        "body": "known trace content for formal index",
+    }
+    values.update(overrides)
+    body = values.pop("body")
+    lines = ["---"]
+    for key, value in values.items():
+        if value is None:
+            lines.append(f"{key}: null")
+        elif isinstance(value, list):
+            if value:
+                lines.append(f"{key}:")
+                lines.extend(f"  - '{item}'" for item in value)
+            else:
+                lines.append(f"{key}: []")
+        elif isinstance(value, bool):
+            lines.append(f"{key}: {'true' if value else 'false'}")
+        else:
+            lines.append(f"{key}: '{value}'")
+    lines.extend(["---", "", body, ""])
+    return "\n".join(lines)
 
 
 def _create_minimal_database(db_path: Path, metadata: dict, source_sheet, source_row) -> None:

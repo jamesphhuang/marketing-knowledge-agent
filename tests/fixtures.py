@@ -240,3 +240,52 @@ def write_row_v1_apply_lineage(apply_dir: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def build_row_v1_sync_evidence(base_path: Path, preview_files) -> dict:
+    """Create a real temp apply -> sync -> Vault receipt chain for content-index tests."""
+    from marketing_knowledge_agent.content_index_lineage import ContentIndexLineageEvidence
+    from marketing_knowledge_agent.obsidian_sync import create_sync_plan, execute_sync_plan
+
+    base_path = Path(base_path)
+    apply_dir = base_path / "apply"
+    for relative, content in preview_files.items():
+        path = apply_dir / "approved_vault_preview" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    governance = apply_dir / "governance_table_preview"
+    governance.mkdir(parents=True, exist_ok=True)
+    (governance / "restricted_customers.json").write_text("[]", encoding="utf-8")
+    (apply_dir / "apply_decisions_summary.md").write_text(
+        """# Apply Review Decisions Preview Summary
+
+## Conservation
+- test fixture conservation ok=yes
+
+## Whitelist Assertions
+- Conservation ok: yes
+- Restricted whitelist assertion: passed
+- Pending metric vault assertion: passed
+""",
+        encoding="utf-8",
+    )
+    write_row_v1_apply_lineage(apply_dir)
+
+    vault = base_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True, exist_ok=True)
+    (vault / "MKA").mkdir(parents=True, exist_ok=True)
+    sync_dir = base_path / "sync"
+    plan = create_sync_plan(apply_dir, vault, output_dir=sync_dir)
+    execution = execute_sync_plan(plan["json_path"], vault, confirm=True)
+    evidence = ContentIndexLineageEvidence(
+        apply_dir=apply_dir,
+        sync_plan_path=Path(plan["json_path"]),
+        sync_manifest_path=Path(execution["manifest_path"]),
+    )
+    return {
+        "apply_dir": apply_dir,
+        "vault": vault,
+        "plan": plan,
+        "execution": execution,
+        "evidence": evidence,
+    }

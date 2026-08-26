@@ -30,6 +30,7 @@ from .content_index import (
     ContentIndexError,
     build_content_index,
 )
+from .content_index_lineage import ContentIndexLineageEvidence
 from .evaluation import evaluate
 from .excel_preview import ExcelPreviewError, generate_excel_preview
 from .ingestion import IngestionError
@@ -947,12 +948,32 @@ def main(argv=None) -> int:
                 return 0
 
         if args.command == "build-content-index":
+            lineage_paths = (
+                args.lineage_apply_dir,
+                args.lineage_sync_plan,
+                args.lineage_sync_manifest,
+            )
+            if any(lineage_paths) and not all(lineage_paths):
+                raise ContentIndexError(
+                    "lineage evidence requires --lineage-apply-dir, --lineage-sync-plan, "
+                    "and --lineage-sync-manifest together"
+                )
+            lineage_evidence = (
+                ContentIndexLineageEvidence(
+                    apply_dir=args.lineage_apply_dir,
+                    sync_plan_path=args.lineage_sync_plan,
+                    sync_manifest_path=args.lineage_sync_manifest,
+                )
+                if all(lineage_paths)
+                else None
+            )
             summary = build_content_index(
                 vault_path=args.vault,
                 namespace=args.namespace,
                 db_path=args.db,
                 report_dir=args.report_dir,
                 confirm=args.confirm,
+                lineage_evidence=lineage_evidence,
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return summary["exit_code"]
@@ -2223,6 +2244,9 @@ def build_parser() -> argparse.ArgumentParser:
     content_index_parser.add_argument("--db", type=Path, default=DEFAULT_CONTENT_INDEX_DB)
     content_index_parser.add_argument("--report-dir", type=Path, default=DEFAULT_CONTENT_INDEX_REPORT_DIR)
     content_index_parser.add_argument("--confirm", action="store_true")
+    content_index_parser.add_argument("--lineage-apply-dir", type=Path, default=None)
+    content_index_parser.add_argument("--lineage-sync-plan", type=Path, default=None)
+    content_index_parser.add_argument("--lineage-sync-manifest", type=Path, default=None)
 
     slack_parser = subparsers.add_parser(
         "slack-bot",
