@@ -4,16 +4,15 @@
 
 ## Lock
 
-- State: inactive
-- Task: none
-- Implementer: none
-- Reviewer: none
-- Branch: none
-- Baseline commit: none
-- Intended scope: none
-- Started at: none
-- Last updated: 2026-08-26T13:52:35+08:00
-
+- State: active
+- Task: Development Governance Fast Lane v1
+- Implementer: James Huang (ChatGPT-guided terminal execution)
+- Reviewer: independent review pending
+- Branch: codex/impl/governance-fast-lane-v1
+- Baseline commit: dd215c6b4199c221288720d6d702eff0c15ed0a9
+- Intended scope: automate repetitive Git/governance verification and safe main promotion while preserving fail-closed checks, explicit staging, independent review, and high-risk authorization boundaries.
+- Started at: 2026-08-26T15:04:16+08:00
+- Last updated: 2026-08-26T15:04:16+08:00
 
 ## Objective and done definition
 
