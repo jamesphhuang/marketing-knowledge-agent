@@ -4,16 +4,15 @@
 
 ## Lock
 
-- State: active
-- Task: Development Governance Fast Lane v1
-- Implementer: OpenAI Codex
-- Reviewer: independent review pending
-- Branch: codex/impl/governance-fast-lane-v1
-- Baseline commit: 668e401131128933975cac1523c6165f3ece2dd7
-- Intended scope: `tools/governance_*.py`, `tools/review_packet.py`, `tools/promote_main.py`, their targeted tests, `docs/governance/FAST_LANE.md`, and the minimum collaboration-process updates required for START / REVIEW_READY / CLOSED.
-- Lifecycle: REVIEW_READY
-- Started at: 2026-08-26T15:04:16+08:00
-- Last updated: 2026-08-26T15:24:34+08:00
+- State: inactive
+- Task: none
+- Implementer: none
+- Reviewer: none
+- Branch: none
+- Baseline commit: none
+- Intended scope: none
+- Started at: none
+- Last updated: 2026-08-26T15:44:49+08:00
 
 ## Objective and done definition
 
@@ -75,3 +74,17 @@
 
 - Lock remains active; independent reviewer does not acquire the implementation lock.
 - Handoff reference: this REVIEW_READY record plus `docs/governance/FAST_LANE.md`; implementation remains uncommitted by explicit user instruction.
+- Frozen implementation candidate: `95e7909af512399be01f6b640e59936068c2ef17`.
+
+## Fast Lane v1 pause record
+
+- Status: `REVIEW_DEFERRED`
+- Frozen candidate: `95e7909af512399be01f6b640e59936068c2ef17`
+- Automated candidate gate: `PASS`
+- Risk tier: `STANDARD`
+- Independent adversarial review: deferred
+- Reason: development-first workflow; comprehensive review will run at a later milestone gate.
+- Candidate is not accepted and has not been promoted to `main`.
+- `MAIN_UPDATED=NO`
+- `PRODUCTION_CHANGED=NO`
+- Paused at: 2026-08-26T15:44:49+08:00
