@@ -190,3 +190,71 @@ Future Stable Record V2 activation must continue to externally bind the reviewed
 `content_digest` alone is not sufficient as an activation trust anchor.
 
 This decision does not authorize updating `main`, Stable Record V2 activation, row_v1 retirement, Authority mutation, Vault/content-index mutation, alias/asset/payload mutation, or production re-index.
+
+## DEC-20260826-04 — Stable Shadow + Content Index Lineage + Search Taxonomy accepted
+
+### Decision
+
+The Stable Record Shadow, Content Index Lineage Gate, Search Taxonomy v1, Golden/Negative Search
+Evaluation v1 and Consolidated Blocker Remediation R1 candidate has completed independent delta
+review and is accepted as a main integration candidate.
+
+- Reviewed candidate: `472f5c389d57f91d35b50db8bdd0d96aa64ddf63`
+- Previously blocked candidate: `8af73821a237253af6617c5fbf81605b76349b10`
+- Integration baseline (GitHub `main` at preparation time): `dd215c6b4199c221288720d6d702eff0c15ed0a9`
+- Integration branch: `codex/integrate/stable-shadow-search-taxonomy`
+- Independent review record: `docs/collaboration/REVIEW_SEARCH_TAXONOMY_R1_2026-08-26.md`
+- Independent review verdict: `PASS_WITH_NONBLOCKING_FINDINGS`
+- Blocking findings: `0`
+- Reviewer edited candidate: `NO`
+
+### Why this candidate could be merged without conflict
+
+`origin/main` is a direct ancestor of the reviewed candidate, so the merge could have
+fast-forwarded. `--no-ff` was used deliberately so the integration event records both parents. The
+merge result tree is byte-identical to the reviewed candidate's tree, which is the proof that
+integration introduced no content change of its own.
+
+### Closed by this milestone
+
+- `B1` short-CJK taxonomy alias substring false positive, including the semantic inversion
+  `停業後重新開店的品牌` → `sales_category_lv2=已關閉`.
+- `B2` `stable_record_id: null` leaking into the second governed Vault Markdown writer.
+- `N1` explicit-field fragment fall-through.
+- `N2` blocked evaluation asserts `result_count == 0` directly rather than by inference.
+- `N3` a Negative regression fails `evaluate-search` with a non-zero exit code.
+- `N5` re-index lineage prerequisite documented — documentation only, not an authorization.
+
+### Accepted nonblocking backlog
+
+Recorded, not fixed. Each was verified to behave identically on the frozen candidate `8af7382`, so
+none is a regression introduced by this milestone.
+
+1. Runtime catalog-path CJK substring matching — the boundary rule covers the Authority scan only.
+2. Fragment-removal artificial boundary edge case.
+3. Explicit constraint whitespace truncation — fails silently empty rather than fail-closed.
+4. LV1 canonical ambiguity — product/Authority semantics decision.
+5. Ingestion data-quality WP for the two disputed content tags.
+6. Real-writer `B2` regression test hardening — the fix is correct but unguarded; removing it from
+   both writers leaves the whole test module passing.
+7. Slack taxonomy activation.
+8. Golden/Negative dataset expansion beyond the 44-case v1 smoke set.
+
+### Governance boundary
+
+- `SEARCH_TAXONOMY_R1_INDEPENDENT_REVIEW=PASS_WITH_NONBLOCKING_FINDINGS`
+- `SEARCH_TAXONOMY_R1_ACCEPTANCE=APPROVED`
+- `MAIN_READY=YES`
+- `MAIN_UPDATE_AUTHORIZED=NO`
+- `STABLE_RECORD_V2_ACTIVATED=NO`
+- `ROW_V1_RETIRED=NO`
+- `PRODUCTION_REINDEX_AUTHORIZED=NO`
+- `PRODUCTION_REINDEX_RUN=NO`
+- `SLACK_TAXONOMY_ACTIVATED=NO`
+
+`MAIN_READY=YES` states that the integration candidate is prepared and verified. It is not an
+authorization to update `main`; that remains an explicit, separate human decision.
+
+This decision does not authorize updating `main`, Stable Record V2 activation, row_v1 retirement,
+Authority mutation, Vault/content-index mutation, production sync, production re-index, or Slack
+taxonomy activation.

@@ -5,32 +5,49 @@
 ## Lock
 
 - State: active
-- Milestone state: REMEDIATION_R1_COMPLETE_UNCOMMITTED
-- Task: Consolidated Blocker Remediation R1 (post independent review)
+- Milestone state: MAIN_INTEGRATION_CANDIDATE_PREPARED_AWAITING_AUTHORIZATION
+- Task: Stable Shadow + Content Index Lineage + Search Taxonomy — acceptance and main integration preparation
 - Implementer: Claude Code
-- Reviewer: independent review completed 2026-08-26 — verdict BLOCKED; reviewer did not modify the candidate
-- Branch: codex/impl/stable-record-v2-shadow-integration
-- Reviewed candidate (frozen, unchanged): 8af73821a237253af6617c5fbf81605b76349b10
-- Frozen behind that anchor: Stable Record Shadow, Content Index Lineage Gate, Search Taxonomy v1, Golden/Negative Search Evaluation v1.
-- Intended scope: fix only the blockers the independent review confirmed (B1, B2) plus the related hardening it named (N1, N2, N3) and the N5 documentation. No new product features, no Search Result Preview, no UAT, no production re-index/sync/deploy, no Stable Record V2 activation, no row_v1 retirement, no Authority workbook edit, no ingestion data repair, no LV1/LV2 renaming, no merchant-alias rebinding.
+- Reviewer: independent delta review completed 2026-08-26 — verdict PASS_WITH_NONBLOCKING_FINDINGS, 0 blocking findings; the reviewer did not modify the candidate
+- Branch: codex/integrate/stable-shadow-search-taxonomy
+- Integration baseline (GitHub main at preparation time): dd215c6b4199c221288720d6d702eff0c15ed0a9
+- Reviewed candidate (frozen, unchanged, merged exactly): 472f5c389d57f91d35b50db8bdd0d96aa64ddf63
+- Merged behind that anchor: Stable Record Shadow, Content Index Lineage Gate, Search Taxonomy v1, Golden/Negative Search Evaluation v1, Consolidated Blocker Remediation R1.
+- Intended scope: prepare an integration candidate only — merge the exact reviewed commit, record acceptance, run focused integration verification. No product source or test change, no rebase/squash/amend of reviewed lineage, no main push, no production sync/re-index/deploy, no Stable Record V2 activation, no row_v1 retirement, no Slack taxonomy activation.
 - Started at: 2026-08-26
 - Last updated: 2026-08-26
+
+### Superseded lock record
+
+The previous lock described Consolidated Blocker Remediation R1 as
+`REMEDIATION_R1_COMPLETE_UNCOMMITTED`. That statement was already stale inside its own
+commit: R1 was committed as `472f5c3` and pushed to
+`origin/codex/impl/stable-record-v2-shadow-integration`. The stale line is corrected here
+rather than by amending the reviewed commit, which must stay byte-identical.
 
 ### Independent review verdict and remediation status
 
 ```text
-INDEPENDENT_REVIEW=BLOCKED
-REMEDIATION=R1
-B1_SHORT_CJK_FALSE_POSITIVE=FIXED
-B2_STABLE_ID_NULL_LEAK=FIXED
-N1_EXPLICIT_SCOPE_FALLTHROUGH=FIXED
-N2_BLOCKED_RETRIEVAL_ASSERTED=FIXED
-N3_NEGATIVE_FAILURE_EXIT_GATE=FIXED
+INDEPENDENT_REVIEW=PASS_WITH_NONBLOCKING_FINDINGS
+BLOCKING_FINDINGS=0
+REVIEWER_EDITED_CANDIDATE=NO
+REVIEWED_CANDIDATE=472f5c389d57f91d35b50db8bdd0d96aa64ddf63
+B1_SHORT_CJK_FALSE_POSITIVE=CLOSED
+B2_STABLE_ID_NULL_LEAK=CLOSED
+N1_EXPLICIT_SCOPE_FALLTHROUGH=CLOSED
+N2_BLOCKED_RETRIEVAL_ASSERTED=CLOSED
+N3_NEGATIVE_FAILURE_EXIT_GATE=CLOSED
 N5_REINDEX_PREREQUISITE=DOCUMENTED
+FORMAL_GOLDEN=21/21
+FORMAL_NEGATIVE=23/23
+ACCEPTANCE_RECORDED=YES
+MAIN_READY=YES
+MAIN_UPDATE_AUTHORIZED=NO
 STABLE_RECORD_V2_ACTIVATED=NO
 ROW_V1_RETIRED=NO
 PRODUCTION_REINDEX_AUTHORIZED=NO
 PRODUCTION_REINDEX_RUN=NO
+SLACK_TAXONOMY_ACTIVATED=NO
 MAIN_UPDATED=NO
 ```
 
@@ -224,11 +241,69 @@ MAIN_UPDATED=NO
 - Pre-existing environment blocker, not caused by this work and not fixed here: `tests/test_slack_structured_governance.py` errors at fixture setup in this worktree because gitignored runtime state (`.mka/content_index.sqlite`, `.mka/search_alias_projection.json`, and further trees) is not present. Excluded from the targeted set and reported rather than worked around.
 - Not run for this extension: full application suite; comprehensive/adversarial review; lint/type tools; production re-index, sync or deploy.
 
+## Acceptance and main integration preparation (2026-08-26)
+
+The independent delta review of `472f5c3` returned **PASS_WITH_NONBLOCKING_FINDINGS** with
+**0 blocking findings**, and the reviewer did not modify the candidate. The candidate is accepted
+and prepared as a main integration candidate. Full record:
+`docs/collaboration/REVIEW_SEARCH_TAXONOMY_R1_2026-08-26.md`; formal decision: `DEC-20260826-04`.
+
+### Closed by this milestone
+
+- **B1** — short-CJK taxonomy alias substring false positive, including the semantic inversion
+  `停業後重新開店的品牌` → `sales_category_lv2=已關閉`.
+- **B2** — `stable_record_id: null` leaking into the second governed Vault Markdown writer.
+- **N1** — explicit-field fragment fall-through.
+- **N2** — blocked evaluation now asserts `result_count == 0` directly, not by inference.
+- **N3** — a Negative regression now fails `evaluate-search` with a non-zero exit code.
+- **N5** — the re-index lineage prerequisite is documented (documentation only; no authorization).
+
+### Accepted nonblocking backlog
+
+Recorded, not fixed here. None of these is a regression introduced by this milestone; each was
+verified to behave identically on the frozen candidate `8af7382`.
+
+1. **Runtime catalog-path CJK substring matching.** The boundary rule applies to the Authority
+   scan only. `_contains_exact_phrase` still matches non-ASCII catalog values by bare substring, so
+   the six short indexed values (`寵物 美食 女裝 生鮮 男裝 玩具`) still bind from inside longer
+   words in both modes — `少女裝扮風格` → `sales_category_lv2=女裝`. Side effect to remember when
+   writing cases: those constraints are now attributed to `field_resolver`, not
+   `search_taxonomy_authority`, so `forbid_taxonomy_constraint` alone no longer catches the class.
+2. **Fragment-removal artificial boundary.** Removing a longer claimed alias can leave a short one
+   free-standing: `會員回購率狗` binds `sales_category_lv2=寵物` after `會員回購率` is claimed.
+3. **Explicit constraint whitespace truncation.** `EXPLICIT_CONSTRAINT_PATTERN` stops a value at
+   whitespace, so `sales_category_lv1=電子 3C` claims only `sales_category_lv1=電子`. The query
+   returns an empty result set silently (`execution_blocked=false`, no warning) rather than failing
+   closed with an explanation — that quietness is the part worth fixing.
+4. **LV1 canonical ambiguity** — a product/Authority semantics decision, split into two kinds in
+   the blockers section below.
+5. **Ingestion data-quality WP** — the two content tags the index and Authority disagree on.
+6. **Real-writer B2 regression test hardening.** The two writer tests in
+   `test_stable_record_shadow.py` apply `governed_markdown_frontmatter()` themselves and then
+   assert on their own output; they never call `_markdown_file_for_record` or
+   `_create_parent_markdown`. Removing the fix from both writers leaves all 20 tests passing. The
+   fix is correct — verified by calling the real writers — but nothing guards it.
+7. **Slack taxonomy activation** — the Authority is still not wired to the Slack surface, so none
+   of this fail-closed behaviour reaches end users yet.
+8. **Golden/Negative dataset expansion** — v1 remains a 44-case smoke set.
+
+### Production boundaries held by this milestone
+
+```text
+STABLE_RECORD_V2_ACTIVATED=NO
+ROW_V1_RETIRED=NO
+PRODUCTION_REINDEX_AUTHORIZED=NO
+PRODUCTION_REINDEX_RUN=NO
+SLACK_TAXONOMY_ACTIVATED=NO
+MAIN_UPDATED=NO
+```
+
 ## Next exact action
 
-- Re-review the R1 remediation against the independent review's BLOCKED verdict, then decide on
-  commit and main. Do not activate Stable Record V2, retire row_v1, or authorize a production
-  re-index. R1 is uncommitted: nothing has been staged, committed or pushed.
+- Await explicit user authorization to promote `codex/integrate/stable-shadow-search-taxonomy`
+  to `main`. The integration candidate is prepared and verified; nothing has been pushed to
+  `main`. Do not activate Stable Record V2, retire row_v1, authorize a production re-index, or
+  wire the taxonomy to Slack as part of that promotion — each is a separate decision.
 
 ### Nonblocking items R1 deliberately did not touch
 
