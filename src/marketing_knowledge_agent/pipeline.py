@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, List, Mapping, Optional, Tuple
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; the Authority is never imported by default
+    from .search_taxonomy import SearchTaxonomy
 
 from .agentic import AgenticAnswer, AgentReflection, AgentTrace, QueryAnalysis, agentic_ask
 from .chunking import chunk_documents
@@ -115,10 +118,13 @@ def search_index(
     query_plan: Optional[TypedQueryPlan] = None,
     alias_projection_path: Optional[Path] = DEFAULT_ALIAS_PROJECTION_PATH,
     truncation: Optional[RetrievalTruncation] = None,
+    taxonomy: Optional["SearchTaxonomy"] = None,
 ) -> List[SearchResult]:
     requested_filters = filters or SearchFilters()
     filters = apply_intent_gating(requested_filters)
-    query_plan = query_plan or build_index_query_plan(query, db_path, requested_filters)
+    query_plan = query_plan or build_index_query_plan(
+        query, db_path, requested_filters, taxonomy=taxonomy
+    )
     if query_plan.execution_blocked:
         return []
     retriever = SQLiteRetriever(Path(db_path))
@@ -186,6 +192,7 @@ def ask_index(
     query_plan: Optional[TypedQueryPlan] = None,
     parent_cap: int = DEFAULT_PARENT_CAP,
     asset_cap: int = DEFAULT_ASSET_CAP,
+    taxonomy: Optional["SearchTaxonomy"] = None,
 ) -> GeneratedAnswer:
     filters = filters or SearchFilters()
     governance_index, load_warning = resolve_governance_index(governance_index, restricted_customers_path)
@@ -208,7 +215,9 @@ def ask_index(
     if provider_name != "mock" and not dry_run_llm:
         validate_provider_policy(resolved_llm_config, provider_name)
 
-    query_plan = query_plan or build_index_query_plan(question, db_path, filters)
+    query_plan = query_plan or build_index_query_plan(
+        question, db_path, filters, taxonomy=taxonomy
+    )
     alias_owner_ids = _exact_alias_owner_ids(
         question, query_plan, DEFAULT_ALIAS_PROJECTION_PATH
     )
@@ -281,6 +290,7 @@ def agent_ask(
     query_audit_metadata: Optional[Mapping[str, str]] = None,
     parent_cap: int = DEFAULT_PARENT_CAP,
     asset_cap: int = DEFAULT_ASSET_CAP,
+    taxonomy: Optional["SearchTaxonomy"] = None,
 ) -> AgenticAnswer:
     filters = filters or SearchFilters()
     governance_index, load_warning = resolve_governance_index(governance_index, restricted_customers_path)
@@ -304,7 +314,9 @@ def agent_ask(
     if provider_name != "mock" and not dry_run_llm:
         validate_provider_policy(resolved_llm_config, provider_name)
 
-    query_plan = build_index_query_plan(question, db_path, filters)
+    # Built once and handed to every downstream stage, so the agent's sub-queries answer to the same
+    # Authority the outer question did rather than re-reading the workbook per query.
+    query_plan = build_index_query_plan(question, db_path, filters, taxonomy=taxonomy)
 
     def configured_ask(question, db_path, filters, limit, mode):
         return ask_index(
@@ -437,10 +449,11 @@ def build_index_query_plan(
     query: str,
     db_path: Path,
     filters: Optional[SearchFilters] = None,
+    taxonomy: Optional["SearchTaxonomy"] = None,
 ) -> TypedQueryPlan:
     chunks = SQLiteIndex(Path(db_path)).load_chunks()
     catalog = QueryCatalog.from_metadata(item.chunk.metadata for item in chunks)
-    plan = build_query_plan(query, catalog)
+    plan = build_query_plan(query, catalog, taxonomy=taxonomy)
     if filters is not None and not filters.is_empty():
         plan = allow_semantic_fallback(plan)
     return plan
@@ -453,6 +466,7 @@ def explain_query(
     limit: int = 20,
     mode: str = "hybrid",
     governance_index: Optional[GovernanceIndex] = None,
+    taxonomy: Optional["SearchTaxonomy"] = None,
 ) -> dict:
     if governance_index is not None and governance_index.check_text(query).blocked:
         return {
@@ -474,7 +488,7 @@ def explain_query(
             "abstain_reason": "restricted_query",
         }
     effective_filters = apply_intent_gating(filters or SearchFilters())
-    query_plan = build_index_query_plan(query, db_path, filters)
+    query_plan = build_index_query_plan(query, db_path, filters, taxonomy=taxonomy)
     indexed_chunks = SQLiteIndex(Path(db_path)).load_chunks()
     before_documents = {
         item.chunk.document_id
@@ -504,6 +518,17 @@ def explain_query(
     )
     return {
         "query_plan": query_plan.to_dict(),
+        # Names the Authority this explanation was produced under, or records that none was pinned.
+        # An explanation that cannot say which vocabulary answered the query explains very little.
+        "search_taxonomy": (
+            {
+                "pinned": True,
+                "workbook_path": taxonomy.workbook_path,
+                "workbook_sha256": taxonomy.workbook_sha256,
+            }
+            if taxonomy is not None
+            else {"pinned": False}
+        ),
         "unsupported_constraints": [item.to_dict() for item in query_plan.unsupported_constraints],
         "ambiguous_constraints": [item.to_dict() for item in query_plan.ambiguous_constraints],
         "invalid_constraints": [item.to_dict() for item in query_plan.invalid_constraints],

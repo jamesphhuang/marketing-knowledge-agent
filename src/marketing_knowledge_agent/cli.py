@@ -197,6 +197,7 @@ from .pipeline import (
 )
 from .query_gating import precheck_restricted_query
 from .retrieval import result_to_dict
+from .search_taxonomy import SearchTaxonomyError, load_search_taxonomy
 from .review_template import ReviewTemplateError, generate_review_template
 from .review_decision_validation import ReviewDecisionValidationError, validate_review_decisions
 from .stable_record_crosswalk import (
@@ -251,6 +252,7 @@ def main(argv=None) -> int:
                 filters=filters,
                 limit=args.limit,
                 mode=args.mode,
+                taxonomy=_search_taxonomy_from_args(args),
             )
             payload = [result_to_dict(result) for result in results]
             print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -267,6 +269,7 @@ def main(argv=None) -> int:
                 restricted_customers_path=args.restricted_customers,
                 provider_name=args.provider,
                 dry_run_llm=args.dry_run_llm,
+                taxonomy=_search_taxonomy_from_args(args),
             )
             _print_answer(answer)
             return 0
@@ -285,6 +288,7 @@ def main(argv=None) -> int:
                 limit=args.limit,
                 mode=args.mode,
                 governance_index=governance_index,
+                taxonomy=_search_taxonomy_from_args(args),
             )
             if load_warning:
                 payload["warnings"] = [load_warning]
@@ -302,6 +306,7 @@ def main(argv=None) -> int:
                 restricted_customers_path=args.restricted_customers,
                 provider_name=args.provider,
                 dry_run_llm=args.dry_run_llm,
+                taxonomy=_search_taxonomy_from_args(args),
             )
             _print_answer(answer)
             if args.show_trace:
@@ -1105,6 +1110,9 @@ def main(argv=None) -> int:
     except SlackInterfaceError as exc:
         print(f"slack interface error: {exc}", file=sys.stderr)
         return 2
+    except SearchTaxonomyError as exc:
+        print(f"search taxonomy error: {exc}", file=sys.stderr)
+        return 2
     except FileNotFoundError as exc:
         print(f"file error: {exc}", file=sys.stderr)
         return 2
@@ -1135,12 +1143,14 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("query")
     _add_retrieval_args(search_parser)
     _add_governance_args(search_parser)
+    _add_search_taxonomy_args(search_parser)
 
     ask_parser = subparsers.add_parser("ask", help="Generate a mock RAG answer with citations")
     ask_parser.add_argument("question")
     _add_retrieval_args(ask_parser)
     _add_governance_args(ask_parser)
     _add_llm_args(ask_parser)
+    _add_search_taxonomy_args(ask_parser)
 
     agent_ask_parser = subparsers.add_parser(
         "agent-ask",
@@ -1150,6 +1160,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_retrieval_args(agent_ask_parser)
     _add_governance_args(agent_ask_parser)
     _add_llm_args(agent_ask_parser)
+    _add_search_taxonomy_args(agent_ask_parser)
     agent_ask_parser.add_argument("--show-trace", action="store_true")
 
     explain_parser = subparsers.add_parser(
@@ -1159,6 +1170,7 @@ def build_parser() -> argparse.ArgumentParser:
     explain_parser.add_argument("query")
     _add_retrieval_args(explain_parser)
     _add_governance_args(explain_parser)
+    _add_search_taxonomy_args(explain_parser)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="Run built-in prototype evaluation cases")
     evaluate_parser.add_argument("--vault", type=Path, default=DEFAULT_VAULT)
@@ -2278,6 +2290,42 @@ def _add_schema_v2_confirmation_authority_args(parser: argparse.ArgumentParser) 
     )
     parser.add_argument("--target", type=Path, default=DEFAULT_SCHEMA_V2_CONFIRMATION_TARGET)
     parser.add_argument("--temporary-root", type=Path, default=None)
+
+
+def _add_search_taxonomy_args(parser: argparse.ArgumentParser) -> None:
+    """Opt in to a pinned Search Taxonomy Authority. There is no production default.
+
+    The path and the hash are one argument in two halves. A path alone would let whatever file sits
+    there today decide what search terms mean, and a hash alone names nothing, so either both are
+    given or neither is.
+    """
+    parser.add_argument(
+        "--search-taxonomy-workbook",
+        type=Path,
+        default=None,
+        help=(
+            "Read-only Search Taxonomy Authority workbook to resolve Sales Category LV1/LV2 and "
+            "content tags; requires --search-taxonomy-sha256"
+        ),
+    )
+    parser.add_argument(
+        "--search-taxonomy-sha256",
+        default=None,
+        help="Expected sha256 of --search-taxonomy-workbook; both must be given together",
+    )
+
+
+def _search_taxonomy_from_args(args: argparse.Namespace):
+    workbook = getattr(args, "search_taxonomy_workbook", None)
+    expected_sha256 = getattr(args, "search_taxonomy_sha256", None)
+    if workbook is None and expected_sha256 is None:
+        return None
+    if workbook is None or expected_sha256 is None:
+        raise SearchTaxonomyError(
+            "--search-taxonomy-workbook and --search-taxonomy-sha256 must be given together; "
+            "a taxonomy workbook is only trusted when it is pinned"
+        )
+    return load_search_taxonomy(workbook_path=workbook, expected_sha256=expected_sha256)
 
 
 def _add_retrieval_args(parser: argparse.ArgumentParser) -> None:
