@@ -118,3 +118,75 @@ Identity acceptance does not approve asset, URL, alias, payload, or content chan
 This decision does not authorize Stable Record V2 activation, row_v1 retirement, Vault/content-index mutation, alias rebinding, asset approval, payload/content approval, or production re-index.
 
 Any future Stable Record V2 activation must externally pin the reviewed Authority `manifest_hash` / complete package identity. `content_digest` alone is not sufficient activation trust.
+
+## DEC-20260826-03 — M3E integration independently accepted
+
+### Decision
+
+The M3E governance integration candidate has completed independent integration review and is accepted.
+
+- Candidate: `49a2b038f7ac58f34d5af1cf731d911b4630909e`
+- Integration baseline: `f4988e346bb1dc5c9534feafbea81c45a2a958b0`
+- Accepted M3E source: `5673cf766027454efc98be3ae19fac5ba2742f31`
+- Integration merge commit: `eebf5344e0fd0a0aff86e6bd5596df1e53ecd6c5`
+- Independent review record: `docs/collaboration/REVIEW_WP0-4b-M3E-INTEGRATION_2026-08-26.md`
+- Independent review verdict: `PASS_WITH_NONBLOCKING_FINDINGS`
+- Governance adjudication: `M3E_INTEGRATION_ACCEPTANCE=APPROVED`
+
+### Integration verification
+
+Independent review confirmed:
+
+- baseline-to-candidate changes are limited to the expected governance files;
+- `NON_GOVERNANCE_DRIFT=NONE`;
+- accepted-source `DECISIONS.md`, M3E handoff, and M3E independent-review record remain identical;
+- merge commit structure and both parents are correct;
+- integration conflict resolution correctly preserved the active integration task lock;
+- formal Authority package identity and accepted SHA256 pins remain unchanged;
+- no application code, test, production configuration, Authority, Vault/content-index, alias, asset, or payload mutation occurred.
+
+### Review findings
+
+#### IR1 — CURRENT_WORK workflow state stale
+
+Classification: `NONBLOCKING`
+
+The independent reviewer found that `CURRENT_WORK.md` still described the integration-verification commit/push/review steps as pending even though they had completed.
+
+Disposition: correct the collaboration state in the same acceptance-governance update.
+
+#### IR2 — AppleDouble metadata under shared Git refs
+
+Classification: `INFORMATIONAL`
+
+Shared `.git/refs/**/._*` macOS metadata can cause `git fsck` to report `badRefName` / `badRefContent`.
+
+The metadata is outside the candidate tree and did not affect ancestry, object resolution, integration diff, or worktree cleanliness.
+
+Disposition: separate repository-hygiene backlog; do not repair inside this integration WP.
+
+### Existing findings carried forward
+
+- F1 remains a nonblocking Authority-validation hardening backlog item.
+- F2 remains open for the future Activation WP and requires row-level invariant validation or an equivalent fail-closed activation gate.
+- F3 remains open for activation design where directory-enumerating consumers must enforce an exact-file-set gate.
+- F4 remains a historical governance-record gap and must not be repaired by rewriting history.
+- F5 reviewer-lineage disclosure remains preserved; M3E review must not be reused as an independent M3D-R1 review.
+- Existing build-content-index lineage finding remains a hard blocker for production re-index.
+
+### Governance boundary
+
+- `M3E_INTEGRATION_INDEPENDENT_REVIEW=PASS_WITH_NONBLOCKING_FINDINGS`
+- `M3E_INTEGRATION_ACCEPTANCE=APPROVED`
+- `MAIN_UPDATE_AUTHORIZED=NO`
+- `STABLE_RECORD_V2_ACTIVATED=NO`
+- `ROW_V1_RETIRED=NO`
+- `PRODUCTION_REINDEX_AUTHORIZED=NO`
+
+Future Stable Record V2 activation must continue to externally bind the reviewed Authority:
+
+`manifest_hash=f7e6c278b0b503791d8f679d4ac19b7f856a517978c34e7015da7b4980c5cd7c`
+
+`content_digest` alone is not sufficient as an activation trust anchor.
+
+This decision does not authorize updating `main`, Stable Record V2 activation, row_v1 retirement, Authority mutation, Vault/content-index mutation, alias/asset/payload mutation, or production re-index.

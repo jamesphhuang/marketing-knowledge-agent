@@ -7,12 +7,12 @@
 - State: active
 - Task: WP0.4b-M3E Integration into main
 - Implementer: James Huang (ChatGPT-guided terminal execution)
-- Reviewer: independent integration review pending
+- Reviewer: independent integration reviewer — `PASS_WITH_NONBLOCKING_FINDINGS`
 - Branch: codex/integrate/wp0-4b-m3e-into-main
 - Baseline commit: f4988e346bb1dc5c9534feafbea81c45a2a958b0
 - Intended scope: integrate the independently accepted M3E governance lineage ending at 5673cf766027454efc98be3ae19fac5ba2742f31 into main. No Stable Record V2 activation, row_v1 retirement, Authority mutation, Vault/content-index mutation, alias/asset/payload mutation, or production re-index.
 - Started at: 2026-08-26T10:57:08+08:00
-- Last updated: 2026-08-26T12:33:26+08:00
+- Last updated: 2026-08-26T13:14:11+08:00
 
 
 ## Objective and done definition
@@ -31,30 +31,37 @@
 - M3E governance lineage merged in commit `eebf5344e0fd0a0aff86e6bd5596df1e53ecd6c5`.
 - `M3E_INTEGRATION_VERIFICATION=PASS`.
 - `NON_GOVERNANCE_DRIFT=NONE`.
+- Integration-verification governance commit `49a2b038f7ac58f34d5af1cf731d911b4630909e` created and pushed.
+- Independent integration review completed with verdict `PASS_WITH_NONBLOCKING_FINDINGS`.
+- Governance decision `DEC-20260826-03`: `M3E_INTEGRATION_ACCEPTANCE=APPROVED`.
+- IR1 stale workflow state corrected by this governance update.
+- IR2 AppleDouble Git-ref metadata retained as a separate repository-hygiene backlog item.
 - Source `DECISIONS.md`, M3E handoff, and independent-review record match the accepted M3E source.
 - Governance boundaries remain unchanged: Stable Record V2 not activated, row_v1 not retired, and production re-index not authorized.
 
 ### In progress
 
-- Record integration verification state and prepare the integration branch for independent integration review.
+- Record independent integration acceptance and synchronize collaboration governance state.
 
 ### Not started
 
-- Commit the integration-verification governance update.
-- Push the integration branch.
-- Run independent integration review.
-- Update `main` only after integration review/acceptance.
-- Release integration task lock after integration is complete.
+- Commit and push the independent-acceptance governance update.
+- Release the current integration task lock after governance closeout.
+- Any update to `main` requires a separate explicit authorization and governance step.
 
 ## Verification
 
-- Run: integration worktree HEAD/clean preflight; source ancestry; exact commit/file scope; merge-parent verification; four-file governance scope; no non-governance drift; source-governance file equality; governance-boundary preservation; diff checks.
+- Run: integration worktree HEAD/clean preflight; source ancestry; exact commit/file scope; merge-parent verification; four-file governance scope; no non-governance drift; source-governance file equality; governance-boundary preservation; diff checks; independent integration review.
 - Result: `M3E_INTEGRATION_VERIFICATION=PASS`.
-- Not run: independent integration review; final `main` integration verification.
+- Independent review: `PASS_WITH_NONBLOCKING_FINDINGS`.
+- Governance adjudication: `M3E_INTEGRATION_ACCEPTANCE=APPROVED`.
+- Reviewer mutation check: `REVIEWER_MODIFIED_CANDIDATE=NO`.
+- `MAIN_UPDATE_AUTHORIZED=NO`.
+- Not run: final `main` update or post-main-update verification.
 
 ## Next exact action
 
-- Verify and commit this `CURRENT_WORK.md` integration-verification update, then push the integration branch for independent integration review.
+- Verify and commit `CURRENT_WORK.md`, `DECISIONS.md`, and `REVIEW_WP0-4b-M3E-INTEGRATION_2026-08-26.md` as the independent-integration-acceptance governance record. Do not update `main`.
 
 ## Blockers and unresolved user questions
 
