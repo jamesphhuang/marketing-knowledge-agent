@@ -303,6 +303,28 @@ class DocumentMetadata(BaseModel):
         }
 
 
+# Shadow-scheme keys that carry no meaning until Stable Record V2 is activated. They exist in
+# memory and in the SQLite ``metadata_json`` round-trip, but an unresolved one must never be
+# rendered into a governed Markdown file: ``row_v1`` is still the mutation authority, and a Vault
+# file carrying ``stable_record_id: null`` states a successor scheme that nobody has activated.
+UNRESOLVED_SHADOW_IDENTITY_KEYS = ("stable_record_id",)
+
+
+def governed_markdown_frontmatter(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``payload`` with unresolved shadow identity keys omitted.
+
+    This is the single serialization boundary every governed Markdown writer shares. It drops a
+    shadow key only when its value is ``None``; a resolved ``MKA-MC-#####`` is preserved verbatim,
+    because omitting a real identity would be its own kind of silent loss. Nothing else is
+    filtered -- other ``None`` values are part of the existing frontmatter contract and stay.
+    """
+    frontmatter = dict(payload)
+    for key in UNRESOLVED_SHADOW_IDENTITY_KEYS:
+        if frontmatter.get(key) is None:
+            frontmatter.pop(key, None)
+    return frontmatter
+
+
 class Document(BaseModel):
     id: str
     metadata: DocumentMetadata

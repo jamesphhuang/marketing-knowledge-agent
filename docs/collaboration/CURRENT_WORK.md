@@ -5,16 +5,34 @@
 ## Lock
 
 - State: active
-- Milestone state: REVIEW_READY_DEVELOPMENT_FIRST
-- Task: Golden / Negative Search Evaluation v1
+- Milestone state: REMEDIATION_R1_COMPLETE_UNCOMMITTED
+- Task: Consolidated Blocker Remediation R1 (post independent review)
 - Implementer: Claude Code
-- Reviewer: comprehensive review deferred (development-first)
+- Reviewer: independent review completed 2026-08-26 — verdict BLOCKED; reviewer did not modify the candidate
 - Branch: codex/impl/stable-record-v2-shadow-integration
-- Baseline commit / candidate anchor: ef970ee57f9ce91b29a0604ff3b1b540e88110c1 (Search Taxonomy v1)
-- Frozen behind this anchor: Stable Record Shadow, Content Index Lineage Gate, Search Taxonomy v1 (milestone anchor 5d4a21a327cf2dbb128e9ce21b07224d1e57bf84).
-- Intended scope: add a deterministic Golden/Negative search-quality case set, a read-only evaluation harness, and a baseline run against the pinned Authority and a scratch copy of the current index. Minimal fixes only for implementation bugs the baseline exposes, each with its failing case saved first. No relaxation of fail-closed behaviour, no Authority or production-index mutation, no production re-index/deploy, no identity activation/retirement, no merchant-alias rebinding.
+- Reviewed candidate (frozen, unchanged): 8af73821a237253af6617c5fbf81605b76349b10
+- Frozen behind that anchor: Stable Record Shadow, Content Index Lineage Gate, Search Taxonomy v1, Golden/Negative Search Evaluation v1.
+- Intended scope: fix only the blockers the independent review confirmed (B1, B2) plus the related hardening it named (N1, N2, N3) and the N5 documentation. No new product features, no Search Result Preview, no UAT, no production re-index/sync/deploy, no Stable Record V2 activation, no row_v1 retirement, no Authority workbook edit, no ingestion data repair, no LV1/LV2 renaming, no merchant-alias rebinding.
 - Started at: 2026-08-26
 - Last updated: 2026-08-26
+
+### Independent review verdict and remediation status
+
+```text
+INDEPENDENT_REVIEW=BLOCKED
+REMEDIATION=R1
+B1_SHORT_CJK_FALSE_POSITIVE=FIXED
+B2_STABLE_ID_NULL_LEAK=FIXED
+N1_EXPLICIT_SCOPE_FALLTHROUGH=FIXED
+N2_BLOCKED_RETRIEVAL_ASSERTED=FIXED
+N3_NEGATIVE_FAILURE_EXIT_GATE=FIXED
+N5_REINDEX_PREREQUISITE=DOCUMENTED
+STABLE_RECORD_V2_ACTIVATED=NO
+ROW_V1_RETIRED=NO
+PRODUCTION_REINDEX_AUTHORIZED=NO
+PRODUCTION_REINDEX_RUN=NO
+MAIN_UPDATED=NO
+```
 
 ## Objective and done definition
 
@@ -76,9 +94,54 @@
 - Added `docs/specs/SEARCH_QUALITY_EVALUATION_V1.md` and `tests/test_search_quality_evaluation.py` (26 tests: case-set integrity, harness must-fail behaviour, the explicit-scope regression, restricted-denylist safety, CLI, and a conditional formal baseline).
 - Confirmed the Authority workbook and the production index are byte-identical after every read; the temporary index copy placed in the worktree to exercise the conditional test was removed.
 
+#### Consolidated Blocker Remediation R1 (this round)
+
+- **B1 — short CJK alias false positive: FIXED.** An alias of at most two characters that is not
+  pure ASCII now binds a constraint only where the script itself supplies a boundary: at least one
+  occurrence must sit outside a longer run of CJK characters. Deliberately not a minimum-length
+  rule — the review proved two-character aliases fail the same way (`停業` inside
+  `停業後重新開店`, `倉鼠` inside `倉鼠般`, `冰箱` inside `冰箱裡`).
+- Suppression is not a new refusal: the query falls back to the planner's own non-taxonomy
+  semantics, and no `ambiguity_flags` entry is raised — an ambiguity flag is read downstream by
+  `search_aliases.resolve_exact_alias_parent_ids` as a reason to disable exact merchant-alias
+  expansion, so inventing one would have narrowed an unrelated retrieval path.
+- An explicitly typed field never reaches the rule; naming the field is the user supplying the
+  boundary, so `sales_category_lv2=寵物` still resolves.
+- **B2 — `stable_record_id: null` in governed Vault Markdown: FIXED at the shared boundary.** Added
+  `models.governed_markdown_frontmatter()`, applied immediately before rendering in both
+  originating writers (`apply_review_decisions._markdown_file_for_record` and
+  `store_data_sync_plan_v2_execution._create_parent_markdown`). It omits the key only when the
+  value is `None`; a real `MKA-MC-#####` is preserved.
+- Writer inventory established and guarded by a test: five `metadata_dict()` callers, of which two
+  write SQLite `metadata_json` (`indexing.py`, `store_data_sync_plan_v2_execution.py`), one builds
+  a search-result payload (`retrieval.py`), and two render governed Markdown. `obsidian_sync`
+  re-renders already-parsed frontmatter, so it propagates rather than originates the key.
+- **N1 — explicit-field fall-through: FIXED, and in both modes.** The explicit parser now claims
+  its matched span whatever the Authority says about the value, including `not_found`. Formal
+  sweep: default (`taxonomy=None`) leaks 142/148 → 0/148; taxonomy-on 138/148 → 6/148.
+- The residual 6 share one unrelated root cause: `EXPLICIT_CONSTRAINT_PATTERN` stops a value at
+  whitespace, so `sales_category_lv2=電子 3C` claims only `sales_category_lv2=電子` and the ` 3C`
+  left over is genuinely unclaimed text. Pre-existing at base, not fragment leakage, not fixed here.
+- **N2 — blocked retrieval asserted: FIXED.** `expect_blocked` now requires
+  `execution_blocked == true` AND `result_count == 0`; a violation reports
+  `blocked_query_returned_results`. Covered by a must-fail test that makes retrieval return
+  results despite a blocked plan.
+- **N3 — Negative regression exit gate: FIXED.** `mka evaluate-search` exits non-zero when
+  `golden_fail > 0` **or** `unexpected_failures > 0`. `expected_failure_reason` excuses a case only
+  when the observed failure class equals the declared one exactly; it never changes a status.
+- **N5 — re-index prerequisite: DOCUMENTED ONLY.** `O_CONTENT_INDEX_SPEC.md` §6b records that no
+  sync receipt existing today carries the five binding fields the lineage gate requires, so a fresh
+  reviewed `sync-obsidian execute` under candidate code is a precondition for any confirmed
+  production re-index. No production sync was run.
+- Case set: 39 → 44 cases (21 Golden, 23 Negative). `N-SHORT-01` is now an ordinary passing
+  Negative; added `N-SHORT-03` (`狗屋設計`, 1-char), `N-SHORT-04` (`停業後重新開店的品牌`, 2-char
+  inverted meaning), `N-SHORT-05` (`硒鼓耗材`, mineral character), `N-SHORT-06`
+  (`倉鼠般忙碌的雙11`, simile) and `G-SHORT-01` (`冰箱`, standalone short alias still binds).
+- The dataset now declares **no** known expected failure, and a test asserts that.
+
 ### In progress
 
-- None; the development-first Golden/Negative Search Evaluation v1 candidate is complete and uncommitted.
+- None; the R1 remediation is complete and uncommitted.
 
 ### Not started
 
@@ -100,6 +163,45 @@
 - Skips: seven pre-existing conditional Authority tests whose separate external evidence paths are absent from this isolated worktree; formal three-file Authority was verified separately by the read-only smoke.
 - Warnings: seven Pydantic V1-validator deprecation warnings, including existing validators and the new validator written in repository style.
 - Not run: full application suite and comprehensive/adversarial review (explicitly deferred); standalone lint/type tools (not configured/requested in this development-first targeted pass); production smoke/re-index/sync (forbidden).
+
+### Consolidated Blocker Remediation R1 (Claude Code, 2026-08-26)
+
+- Targeted run (§12 set): `test_search_quality_evaluation.py`, `test_search_taxonomy.py`,
+  `test_typed_query_retrieval.py`, `test_query_gating.py`, `test_pipeline.py`, `test_agentic.py`,
+  `test_apply_review_decisions.py`, `test_store_data_sync_plan_v2_execution.py`,
+  `test_stable_record_shadow.py`, `test_content_index.py`, `test_content_index_lineage.py`,
+  `test_row_v1_workbook_lineage_guard.py`, `test_obsidian_sync.py`.
+- Result: `10 failed, 341 passed, 4 skipped`. All 10 failures are in
+  `test_store_data_sync_plan_v2_execution.py`, the failure-name set is **byte-identical** to the
+  frozen candidate's, and the cause is
+  `FileNotFoundError: .../obsidian_vault/MKA` — gitignored runtime state absent from this isolated
+  worktree. Per instruction, no production ignored state was created; the Markdown serialization
+  helper and both writers are covered by synthetic unit tests instead.
+- Full suite: `137 failed, 1303 passed, 65 skipped, 72 errors`. FAILED/ERROR name set diffed
+  against the frozen candidate `8af7382`: **0 new, 0 fixed** (209 pre-existing environment
+  failures both sides). Passing count 1267 → 1303, i.e. +36 new tests.
+- New tests: 15 short-CJK boundary tests in `test_search_taxonomy.py` (65 → 80), 6 governed-writer
+  and inventory tests in `test_stable_record_shadow.py` (14 → 20), 15 explicit-isolation /
+  blocked-retrieval / exit-gate tests in `test_search_quality_evaluation.py` (26 → 40 + 1 skip).
+- Formal evaluation baseline, pinned Authority + scratch copy of the production index, run both
+  through the harness and through `mka evaluate-search`: **44 cases, 21/21 Golden, 23/23 Negative,
+  0 unexpected failures, 0 known expected failures, exit 0.**
+- Live exit-gate demonstration: injecting one Negative case that must block but does not gives
+  `golden_fail=0, negative_fail=1, unexpected_failures=1` and **exit 1**. The frozen candidate
+  returned exit 0 for the same shape.
+- B2 before/after through the real Managed Parent writer `_create_parent_markdown`: frozen
+  candidate emits `stable_record_id: null`; R1 emits no key at all, and still preserves a resolved
+  `MKA-MC-00001`.
+- Adversarial §13 probes against the formal Authority and a scratch index copy: all 10
+  false-positive queries bind no taxonomy constraint; all 14 must-still-work queries unchanged.
+- `compileall` on every changed source and test file, `git diff --check`, and a JSON parse of the
+  case set all pass.
+- Read-only discipline: the production index and the Authority workbook are byte-identical before
+  and after every run (`74b6038e…`, `7e6ecffc…`); no journal sidecar appeared; every measurement
+  ran against a copy in `/private/tmp`.
+- Not run: production sync, production re-index, deploy, UAT; standalone lint/type tools (not
+  configured in this repo); the store-data-sync formal-runtime tests (blocked by absent gitignored
+  state, unchanged from the frozen candidate).
 
 ### Search Taxonomy v1 (Claude Code, 2026-08-26)
 
@@ -124,15 +226,34 @@
 
 ## Next exact action
 
-- Run the deferred comprehensive/adversarial review of the Search Taxonomy v1 candidate plus this evaluation candidate, together with the frozen Shadow and Lineage Gate candidates. Do not activate Stable Record V2, retire row_v1, or authorize a production re-index.
+- Re-review the R1 remediation against the independent review's BLOCKED verdict, then decide on
+  commit and main. Do not activate Stable Record V2, retire row_v1, or authorize a production
+  re-index. R1 is uncommitted: nothing has been staged, committed or pushed.
+
+### Nonblocking items R1 deliberately did not touch
+
+- `EXPLICIT_CONSTRAINT_PATTERN` stops a value at whitespace, so `sales_category_lv2=電子 3C` claims
+  only `sales_category_lv2=電子`. Pre-existing; changing it alters the explicit parser for every
+  field and needs its own work package.
+- An explicit field naming a value the Authority places in a *different* field (for example
+  `sales_category_lv1=女裝`, where 女裝 is an LV2 canonical) produces a supported constraint that
+  matches nothing rather than a refusal. Whether that should fail closed as
+  `taxonomy_known_but_not_indexed` is a policy decision, not a defect R1 was asked to settle.
+- Recall inside natural sentences: `我想找寵物案例` no longer binds a category, because `寵物` is
+  embedded in a longer CJK run. Deliberate, documented in the taxonomy spec, and recorded here as
+  a UX trade-off for UAT.
+- The Search Taxonomy Authority is still not wired to the Slack surface, so none of this
+  fail-closed behaviour is in effect for end users yet.
 
 ## Blockers and unresolved user questions
 
 - The build-content-index lineage finding is closed by this development candidate; production re-index remains unauthorized until review and a separate explicit production decision.
 - The `stable_record_id: null` row_v1 apply-output compatibility blocker is closed by the narrow serializer-boundary patch.
 - Stable Record V2 activation, row_v1 retirement, and production re-index remain unauthorized.
-- New finding from the search evaluation, reported and deliberately not fixed: the Authority holds nine one-character aliases (`狗 貓 魚 鳥 蛇 硒 鉀 鋅 鎂`). CJK has no word boundary, so `狗` matches inside `熱狗堡` and binds `sales_category_lv2=寵物`, returning four pet brands for a hot-dog query. Case `N-SHORT-01` records the correct behaviour and fails. Whether the fix is a minimum alias length, a boundary rule, or an Authority-side change is a review decision; loosening or special-casing the matcher here was out of bounds.
-- Related usability finding, no code change proposed: five of the eleven indexed LV1 categories (`居家生活`, `寵物`, `家庭婦幼`, `已關閉`, `其他（非 SL 用戶）`) are cross-level ambiguous by their own canonical name and abstain unless the level is named or an expansion term is used. Safe, but it is roughly half the top-level taxonomy and needs a product decision before UAT.
+- CLOSED by R1: the short-CJK alias false positive (`狗` inside `熱狗堡` binding `sales_category_lv2=寵物`). The independent review widened it beyond one-character aliases, and the boundary rule covers both lengths. `N-SHORT-01` now passes, and four more regression cases were added. The chosen fix was a boundary rule, not a minimum length and not an Authority edit.
+- Related usability finding, NONBLOCKING per independent review, deliberately not changed by R1: five of the eleven indexed LV1 categories (`居家生活`, `寵物`, `家庭婦幼`, `已關閉`, `其他（非 SL 用戶）`) are cross-level ambiguous by their own canonical name and abstain unless the level is named or an expansion term is used. The review split them into two kinds, which need different decisions:
+  - `寵物`, `已關閉`, `其他（非 SL 用戶）` are **canonical at both levels**. The Authority itself states the same name twice, so refusing is unambiguously correct; only an explicit field or an Authority-side rename resolves them. Do not touch the resolver for these.
+  - `居家生活` and `家庭婦幼` are **LV1 canonical versus an LV2 expansion term** (of `居家生活相關` and `家庭婦幼相關`). `_preferred_entries` already encodes "a canonical outranks another row's expansion", scoped deliberately to within one field. Extending that same rule across fields would resolve these two deterministically. That is a product/Authority semantics decision and R1 did not make it.
 - Existing finding, not a blocker for this candidate and not fixed here: the formal content index disagrees with the Authority on two content tags. Merchant sheet row 38 carries `直播串接（line` and `fb 等）` as two tags because Vault ingestion splits on `、`, which the Authority treats as a term character; row 106 carries a truncated `商店設計` where row 13 carries `商店設計（shop builder 等）`. Querying those Authority terms therefore fails closed as `taxonomy_known_but_not_indexed` rather than returning a partial match. Reconciling this is upstream Vault/ingestion work and needs its own decision.
 - Unresolved user questions: none.
 

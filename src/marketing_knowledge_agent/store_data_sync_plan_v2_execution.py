@@ -17,7 +17,7 @@ from .chunking import chunk_documents
 from .embeddings import embed_text
 from .frontmatter import FrontmatterError, parse_markdown_with_frontmatter
 from .ingestion import stable_id
-from .models import Document, DocumentMetadata
+from .models import Document, DocumentMetadata, governed_markdown_frontmatter
 from . import store_data_sync_plan_v2_confirmation as confirmation
 
 
@@ -888,7 +888,9 @@ def _create_parent_markdown(source, projection, desired):
     for field in AUDIT_ONLY_FIELDS:
         metadata.pop(field, None)
     body = _parent_body(source, desired["current_review_decision"])
-    return _render_markdown(metadata, body)
+    # Applied last, immediately before rendering, so a projection that also carries the key cannot
+    # put an unresolved shadow identity back after the boundary has already been applied.
+    return _render_markdown(governed_markdown_frontmatter(metadata), body)
 
 
 def _parent_body(source, decision):

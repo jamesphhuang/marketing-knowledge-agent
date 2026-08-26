@@ -85,3 +85,13 @@ BLOCKING_FOR_PRODUCTION_REINDEX
 
 Shadow metadata resolution does not close that blocker and does not authorize production sync,
 production re-index, Stable Record V2 activation, or row_v1 retirement.
+
+`stable_record_id` is shadow metadata, so it must not reach a governed Markdown file until the
+scheme is activated and an identity is actually resolved. Every governed Markdown writer therefore
+renders through `models.governed_markdown_frontmatter()`, which omits the key when its value is
+`None` and preserves it verbatim when it holds a real `MKA-MC-#####`. The in-memory field, the
+`metadata_dict()` payload and the SQLite `metadata_json` round-trip are unchanged: this is a
+serialization boundary, not a schema change.
+
+The operational prerequisite for a confirmed production re-index is recorded in
+`O_CONTENT_INDEX_SPEC.md` §6b. No sync receipt that exists today satisfies the lineage gate.

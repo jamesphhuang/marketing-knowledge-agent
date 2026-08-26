@@ -64,6 +64,21 @@ index by fixed rules:
 The Authority itself is not copied into the repository. The case set holds only the representative
 terms a reviewer needs to read.
 
+## Blocked cases are asserted at retrieval
+
+`expect_blocked` asserts two things, not one:
+
+```text
+execution_blocked == true   AND   result_count == 0
+```
+
+Observing the plan alone cannot tell you a refusal actually refused. A plan can abstain while some
+later stage still hands results to the caller, and that is precisely the failure a plan-only
+assertion is structurally unable to see. `forbid_semantic_fallback` does not cover it either: it
+fires only when results come back with no hard constraint at all, so a blocked plan returning
+results *with* one would pass silently. A violation is reported as
+`blocked_query_returned_results`.
+
 ## Failure classes
 
 A pass rate alone hides which of these is moving, and they have different owners.
@@ -107,12 +122,37 @@ precedence.
 ## Recorded known gaps
 
 A case the system currently fails carries `expected_failure_reason`, so it cannot be silently
-re-read as a pass and its expectation is never bent to match current behaviour. v1 records one:
+re-read as a pass and its expectation is never bent to match current behaviour.
 
-`N-SHORT-01` — the Authority holds nine one-character aliases (`狗 貓 魚 鳥 蛇 硒 鉀 鋅 鎂`). Because
-CJK has no word boundary, `狗` matches inside `熱狗堡` and binds `sales_category_lv2=寵物`, returning
-pet brands for a hot-dog query. Whether short aliases need a minimum length, a boundary rule, or an
-Authority-side change is a decision for review; it is not relaxed here.
+**As of Consolidated Blocker Remediation R1 (2026-08-26) there are none.** The one gap v1 recorded,
+`N-SHORT-01`, was the short-CJK false positive: `狗` matched inside `熱狗堡` and bound
+`sales_category_lv2=寵物`, returning pet brands for a hot-dog query. The short-alias boundary rule
+closed it, and the case is now an ordinary passing Negative alongside `N-SHORT-03` (`狗屋設計`),
+`N-SHORT-04` (`停業後重新開店的品牌`, semantically inverted), `N-SHORT-05` (`硒鼓耗材`, mineral
+character) and `N-SHORT-06` (`倉鼠般忙碌的雙11`, two-character alias inside a simile).
+
+`expected_failure_reason` remains a narrow instrument and is deliberately empty:
+
+- It never changes a status. A declared case still reports `FAIL`.
+- It excuses a case from the exit gate **only when the observed failure class equals the declared
+  one exactly**. A case that starts failing for a different reason is a new regression wearing an
+  old label, and is counted in `unexpected_failures`.
+- A gap left declared after its defect is fixed is a standing exemption, so the case set is
+  asserted to carry none.
+
+## Exit gate
+
+`mka evaluate-search` exits non-zero when either
+
+```text
+golden_fail > 0
+unexpected_failures > 0
+```
+
+A Negative case is what stands between a refusal and a confident wrong answer, so a new Negative
+failure fails the command exactly as loudly as a Golden one. `unexpected_failure_ids` and
+`known_expected_failure_ids` are printed in the summary and the Markdown report so the difference
+is visible without reading every case.
 
 ## Running it
 

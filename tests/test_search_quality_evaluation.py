@@ -22,10 +22,13 @@ from marketing_knowledge_agent.chunking import chunk_documents
 from marketing_knowledge_agent.cli import main
 from marketing_knowledge_agent.governance import GovernanceIndex, RestrictedCustomerRecord
 from marketing_knowledge_agent.indexing import SQLiteIndex
-from marketing_knowledge_agent.models import Document, DocumentMetadata
+from marketing_knowledge_agent.models import Document, DocumentMetadata, SearchResult
 from marketing_knowledge_agent.pipeline import ask_index
 from marketing_knowledge_agent.query_planning import TAXONOMY_FIELDS, build_query_plan
+from marketing_knowledge_agent import search_evaluation
 from marketing_knowledge_agent.search_evaluation import (
+    FAILURE_BLOCKED_QUERY_RETURNED_RESULTS,
+    FAILURE_UNEXPECTED_RESULT,
     FAILURE_MERCHANT_PRECEDENCE,
     FAILURE_RUNTIME_CATALOG_GAP,
     FAILURE_UNEXPECTED_SEMANTIC_FALLBACK,
@@ -136,11 +139,32 @@ def test_known_but_not_indexed_is_never_conflated_with_an_unknown_term():
     assert cases["N-UNKNOWN-01"].expected_abstain_reason == "unresolved_structured_lookup"
 
 
-def test_a_case_recording_a_known_gap_says_which_gap():
-    """A case the system currently fails must declare it, so nobody re-reads it as a pass."""
+def test_the_case_set_records_no_known_gap():
+    """R1 closed the short-alias gap, so nothing in the dataset may still be excused as known.
+
+    A declared gap is a standing exemption from the exit gate. Leaving one behind after its defect
+    is fixed is how a dataset goes quietly green, so the dataset must carry none.
+    """
+    declared = [
+        case.id
+        for case in load_search_quality_cases(CASE_SET_PATH)
+        if case.expected_failure_reason is not None
+    ]
+    assert declared == []
+
+
+def test_the_short_alias_cases_assert_no_taxonomy_constraint_and_a_refusal():
+    """The B1 regression cases, named so a later edit cannot weaken them silently."""
     cases = {case.id: case for case in load_search_quality_cases(CASE_SET_PATH)}
-    assert cases["N-SHORT-01"].expected_failure_reason == FAILURE_WRONG_CONSTRAINT
-    assert cases["N-SHORT-01"].forbid_taxonomy_constraint
+    for case_id in ("N-SHORT-01", "N-SHORT-03", "N-SHORT-04", "N-SHORT-05"):
+        case = cases[case_id]
+        assert case.forbid_taxonomy_constraint, case_id
+        assert case.expect_blocked, case_id
+        assert case.expected_abstain_reason == "unresolved_structured_lookup", case_id
+    # One case covers the other post-suppression path: the planner's own semantics is not a
+    # refusal here, and what matters is still that no taxonomy filter was bound.
+    assert cases["N-SHORT-06"].forbid_taxonomy_constraint
+    assert not cases["N-SHORT-06"].expect_blocked
 
 
 def test_loader_refuses_a_duplicate_case_id(tmp_path):
@@ -450,6 +474,225 @@ def test_cli_writes_a_report_and_signals_golden_regressions(tmp_path, indexed_db
     assert (output / "search_evaluation.json").is_file()
     assert (output / "search_evaluation.md").is_file()
     assert json.loads(capsys.readouterr().out)["golden_fail"] == 1
+
+
+# --------------------------------------------------------------------------------------
+# Explicit field isolation, fall-through branch (R1, N1)
+# --------------------------------------------------------------------------------------
+#
+# The earlier fix only covered the branch where the Authority resolves the value inside the named
+# field. When it does not -- because the value belongs to a different field, or to none -- the
+# explicit parser used to fall through and leave its own text readable, so the catalog pass bound
+# a second taxonomy field from the span the user had already scoped.
+
+
+def _taxonomy_fields(plan):
+    return sorted({item.field for item in plan.constraints if item.field in TAXONOMY_FIELDS})
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_field"),
+    [
+        # 女裝 is an LV2 canonical in the synthetic Authority, scoped here to LV1.
+        ("sales_category_lv1=女裝", "sales_category_lv1"),
+        # 美食 is an LV1 canonical, scoped here to LV2.
+        ("sales_category_lv2=美食", "sales_category_lv2"),
+        # A value the Authority does not know at all still may not widen.
+        ("sales_category_lv1=居家生活相關", "sales_category_lv1"),
+    ],
+)
+def test_an_explicitly_scoped_value_the_authority_places_elsewhere_binds_one_field(
+    query, expected_field, indexed_db, taxonomy
+):
+    plan = build_query_plan(query, _catalog(indexed_db), taxonomy=taxonomy)
+    assert _taxonomy_fields(plan) == [expected_field]
+
+
+def test_the_same_isolation_holds_without_an_authority(indexed_db):
+    """The rule is about who owns the text, so it cannot depend on a taxonomy being supplied."""
+    for query, expected_field in (
+        ("sales_category_lv1=女裝", "sales_category_lv1"),
+        ("sales_category_lv2=美食", "sales_category_lv2"),
+    ):
+        plan = build_query_plan(query, _catalog(indexed_db))
+        assert _taxonomy_fields(plan) == [expected_field], query
+
+
+def test_an_explicit_scope_beside_free_text_claims_only_its_own_span(indexed_db, taxonomy):
+    """The claimed span is spent; genuinely unclaimed text is still read normally."""
+    plan = build_query_plan(
+        "sales_category_lv1=美食 團購", _catalog(indexed_db), taxonomy=taxonomy
+    )
+    bound = {item.field: item.value for item in plan.constraints}
+    assert bound["sales_category_lv1"] == "美食"
+    assert bound["content_tags"] == "團購解決方案"
+
+
+def test_an_explicit_scope_in_an_or_query_does_not_rescope_its_own_value(indexed_db, taxonomy):
+    """OR is where a leaked mirror constraint would actually return records rather than none.
+
+    Under AND a spurious second constraint merely empties the answer; under OR it widens it, so
+    the mirror of an explicitly scoped value is what must be absent. 美食 is an LV1 canonical here,
+    so a mirror would land in ``sales_category_lv1``; the genuinely unclaimed 團購 beside it is
+    still read normally.
+    """
+    plan = build_query_plan(
+        "sales_category_lv2=美食 或 團購", _catalog(indexed_db), taxonomy=taxonomy
+    )
+    assert plan.operator == "OR"
+    assert _taxonomy_fields(plan) == ["content_tags", "sales_category_lv2"]
+
+
+def test_an_explicit_scope_beside_a_merchant_keeps_identity_precedence(indexed_db, taxonomy):
+    plan = build_query_plan(
+        "sales_category_lv1=女裝 三風製麵", _catalog(indexed_db), taxonomy=taxonomy
+    )
+    assert _taxonomy_fields(plan) == ["sales_category_lv1"]
+    assert [entity.canonical_name for entity in plan.resolved_entities] == ["三風製麵"]
+
+
+# --------------------------------------------------------------------------------------
+# Blocked queries are asserted at retrieval, not only in the plan (R1, N2)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_blocked_case_fails_when_retrieval_still_returns_results(
+    monkeypatch, indexed_db, taxonomy
+):
+    """The must-fail test for the assertion itself.
+
+    A plan that abstains while some later stage still hands results to the caller is exactly the
+    failure a plan-only assertion cannot see, so the harness is made to observe it here.
+    """
+    leaked = [
+        SearchResult(chunk=item.chunk, score=1.0)
+        for item in SQLiteIndex(indexed_db).load_chunks()[:2]
+    ]
+    monkeypatch.setattr(search_evaluation, "search_index", lambda *args, **kwargs: leaked)
+    case = _case(
+        "blocked-but-answered",
+        "居家生活",
+        case_class="negative",
+        expected_behavior="abstain",
+        expect_blocked=True,
+    )
+    outcome = _only(_run([case], indexed_db, taxonomy))
+    assert outcome.status == "FAIL"
+    assert outcome.failure_reason == FAILURE_BLOCKED_QUERY_RETURNED_RESULTS
+
+
+def test_a_blocked_case_passes_only_with_an_empty_result_set(indexed_db, taxonomy):
+    case = _case(
+        "blocked-and-empty",
+        "居家生活",
+        case_class="negative",
+        expected_behavior="abstain",
+        expect_blocked=True,
+    )
+    outcome = _only(_run([case], indexed_db, taxonomy))
+    assert outcome.status == "PASS"
+    assert outcome.observation.execution_blocked
+    assert outcome.observation.result_count == 0
+
+
+# --------------------------------------------------------------------------------------
+# Exit gate: a Negative regression must not pass silently (R1, N3)
+# --------------------------------------------------------------------------------------
+
+
+def _failing_negative(case_id, **kwargs):
+    """A Negative case that fails as ``unexpected_result``: it demands a block it will not get."""
+    return _case(
+        case_id,
+        "三風製麵",
+        case_class="negative",
+        expected_behavior="abstain",
+        expect_blocked=True,
+        **kwargs,
+    )
+
+
+def test_an_unrecorded_negative_failure_counts_as_unexpected(indexed_db, taxonomy):
+    report = _run([_failing_negative("n1")], indexed_db, taxonomy)
+    assert report.summary["negative_fail"] == 1
+    assert report.summary["unexpected_failures"] == 1
+    assert report.summary["unexpected_failure_ids"] == ["n1"]
+
+
+def test_a_declared_gap_is_excused_only_for_the_exact_failure_it_declares(
+    indexed_db, taxonomy
+):
+    """``expected_failure_reason`` is an acknowledgement of one gap, not a blanket amnesty."""
+    exact = _run(
+        [_failing_negative("n1", expected_failure_reason=FAILURE_UNEXPECTED_RESULT)],
+        indexed_db,
+        taxonomy,
+    )
+    assert exact.summary["unexpected_failures"] == 0
+    assert exact.summary["known_expected_failure_ids"] == ["n1"]
+    # The status is still FAIL: a declaration never turns a failure into a pass.
+    assert _only(exact).status == "FAIL"
+
+    mismatched = _run(
+        [_failing_negative("n1", expected_failure_reason=FAILURE_WRONG_CONSTRAINT)],
+        indexed_db,
+        taxonomy,
+    )
+    assert mismatched.summary["unexpected_failures"] == 1
+    assert mismatched.summary["known_expected_failure_ids"] == []
+
+
+def test_cli_exits_nonzero_on_an_unexpected_negative_failure(tmp_path, indexed_db, capsys):
+    exit_code = _run_cli(tmp_path, indexed_db, _raw_failing_negative())
+    assert exit_code == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["golden_fail"] == 0
+    assert summary["unexpected_failures"] == 1
+
+
+def test_cli_exits_nonzero_when_a_declared_gap_fails_for_a_different_reason(
+    tmp_path, indexed_db, capsys
+):
+    raw = _raw_failing_negative()
+    raw["expected_failure_reason"] = FAILURE_WRONG_CONSTRAINT
+    exit_code = _run_cli(tmp_path, indexed_db, raw)
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out)["unexpected_failures"] == 1
+
+
+def test_cli_exits_zero_for_a_gap_declared_by_its_exact_failure_reason(
+    tmp_path, indexed_db, capsys
+):
+    raw = _raw_failing_negative()
+    raw["expected_failure_reason"] = FAILURE_UNEXPECTED_RESULT
+    exit_code = _run_cli(tmp_path, indexed_db, raw)
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["negative_fail"] == 1
+    assert summary["unexpected_failures"] == 0
+    assert summary["known_expected_failure_ids"] == ["n1"]
+
+
+def _raw_failing_negative():
+    return {
+        "id": "n1",
+        "query": "三風製麵",
+        "case_class": "negative",
+        "case_type": "synthetic",
+        "expected_behavior": "abstain",
+        "expect_blocked": True,
+        "notes": "deliberately failing negative",
+    }
+
+
+def _run_cli(tmp_path, indexed_db, raw_case):
+    cases_path = tmp_path / "exit-gate-cases.json"
+    cases_path.write_text(
+        json.dumps({"cases": [raw_case]}, ensure_ascii=False), encoding="utf-8"
+    )
+    return main(
+        ["evaluate-search", "--db", str(indexed_db), "--cases", str(cases_path)]
+    )
 
 
 # --------------------------------------------------------------------------------------

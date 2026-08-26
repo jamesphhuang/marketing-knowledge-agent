@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .governance import GovernanceIndex, RestrictedCustomerRecord, split_restricted_aliases
-from .models import DocumentMetadata
+from .models import DocumentMetadata, governed_markdown_frontmatter
 from .record_identity_lineage import (
     APPLY_LINEAGE_FILENAME,
     apply_row_identity_surface_entries,
@@ -395,8 +395,6 @@ def _markdown_file_for_record(
 
     metadata = DocumentMetadata(**payload)
     frontmatter = metadata.metadata_dict()
-    if frontmatter.get("stable_record_id") is None:
-        frontmatter.pop("stable_record_id", None)
     frontmatter.update(
         {
             "review_decision": decision,
@@ -416,7 +414,9 @@ def _markdown_file_for_record(
     else:
         directory = directory / MARKDOWN_RECORD_DIRS.get(metadata.record_type, f"{metadata.record_type}s")
     filename = _record_filename(metadata, record)
-    return directory / filename, _render_markdown(frontmatter, content)
+    # Applied last, immediately before rendering, so nothing added above can put an unresolved
+    # shadow identity back after the boundary has already been applied.
+    return directory / filename, _render_markdown(governed_markdown_frontmatter(frontmatter), content)
 
 
 def _record_body(metadata: DocumentMetadata, decision: str) -> str:

@@ -107,13 +107,51 @@ still resolves through the existing `field_resolver` path.
 Order of operations:
 
 1. Explicitly typed `sales_category_lv1=…` / `sales_category_lv2=…` / `content_tags=…` resolve
-   through the Authority inside the named domain.
+   through the Authority inside the named domain. The matched span is claimed **whatever the
+   Authority goes on to say about the value**, including when it says nothing. Naming the field is
+   the user stating which field that text belongs to, so no later stage may read it again; without
+   this an explicitly scoped `sales_category_lv1=女裝` also acquired an LV2 filter on the same
+   text. This holds with or without an Authority supplied.
 2. Free text is scanned only after identity resolution has claimed its fragments, so a merchant
    brand or handle that happens to equal a taxonomy term is never re-read as vocabulary.
 3. The scan takes the longest matching alias, removes it, and repeats up to `TAXONOMY_SCAN_LIMIT`
    times. Length is a property of the terms, so `美食相關` does not also register the `美食`
    inside it. Claimed fragments are removed before the catalog pass, so the catalog does not
    re-read a shorter value inside a term the Authority already spent.
+
+## Short CJK alias boundary rule
+
+`_contains_exact_phrase` asserts a boundary for ASCII terms, which is why `tv` does not match
+inside `tvbs`. CJK writes without spaces, so no such boundary exists, and the Authority holds nine
+one-character aliases (`狗 貓 魚 鳥 蛇 硒 鉀 鋅 鎂`) plus 386 two-character ones.
+
+An alias whose normalized form is at most `SHORT_CJK_ALIAS_MAX_LENGTH` (2) characters and is not
+pure ASCII therefore binds a constraint only where the script itself supplies a boundary: at least
+one occurrence must sit outside a longer run of CJK characters. Anything longer, and anything
+ASCII, is untouched.
+
+| Query | Alias | Bound |
+| --- | --- | --- |
+| `狗` | `狗` | `sales_category_lv2=寵物` |
+| `熱狗堡品牌的案例` | `狗` | nothing |
+| `停業後重新開店的品牌` | `停業` | nothing |
+| `冰箱` | `冰箱` | `sales_category_lv2=家電/相機/影音硬體設備` |
+| `tv` | `tv` | unchanged; ASCII keeps its own boundary |
+
+Two properties matter as much as the rule:
+
+- An explicitly typed field never reaches it. Naming the field is the user supplying the boundary,
+  so `sales_category_lv2=寵物` still resolves.
+- Suppression is **not** a new refusal. The query is handed back to the planner's own non-taxonomy
+  semantics — usually `unresolved_structured_lookup`, exactly what the same query did before any
+  Authority existed. No taxonomy ambiguity is invented, and in particular no `ambiguity_flags`
+  entry is added: an ambiguity flag is read downstream as a reason to disable exact merchant-alias
+  expansion, so raising one here would narrow an unrelated retrieval path.
+
+The cost is recall inside natural sentences: `我想找寵物案例` no longer binds a category, because
+`寵物` there is embedded in a longer CJK run. That is deliberate. Recovering it needs tokenization
+this parser does not have, and the alternative — answering confidently from an accidental substring
+— is the failure this system exists to avoid. Recorded as a UX trade-off for UAT.
 
 Emitted operators are unchanged from `FIELD_REGISTRY`:
 

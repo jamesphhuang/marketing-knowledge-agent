@@ -6,6 +6,68 @@
   "sampling": "Deterministic, no randomness. Canonical picks: sort a field's canonical values by normalized form, then take the first that is both unambiguous and indexed, and separately the one carrying the most indexed records. Expansion picks: among expansion terms resolving to an unambiguous indexed canonical, sort by (length, term) and take the shortest ASCII, the longest ASCII and a short CJK term. Ambiguity picks: sort ambiguous aliases by normalized form, preferring those whose canonical is indexed. Merchant picks: sort indexed brand names by normalized form and take the first. Values are copied from the pinned Authority and the current index; the Authority itself is not reproduced here.",
   "cases": [
     {
+      "id": "G-EXPLICIT-01",
+      "query": "sales_category_lv1=家居生活",
+      "case_class": "golden",
+      "case_type": "explicit_field_expansion",
+      "expected_behavior": "constraint_and_results",
+      "expected_field": "sales_category_lv1",
+      "expected_canonical": "居家生活",
+      "expected_operator": "canonical_exact",
+      "expect_blocked": false,
+      "forbid_semantic_fallback": true,
+      "forbid_extra_taxonomy_fields": true,
+      "notes": "Naming the level is how a user reaches a canonical whose bare name is cross-level ambiguous. No other taxonomy field may be constrained."
+    },
+    {
+      "id": "G-EXPLICIT-02",
+      "query": "sales_category_lv2=寵物",
+      "case_class": "golden",
+      "case_type": "explicit_field_scope_lv2",
+      "expected_behavior": "constraint_and_results",
+      "expected_field": "sales_category_lv2",
+      "expected_canonical": "寵物",
+      "expected_operator": "canonical_exact",
+      "expect_blocked": false,
+      "forbid_semantic_fallback": true,
+      "forbid_extra_taxonomy_fields": true,
+      "notes": "寵物 is a canonical at both levels. Scoping to LV2 must not also bind LV1 from the same text."
+    },
+    {
+      "id": "G-EXPLICIT-03",
+      "query": "sales_category_lv1=寵物",
+      "case_class": "golden",
+      "case_type": "explicit_field_scope_lv1",
+      "expected_behavior": "constraint_and_results",
+      "expected_field": "sales_category_lv1",
+      "expected_canonical": "寵物",
+      "expected_operator": "canonical_exact",
+      "expect_blocked": false,
+      "forbid_semantic_fallback": true,
+      "forbid_extra_taxonomy_fields": true,
+      "notes": "The mirror of G-EXPLICIT-02: scoping to LV1 must not also bind LV2."
+    },
+    {
+      "id": "G-ID-01",
+      "query": "1982Kids",
+      "case_class": "golden",
+      "case_type": "merchant_name",
+      "expected_behavior": "identity",
+      "expect_blocked": false,
+      "forbid_taxonomy_constraint": true,
+      "notes": "First indexed brand by normalized sort. Identity must resolve and the taxonomy must claim nothing."
+    },
+    {
+      "id": "G-ID-02",
+      "query": "@1982kidsstore",
+      "case_class": "golden",
+      "case_type": "merchant_handle",
+      "expected_behavior": "identity",
+      "expect_blocked": false,
+      "forbid_taxonomy_constraint": true,
+      "notes": "The same merchant by handle."
+    },
+    {
       "id": "G-LV1-CANON-01",
       "query": "流行服飾",
       "case_class": "golden",
@@ -123,6 +185,31 @@
       "notes": "Two-character ASCII expansion."
     },
     {
+      "id": "G-MIX-01",
+      "query": "協發行泡菜 團購",
+      "case_class": "golden",
+      "case_type": "merchant_plus_content_tag",
+      "expected_behavior": "constraint_and_results",
+      "expected_field": "content_tags",
+      "expected_canonical": "團購解決方案",
+      "expected_operator": "contains_exact_tag",
+      "expect_blocked": false,
+      "forbid_semantic_fallback": true,
+      "notes": "Identity and taxonomy in one query. Both constraints are hard filters and are ANDed; every returned record must carry the tag."
+    },
+    {
+      "id": "G-SHORT-01",
+      "query": "冰箱",
+      "case_class": "golden",
+      "case_type": "lv2_expansion_short_cjk",
+      "expected_behavior": "constraint_and_results",
+      "expected_field": "sales_category_lv2",
+      "expected_canonical": "家電/相機/影音硬體設備",
+      "expected_operator": "canonical_exact",
+      "forbid_semantic_fallback": true,
+      "notes": "A two-character CJK alias standing on its own still binds. The boundary rule suppresses embedded matches only, so it must not cost the short terms users actually type by themselves."
+    },
+    {
       "id": "G-TAG-CANON-01",
       "query": "團購解決方案",
       "case_class": "golden",
@@ -188,145 +275,15 @@
       "notes": "Shortest CJK content-tag expansion that resolves unambiguously."
     },
     {
-      "id": "G-ID-01",
-      "query": "1982Kids",
-      "case_class": "golden",
-      "case_type": "merchant_name",
-      "expected_behavior": "identity",
-      "expect_blocked": false,
-      "forbid_taxonomy_constraint": true,
-      "notes": "First indexed brand by normalized sort. Identity must resolve and the taxonomy must claim nothing."
-    },
-    {
-      "id": "G-ID-02",
-      "query": "@1982kidsstore",
-      "case_class": "golden",
-      "case_type": "merchant_handle",
-      "expected_behavior": "identity",
-      "expect_blocked": false,
-      "forbid_taxonomy_constraint": true,
-      "notes": "The same merchant by handle."
-    },
-    {
-      "id": "G-MIX-01",
-      "query": "協發行泡菜 團購",
-      "case_class": "golden",
-      "case_type": "merchant_plus_content_tag",
-      "expected_behavior": "constraint_and_results",
-      "expected_field": "content_tags",
-      "expected_canonical": "團購解決方案",
-      "expected_operator": "contains_exact_tag",
-      "expect_blocked": false,
-      "forbid_semantic_fallback": true,
-      "notes": "Identity and taxonomy in one query. Both constraints are hard filters and are ANDed; every returned record must carry the tag."
-    },
-    {
-      "id": "G-EXPLICIT-01",
-      "query": "sales_category_lv1=家居生活",
-      "case_class": "golden",
-      "case_type": "explicit_field_expansion",
-      "expected_behavior": "constraint_and_results",
-      "expected_field": "sales_category_lv1",
-      "expected_canonical": "居家生活",
-      "expected_operator": "canonical_exact",
-      "expect_blocked": false,
-      "forbid_semantic_fallback": true,
-      "forbid_extra_taxonomy_fields": true,
-      "notes": "Naming the level is how a user reaches a canonical whose bare name is cross-level ambiguous. No other taxonomy field may be constrained."
-    },
-    {
-      "id": "G-EXPLICIT-02",
-      "query": "sales_category_lv2=寵物",
-      "case_class": "golden",
-      "case_type": "explicit_field_scope_lv2",
-      "expected_behavior": "constraint_and_results",
-      "expected_field": "sales_category_lv2",
-      "expected_canonical": "寵物",
-      "expected_operator": "canonical_exact",
-      "expect_blocked": false,
-      "forbid_semantic_fallback": true,
-      "forbid_extra_taxonomy_fields": true,
-      "notes": "寵物 is a canonical at both levels. Scoping to LV2 must not also bind LV1 from the same text."
-    },
-    {
-      "id": "G-EXPLICIT-03",
-      "query": "sales_category_lv1=寵物",
-      "case_class": "golden",
-      "case_type": "explicit_field_scope_lv1",
-      "expected_behavior": "constraint_and_results",
-      "expected_field": "sales_category_lv1",
-      "expected_canonical": "寵物",
-      "expected_operator": "canonical_exact",
-      "expect_blocked": false,
-      "forbid_semantic_fallback": true,
-      "forbid_extra_taxonomy_fields": true,
-      "notes": "The mirror of G-EXPLICIT-02: scoping to LV1 must not also bind LV2."
-    },
-    {
-      "id": "N-XLEVEL-01",
-      "query": "居家生活",
+      "id": "N-DATAQ-01",
+      "query": "直播串接（LINE、FB 等）",
       "case_class": "negative",
-      "case_type": "cross_level_ambiguity",
+      "case_type": "ingestion_split_tag",
       "expected_behavior": "abstain",
       "expect_blocked": true,
-      "expected_abstain_reason": "ambiguous_taxonomy_term",
+      "expected_abstain_reason": "taxonomy_known_but_not_indexed",
       "forbid_semantic_fallback": true,
-      "notes": "LV1 canonical 居家生活 and LV2 expansion of 居家生活相關. Must refuse rather than pick a level."
-    },
-    {
-      "id": "N-XLEVEL-02",
-      "query": "寵物",
-      "case_class": "negative",
-      "case_type": "cross_level_ambiguity",
-      "expected_behavior": "abstain",
-      "expect_blocked": true,
-      "expected_abstain_reason": "ambiguous_taxonomy_term",
-      "forbid_semantic_fallback": true,
-      "notes": "Canonical at both levels, differing only by trailing whitespace in the workbook."
-    },
-    {
-      "id": "N-XLEVEL-03",
-      "query": "家庭婦幼",
-      "case_class": "negative",
-      "case_type": "cross_level_ambiguity",
-      "expected_behavior": "abstain",
-      "expect_blocked": true,
-      "expected_abstain_reason": "ambiguous_taxonomy_term",
-      "forbid_semantic_fallback": true,
-      "notes": "LV1 canonical whose name is also an LV2 expansion of 家庭婦幼相關."
-    },
-    {
-      "id": "N-XLEVEL-04",
-      "query": "已關閉",
-      "case_class": "negative",
-      "case_type": "cross_level_ambiguity",
-      "expected_behavior": "abstain",
-      "expect_blocked": true,
-      "expected_abstain_reason": "ambiguous_taxonomy_term",
-      "forbid_semantic_fallback": true,
-      "notes": "Identical canonical at both levels."
-    },
-    {
-      "id": "N-XLEVEL-05",
-      "query": "其他（非 SL 用戶）",
-      "case_class": "negative",
-      "case_type": "cross_level_ambiguity",
-      "expected_behavior": "abstain",
-      "expect_blocked": true,
-      "expected_abstain_reason": "ambiguous_taxonomy_term",
-      "forbid_semantic_fallback": true,
-      "notes": "Identical canonical at both levels, with full-width parentheses."
-    },
-    {
-      "id": "N-XLEVEL-06",
-      "query": "grocery",
-      "case_class": "negative",
-      "case_type": "cross_level_ambiguity_ascii",
-      "expected_behavior": "abstain",
-      "expect_blocked": true,
-      "expected_abstain_reason": "ambiguous_taxonomy_term",
-      "forbid_semantic_fallback": true,
-      "notes": "ASCII canonical at both levels; casefolding must not be used to break the tie."
+      "notes": "The index stores this canonical tag as two fragments because ingestion split it on the ideographic comma. Refusing is correct; the defect is upstream and must not be papered over with a taxonomy special case."
     },
     {
       "id": "N-INTRA-01",
@@ -395,15 +352,74 @@
       "notes": "The only LV1 canonical absent from the index; the level is named, so ambiguity is resolved and the coverage gap is what remains."
     },
     {
-      "id": "N-DATAQ-01",
-      "query": "直播串接（LINE、FB 等）",
+      "id": "N-SHORT-01",
+      "query": "熱狗堡品牌的案例",
       "case_class": "negative",
-      "case_type": "ingestion_split_tag",
+      "case_type": "short_alias_false_positive",
       "expected_behavior": "abstain",
       "expect_blocked": true,
-      "expected_abstain_reason": "taxonomy_known_but_not_indexed",
+      "expected_abstain_reason": "unresolved_structured_lookup",
+      "forbid_taxonomy_constraint": true,
       "forbid_semantic_fallback": true,
-      "notes": "The index stores this canonical tag as two fragments because ingestion split it on the ideographic comma. Refusing is correct; the defect is upstream and must not be papered over with a taxonomy special case."
+      "notes": "One-character alias 狗 sits inside 熱狗堡. CJK writes without spaces, so the short-alias boundary rule refuses to bind sales_category_lv2=寵物 from a substring; the query falls back to the planner's own non-taxonomy semantics, which is an unresolved lookup."
+    },
+    {
+      "id": "N-SHORT-02",
+      "query": "有沒有其他品牌的案例",
+      "case_class": "negative",
+      "case_type": "short_alias_safe_block",
+      "expected_behavior": "abstain",
+      "expect_blocked": true,
+      "expected_abstain_reason": "unresolved_structured_lookup",
+      "forbid_taxonomy_constraint": true,
+      "forbid_semantic_fallback": true,
+      "notes": "其他 is an Authority alias at both levels, but here it is embedded in 有沒有其他品牌. The boundary rule stops it binding, so an ordinary sentence no longer refuses on a taxonomy ambiguity it never really stated; it refuses as an unresolved lookup."
+    },
+    {
+      "id": "N-SHORT-03",
+      "query": "狗屋設計",
+      "case_class": "negative",
+      "case_type": "short_alias_false_positive",
+      "expected_behavior": "abstain",
+      "expect_blocked": true,
+      "expected_abstain_reason": "unresolved_structured_lookup",
+      "forbid_taxonomy_constraint": true,
+      "forbid_semantic_fallback": true,
+      "notes": "One-character alias 狗 at the start of a longer CJK word. Position must not matter: 狗屋 is a kennel, not the pet category."
+    },
+    {
+      "id": "N-SHORT-04",
+      "query": "停業後重新開店的品牌",
+      "case_class": "negative",
+      "case_type": "short_alias_inverted_meaning",
+      "expected_behavior": "abstain",
+      "expect_blocked": true,
+      "expected_abstain_reason": "unresolved_structured_lookup",
+      "forbid_taxonomy_constraint": true,
+      "forbid_semantic_fallback": true,
+      "notes": "Two-character alias 停業 inside 停業後重新開店 bound sales_category_lv2=已關閉, the opposite of what the query asks for. Proves the rule is not about alias length alone."
+    },
+    {
+      "id": "N-SHORT-05",
+      "query": "硒鼓耗材",
+      "case_class": "negative",
+      "case_type": "short_alias_mineral_character",
+      "expected_behavior": "abstain",
+      "expect_blocked": true,
+      "expected_abstain_reason": "unresolved_structured_lookup",
+      "forbid_taxonomy_constraint": true,
+      "forbid_semantic_fallback": true,
+      "notes": "硒 is an Authority alias for 養生/保健 and also the first character of 硒鼓, a toner cartridge. Covers the four mineral characters 硒 鉀 鋅 鎂."
+    },
+    {
+      "id": "N-SHORT-06",
+      "query": "倉鼠般忙碌的雙11",
+      "case_class": "negative",
+      "case_type": "short_alias_in_metaphor",
+      "expected_behavior": "semantic_baseline",
+      "expect_blocked": false,
+      "forbid_taxonomy_constraint": true,
+      "notes": "倉鼠 used as a simile, not a category. Suppressing the alias leaves the planner's own semantics, which here is a semantic question rather than a refusal; what matters is that no pet-category hard filter is bound."
     },
     {
       "id": "N-TYPO-01",
@@ -448,26 +464,70 @@
       "notes": "A genuine semantic question with no taxonomy term. Ranking is recorded as a baseline; subjective relevance is out of scope for v1."
     },
     {
-      "id": "N-SHORT-01",
-      "query": "熱狗堡品牌的案例",
+      "id": "N-XLEVEL-01",
+      "query": "居家生活",
       "case_class": "negative",
-      "case_type": "short_alias_false_positive",
-      "expected_behavior": "semantic_baseline",
-      "expect_blocked": false,
-      "forbid_taxonomy_constraint": true,
-      "expected_failure_reason": "wrong_constraint",
-      "notes": "KNOWN GAP, expected to fail. The Authority holds nine one-character aliases (狗 貓 魚 鳥 蛇 硒 鉀 鋅 鎂); 狗 matches inside 熱狗堡 and binds sales_category_lv2=寵物. The expectation records correct behaviour; the fix is a matching-rule decision for review, not something to relax here."
-    },
-    {
-      "id": "N-SHORT-02",
-      "query": "有沒有其他品牌的案例",
-      "case_class": "negative",
-      "case_type": "short_alias_safe_block",
+      "case_type": "cross_level_ambiguity",
       "expected_behavior": "abstain",
       "expect_blocked": true,
       "expected_abstain_reason": "ambiguous_taxonomy_term",
       "forbid_semantic_fallback": true,
-      "notes": "其他 is a genuine Authority alias for 其他（非 SL 用戶） at both levels, so an ordinary sentence containing it refuses. Safe but a recall and wording problem worth a product decision."
+      "notes": "LV1 canonical 居家生活 and LV2 expansion of 居家生活相關. Must refuse rather than pick a level."
+    },
+    {
+      "id": "N-XLEVEL-02",
+      "query": "寵物",
+      "case_class": "negative",
+      "case_type": "cross_level_ambiguity",
+      "expected_behavior": "abstain",
+      "expect_blocked": true,
+      "expected_abstain_reason": "ambiguous_taxonomy_term",
+      "forbid_semantic_fallback": true,
+      "notes": "Canonical at both levels, differing only by trailing whitespace in the workbook."
+    },
+    {
+      "id": "N-XLEVEL-03",
+      "query": "家庭婦幼",
+      "case_class": "negative",
+      "case_type": "cross_level_ambiguity",
+      "expected_behavior": "abstain",
+      "expect_blocked": true,
+      "expected_abstain_reason": "ambiguous_taxonomy_term",
+      "forbid_semantic_fallback": true,
+      "notes": "LV1 canonical whose name is also an LV2 expansion of 家庭婦幼相關."
+    },
+    {
+      "id": "N-XLEVEL-04",
+      "query": "已關閉",
+      "case_class": "negative",
+      "case_type": "cross_level_ambiguity",
+      "expected_behavior": "abstain",
+      "expect_blocked": true,
+      "expected_abstain_reason": "ambiguous_taxonomy_term",
+      "forbid_semantic_fallback": true,
+      "notes": "Identical canonical at both levels."
+    },
+    {
+      "id": "N-XLEVEL-05",
+      "query": "其他（非 SL 用戶）",
+      "case_class": "negative",
+      "case_type": "cross_level_ambiguity",
+      "expected_behavior": "abstain",
+      "expect_blocked": true,
+      "expected_abstain_reason": "ambiguous_taxonomy_term",
+      "forbid_semantic_fallback": true,
+      "notes": "Identical canonical at both levels, with full-width parentheses."
+    },
+    {
+      "id": "N-XLEVEL-06",
+      "query": "grocery",
+      "case_class": "negative",
+      "case_type": "cross_level_ambiguity_ascii",
+      "expected_behavior": "abstain",
+      "expect_blocked": true,
+      "expected_abstain_reason": "ambiguous_taxonomy_term",
+      "forbid_semantic_fallback": true,
+      "notes": "ASCII canonical at both levels; casefolding must not be used to break the tie."
     }
   ]
 }

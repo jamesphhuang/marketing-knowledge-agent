@@ -29,6 +29,7 @@ from marketing_knowledge_agent.pipeline import (
 )
 from marketing_knowledge_agent.query_planning import (
     CATEGORY_ALIASES,
+    TAXONOMY_FIELDS,
     QueryCatalog,
     allow_semantic_fallback,
     build_query_plan,
@@ -711,6 +712,146 @@ def test_cli_reports_a_taxonomy_pin_that_does_not_match(tmp_path, capsys):
     )
     assert exit_code == 2
     assert "search taxonomy error" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------------------
+# Short CJK alias boundary rule (Consolidated Blocker Remediation R1, B1)
+# --------------------------------------------------------------------------------------
+#
+# CJK writes without spaces, so a one- or two-character alias matches inside longer words that
+# mean something else. These tests use their own workbook rather than the shared fixture, because
+# the point is the *shape* of the vocabulary: single characters, two-character terms, and a longer
+# term that must keep matching normally.
+
+
+SHORT_ALIAS_SALES_ROWS = [
+    SALES_CATEGORY_HEADERS,
+    # 狗 and 魚 are single characters; 倉鼠 is two. All three appear inside longer ordinary words.
+    ["寵物大類", "寵物用品", "寵物", "狗, 魚, 倉鼠, 寵物用品專區"],
+    # 停業 is two characters and reverses the meaning of the sentence it hides in.
+    ["營運狀態", "營運", "已關閉", "停業"],
+    # A long term that must keep resolving from inside a sentence.
+    ["美食", "食品", "食品／飲料", "手搖飲料專門店"],
+]
+SHORT_ALIAS_TAG_ROWS = [
+    CONTENT_TAG_HEADERS,
+    # ASCII short terms keep their own boundary protection and must not be caught by this rule.
+    ["操作易用性", "ux, tv, 3c", None],
+]
+
+
+@pytest.fixture
+def short_alias_taxonomy(tmp_path):
+    path = tmp_path / "short-alias-taxonomy.xlsx"
+    expected = write_taxonomy_workbook(
+        path, sales_rows=SHORT_ALIAS_SALES_ROWS, tag_rows=SHORT_ALIAS_TAG_ROWS
+    )
+    return load_search_taxonomy(workbook_path=path, expected_sha256=expected)
+
+
+@pytest.fixture
+def short_alias_catalog():
+    return QueryCatalog(
+        merchant_names=["熱狗堡專賣"],
+        sales_category_lv1=["寵物大類", "營運狀態", "美食"],
+        sales_category_lv2=["寵物", "已關閉", "食品/飲料"],
+        content_tags=["操作易用性"],
+    )
+
+
+def _taxonomy_fields(plan):
+    return [
+        (item.field, item.value) for item in plan.constraints if item.field in TAXONOMY_FIELDS
+    ]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "熱狗堡品牌的案例",   # 狗 embedded mid-word
+        "狗屋設計",           # 狗 embedded at the start
+        "魚市場行銷",         # 魚 embedded at the start
+        "倉鼠般忙碌的雙11",   # two-character alias inside a simile
+        "停業後重新開店的品牌",  # two-character alias, inverted meaning
+    ],
+)
+def test_a_short_cjk_alias_inside_a_longer_word_binds_nothing(
+    query, short_alias_taxonomy, short_alias_catalog
+):
+    plan = build_query_plan(query, short_alias_catalog, short_alias_taxonomy)
+    assert _taxonomy_fields(plan) == []
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("狗", ("sales_category_lv2", "寵物")),
+        ("倉鼠", ("sales_category_lv2", "寵物")),
+        ("停業", ("sales_category_lv2", "已關閉")),
+        # A boundary the script itself supplies: punctuation and whitespace both end a CJK run.
+        ("狗 的案例", ("sales_category_lv2", "寵物")),
+        ("「倉鼠」", ("sales_category_lv2", "寵物")),
+    ],
+)
+def test_a_free_standing_short_cjk_alias_still_binds(
+    query, expected, short_alias_taxonomy, short_alias_catalog
+):
+    plan = build_query_plan(query, short_alias_catalog, short_alias_taxonomy)
+    assert _taxonomy_fields(plan) == [expected]
+
+
+def test_the_rule_does_not_touch_ascii_short_aliases(short_alias_taxonomy, short_alias_catalog):
+    """ASCII terms already assert a boundary; this rule must not take that away or duplicate it."""
+    for query in ("ux", "tv", "3c"):
+        plan = build_query_plan(query, short_alias_catalog, short_alias_taxonomy)
+        assert _taxonomy_fields(plan) == [("content_tags", "操作易用性")], query
+
+
+def test_the_rule_does_not_touch_longer_cjk_terms(short_alias_taxonomy, short_alias_catalog):
+    """A term long enough to be specific keeps matching inside a sentence, as it always did."""
+    plan = build_query_plan(
+        "想看手搖飲料專門店的案例", short_alias_catalog, short_alias_taxonomy
+    )
+    assert _taxonomy_fields(plan) == [("sales_category_lv2", "食品/飲料")]
+
+
+def test_an_explicit_field_is_the_user_supplying_the_boundary(
+    short_alias_taxonomy, short_alias_catalog
+):
+    """Naming the field states the domain, so the short-alias rule must not reach it."""
+    plan = build_query_plan(
+        "sales_category_lv2=寵物", short_alias_catalog, short_alias_taxonomy
+    )
+    assert _taxonomy_fields(plan) == [("sales_category_lv2", "寵物")]
+
+
+def test_a_suppressed_short_alias_keeps_the_planners_own_semantics(
+    short_alias_taxonomy, short_alias_catalog
+):
+    """Suppression is not a new refusal: it hands the query back to the non-taxonomy planner.
+
+    Nothing is forced into a taxonomy ambiguity, and no ambiguity flag is raised -- an ambiguity
+    flag is read downstream as a reason to disable exact merchant-alias expansion, so inventing one
+    here would narrow an unrelated retrieval path.
+    """
+    with_authority = build_query_plan(
+        "熱狗堡品牌的案例", short_alias_catalog, short_alias_taxonomy
+    )
+    without_authority = build_query_plan("熱狗堡品牌的案例", short_alias_catalog)
+
+    assert with_authority.effective_abstain_reason == without_authority.effective_abstain_reason
+    assert with_authority.query_mode == without_authority.query_mode
+    assert not any(
+        flag.startswith("taxonomy_ambiguous_term") for flag in with_authority.ambiguity_flags
+    )
+
+
+def test_merchant_identity_still_outranks_a_suppressed_short_alias(
+    short_alias_taxonomy, short_alias_catalog
+):
+    plan = build_query_plan("熱狗堡專賣", short_alias_catalog, short_alias_taxonomy)
+    assert _taxonomy_fields(plan) == []
+    assert [entity.canonical_name for entity in plan.resolved_entities] == ["熱狗堡專賣"]
 
 
 # --------------------------------------------------------------------------------------

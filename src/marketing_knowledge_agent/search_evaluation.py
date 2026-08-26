@@ -65,6 +65,10 @@ FAILURE_WRONG_CONSTRAINT = "wrong_constraint"
 FAILURE_MERCHANT_PRECEDENCE = "merchant_precedence"
 FAILURE_DATA_QUALITY = "data_quality"
 FAILURE_INGESTION_QUALITY = "ingestion_quality"
+# A refusal is only a refusal if nothing came back. Observing the plan alone cannot tell you that:
+# a plan can abstain while some later stage still hands results to the caller, and that is the
+# failure a plan-only assertion is structurally unable to see.
+FAILURE_BLOCKED_QUERY_RETURNED_RESULTS = "blocked_query_returned_results"
 FAILURE_REASONS = (
     FAILURE_TAXONOMY_RESOLUTION,
     FAILURE_RUNTIME_CATALOG_GAP,
@@ -75,6 +79,7 @@ FAILURE_REASONS = (
     FAILURE_MERCHANT_PRECEDENCE,
     FAILURE_DATA_QUALITY,
     FAILURE_INGESTION_QUALITY,
+    FAILURE_BLOCKED_QUERY_RETURNED_RESULTS,
 )
 
 # Which failure class an unexpected refusal belongs to, keyed by the plan's own abstain reason.
@@ -210,6 +215,22 @@ class EvaluationReport:
         )
 
     @property
+    def unexpected_failures(self) -> Tuple[CaseOutcome, ...]:
+        """Failing cases the dataset did not already record, by exact failure class.
+
+        ``expected_failure_reason`` is a narrow acknowledgement of one known gap, not an amnesty:
+        it excuses a case only when the failure observed is the very one recorded. A case that
+        starts failing for a *different* reason is a new regression wearing an old label, and is
+        reported here so the exit gate sees it.
+        """
+        return tuple(
+            outcome
+            for outcome in self.outcomes
+            if outcome.status == "FAIL"
+            and outcome.case.expected_failure_reason != outcome.failure_reason
+        )
+
+    @property
     def summary(self) -> Dict[str, Any]:
         golden_pass = self._by_class("golden", "PASS")
         golden_fail = self._by_class("golden", "FAIL")
@@ -223,6 +244,7 @@ class EvaluationReport:
                 failure_counts[outcome.failure_reason] = (
                     failure_counts.get(outcome.failure_reason, 0) + 1
                 )
+        unexpected = self.unexpected_failures
         return {
             "golden_cases": golden_pass + golden_fail,
             "golden_pass": golden_pass,
@@ -231,6 +253,17 @@ class EvaluationReport:
             "negative_pass": negative_pass,
             "negative_fail": negative_fail,
             "total": total,
+            # The exit gate reads these two, not the pass rate. A Negative case is the guard
+            # against answering when the system should refuse, so a new Negative failure has to
+            # fail the command as loudly as a Golden one.
+            "unexpected_failures": len(unexpected),
+            "unexpected_failure_ids": [outcome.case.id for outcome in unexpected],
+            "known_expected_failure_ids": [
+                outcome.case.id
+                for outcome in self.outcomes
+                if outcome.status == "FAIL" and outcome.case.expected_failure_reason
+                and outcome.case.expected_failure_reason == outcome.failure_reason
+            ],
             # Reported, but never the headline: the failure breakdown below is what says whether a
             # miss belongs to search, to the index, or upstream of both.
             "pass_rate": round(passed / total, 4) if total else 0.0,
@@ -451,6 +484,16 @@ def _judge(case: SearchCase, observation: CaseObservation) -> Tuple[Optional[str
             FAILURE_UNEXPECTED_RESULT,
             f"execution was not blocked; abstain_reason={observation.abstain_reason!r}",
         )
+    if case.expect_blocked and observation.result_count:
+        # Asserted separately from the plan, and separately from ``forbid_semantic_fallback``:
+        # that flag only fires when there is no hard constraint at all, so a blocked plan that
+        # returned results *with* a constraint would otherwise pass silently.
+        return (
+            FAILURE_BLOCKED_QUERY_RETURNED_RESULTS,
+            f"plan abstained with {observation.abstain_reason!r} but retrieval returned "
+            f"{observation.result_count} results: "
+            + ", ".join(observation.result_document_ids[:5]),
+        )
     if not case.expect_blocked and observation.execution_blocked:
         # Classified by *why* it blocked. A refusal because nothing in the index carries the value
         # belongs to whoever owns the next re-index, not to whoever owns the resolver, and reading
@@ -626,6 +669,9 @@ def render_evaluation_markdown(report: EvaluationReport) -> str:
         f"- Golden: {summary['golden_pass']}/{summary['golden_cases']} pass",
         f"- Negative: {summary['negative_pass']}/{summary['negative_cases']} pass",
         f"- Total: {summary['total']} cases, pass rate {summary['pass_rate']}",
+        f"- Unexpected failures: {summary['unexpected_failures']} "
+        f"{summary['unexpected_failure_ids'] or ''}".rstrip(),
+        f"- Known expected failures: {summary['known_expected_failure_ids'] or 'none'}",
         "",
         "## Failure classes",
         "",

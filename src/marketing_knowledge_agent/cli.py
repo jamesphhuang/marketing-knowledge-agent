@@ -318,8 +318,16 @@ def main(argv=None) -> int:
                     render_evaluation_markdown(report), encoding="utf-8"
                 )
             print(json.dumps(report.summary, ensure_ascii=False, indent=2))
-            # A failing Golden case is a search-quality regression, not a crash.
-            return 0 if report.summary["golden_fail"] == 0 else 1
+            # A search-quality regression, not a crash. Both halves matter: any Golden failure,
+            # and any failure the dataset has not already recorded by exact failure class. A
+            # Negative case is what stands between a refusal and a confident wrong answer, so a
+            # new Negative failure has to fail this command too.
+            return (
+                0
+                if report.summary["golden_fail"] == 0
+                and report.summary["unexpected_failures"] == 0
+                else 1
+            )
 
         if args.command == "agent-ask":
             filters = _filters_from_args(args)

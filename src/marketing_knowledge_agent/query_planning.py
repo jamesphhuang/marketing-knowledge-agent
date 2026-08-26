@@ -248,6 +248,21 @@ TAXONOMY_SCAN_LIMIT = 8
 ABSTAIN_TAXONOMY_AMBIGUOUS = "ambiguous_taxonomy_term"
 ABSTAIN_TAXONOMY_NOT_INDEXED = "taxonomy_known_but_not_indexed"
 
+# CJK writes without spaces, so a short alias matches inside longer words that mean something
+# else: "狗" inside "熱狗堡", "停業" inside "停業後重新開店", "鎂" inside "鎂光燈". An ASCII alias
+# is already protected -- ``_contains_exact_phrase`` asserts a boundary for it, which is why "tv"
+# does not match inside "tvbs" -- but no such boundary exists in the script here. A short CJK
+# alias therefore binds a constraint only where the script itself provides the boundary: at least
+# one occurrence must sit outside a longer run of CJK characters. Explicitly typed
+# ``sales_category_lv2=寵物`` never reaches this rule, because naming the field is the user
+# supplying the boundary. The cost is recall inside natural sentences -- "我想找寵物案例" no
+# longer binds a category -- and that cost is deliberate: this parser must not answer confidently
+# from an accidental substring.
+SHORT_CJK_ALIAS_MAX_LENGTH = 2
+# Unified Ideographs Extension A, Unified Ideographs, and Compatibility Ideographs. Written as
+# escapes so the range is auditable rather than dependent on how this file renders.
+_CJK_CHAR_RE = re.compile("[\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff]")
+
 PUBLICATION_STATUS_ALIASES = {
     "已上線": "published",
     "已發布": "published",
@@ -519,12 +534,18 @@ def build_query_plan(
     identity_fragments: List[str] = []
     taxonomy_decided_fields: set = set()
     taxonomy_fragments: List[str] = []
+    # Text an explicitly typed constraint has claimed. The user named the field, so that span is
+    # spent whatever the Authority went on to say about the value -- including when it says
+    # nothing. Leaving it readable let the catalog pass below re-read the value against the *other*
+    # level and widen an explicitly scoped query into a second taxonomy field.
+    explicit_fragments: List[str] = []
     taxonomy_abstain_reason: Optional[str] = None
     operator = "OR" if re.search(r"(?:或|任一|其中之一)", normalized) else "AND"
 
     for match in re.finditer(EXPLICIT_CONSTRAINT_PATTERN, normalized):
         field_name, raw_value = match.group(1), match.group(2)
         value, explicit_operator = _explicit_constraint_value(field_name, raw_value)
+        explicit_fragments.append(match.group(0))
         if taxonomy is not None and field_name in TAXONOMY_FIELDS:
             # An explicitly typed field states the taxonomy domain, so the Authority resolves inside
             # that domain only. This is the one way past a cross-level collision.
@@ -544,10 +565,6 @@ def build_query_plan(
                     constraints.append(outcome.constraint)
                 parsed_terms.append(match.group(0))
                 matched_fragments.append(match.group(0))
-                # The user named the field, so this text is spent. Without removing it the catalog
-                # pass below re-reads the value against the *other* level's catalog and widens an
-                # explicitly scoped query into a second taxonomy field.
-                taxonomy_fragments.append(match.group(0))
                 continue
         constraints.append(_constraint(field_name, value, explicit_operator, "explicit_field_parser", raw_value=raw_value))
         parsed_terms.append(match.group(0))
@@ -625,7 +642,10 @@ def build_query_plan(
 
     field_query = _remove_fragments(normalized, identity_fragments)
 
-    catalog_query = field_query
+    # The catalog pass reads only text no earlier stage has already claimed. Explicit constraints
+    # are removed in both modes -- with or without an Authority -- because naming the field is the
+    # user stating which field that text belongs to.
+    catalog_query = _remove_fragments(field_query, explicit_fragments)
     if taxonomy is not None:
         # Runs on what is left after identity resolution has claimed its fragments, so a brand whose
         # name happens to equal a taxonomy term is never re-read as vocabulary.
@@ -644,10 +664,10 @@ def build_query_plan(
             if outcome.matched_text:
                 matched_fragments.append(outcome.matched_text)
                 taxonomy_fragments.append(outcome.matched_text)
-        # A term the Authority has already claimed is spent. Without this the catalog pass would
-        # re-read the shorter value inside it -- "居家生活相關" claimed as LV2 still contains the
-        # LV1 value "居家生活" -- and add a second, unasked-for constraint beside the first.
-        catalog_query = _remove_fragments(field_query, taxonomy_fragments)
+        # A term the Authority has already claimed is spent too. Without this the catalog pass
+        # would re-read the shorter value inside it -- "居家生活相關" claimed as LV2 still contains
+        # the LV1 value "居家生活" -- and add a second, unasked-for constraint beside the first.
+        catalog_query = _remove_fragments(catalog_query, taxonomy_fragments)
 
     category_match = None
     category_field = None
@@ -659,7 +679,7 @@ def build_query_plan(
         category_field = "sales_category_lv2" if category_match else None
     if not category_match and taxonomy is None:
         for alias, canonical in CATEGORY_ALIASES.items():
-            if _contains_exact_phrase(field_query, alias) and canonical in catalog.sales_category_lv1:
+            if _contains_exact_phrase(catalog_query, alias) and canonical in catalog.sales_category_lv1:
                 category_match = canonical
                 category_field = "sales_category_lv1"
                 matched_fragments.append(alias)
@@ -1063,6 +1083,32 @@ def _taxonomy_outcome(
     )
 
 
+def _is_short_cjk_alias(alias: str) -> bool:
+    """True for a one- or two-character alias in a script that writes without word boundaries."""
+    return 0 < len(alias) <= SHORT_CJK_ALIAS_MAX_LENGTH and not alias.isascii()
+
+
+def _short_cjk_alias_is_free_standing(query: str, alias: str) -> bool:
+    """Whether a short CJK alias may bind here, i.e. it is not only an embedded substring.
+
+    Anything that is not a short CJK alias passes untouched: ASCII terms already carry their own
+    boundary assertion, and a longer term is specific enough that an incidental match is not the
+    failure mode. For the short ones, one occurrence outside a longer CJK run is enough -- a query
+    naming the term plainly still resolves, while ``狗`` inside ``熱狗堡`` does not.
+    """
+    if not _is_short_cjk_alias(alias):
+        return True
+    start = query.find(alias)
+    while start != -1:
+        end = start + len(alias)
+        before = query[start - 1] if start else ""
+        after = query[end] if end < len(query) else ""
+        if not _CJK_CHAR_RE.match(before) and not _CJK_CHAR_RE.match(after):
+            return True
+        start = query.find(alias, start + 1)
+    return False
+
+
 def _scan_taxonomy_terms(
     query: str, catalog: QueryCatalog, taxonomy: "SearchTaxonomy"
 ) -> List[_TaxonomyOutcome]:
@@ -1084,7 +1130,9 @@ def _scan_taxonomy_terms(
                 for item in aliases
                 # The cheap containment test first, then the parser's own phrase rule, so an ASCII
                 # term such as ``pet`` still needs a boundary and does not match inside ``carpet``.
-                if item in remaining and _contains_exact_phrase(remaining, item)
+                if item in remaining
+                and _contains_exact_phrase(remaining, item)
+                and _short_cjk_alias_is_free_standing(remaining, item)
             ),
             None,
         )

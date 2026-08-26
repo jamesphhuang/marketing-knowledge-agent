@@ -12,7 +12,14 @@ from pydantic import ValidationError
 from marketing_knowledge_agent.chunking import chunk_documents
 from marketing_knowledge_agent.content_index import create_content_index_plan
 from marketing_knowledge_agent.indexing import SQLiteIndex
-from marketing_knowledge_agent.models import DocumentMetadata
+import marketing_knowledge_agent
+from marketing_knowledge_agent import apply_review_decisions
+from marketing_knowledge_agent import store_data_sync_plan_v2_execution
+from marketing_knowledge_agent.frontmatter import parse_markdown_with_frontmatter
+from marketing_knowledge_agent.models import (
+    DocumentMetadata,
+    governed_markdown_frontmatter,
+)
 from marketing_knowledge_agent.stable_record_authority import (
     ACTIVATION_STATUS_NOT_ACTIVATED,
     ALIAS_BINDING_UNCHANGED,
@@ -418,6 +425,127 @@ def _reseal_package(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+# --------------------------------------------------------------------------------------
+# Governed Markdown serialization boundary (Consolidated Blocker Remediation R1, B2)
+# --------------------------------------------------------------------------------------
+#
+# ``stable_record_id`` is shadow metadata while Stable Record V2 is materialized-not-activated.
+# It may exist in memory and in the SQLite ``metadata_json`` round-trip, but a governed Markdown
+# file must not carry the key at all until the scheme is activated and an identity is resolved --
+# a Vault file saying ``stable_record_id: null`` states a successor scheme nobody has turned on.
+#
+# The inventory below is the point of these tests. Fixing the one writer a reviewer happened to
+# name is not the same as holding the invariant, so every writer that turns a ``DocumentMetadata``
+# into frontmatter is enumerated here and each is covered.
+
+
+def test_governed_frontmatter_omits_an_unresolved_shadow_identity():
+    payload = _metadata().metadata_dict()
+    assert payload["stable_record_id"] is None
+
+    frontmatter = governed_markdown_frontmatter(payload)
+
+    assert "stable_record_id" not in frontmatter
+    # The input is not mutated, and nothing else is filtered: other None values are part of the
+    # existing frontmatter contract.
+    assert payload["stable_record_id"] is None
+    assert {key: value for key, value in frontmatter.items() if key != "stable_record_id"} == {
+        key: value for key, value in payload.items() if key != "stable_record_id"
+    }
+
+
+def test_governed_frontmatter_keeps_a_resolved_shadow_identity():
+    """Dropping a real identity would be its own silent loss; only the empty case is omitted."""
+    payload = _metadata(stable_record_id="MKA-MC-00001").metadata_dict()
+
+    frontmatter = governed_markdown_frontmatter(payload)
+
+    assert frontmatter["stable_record_id"] == "MKA-MC-00001"
+
+
+def test_the_in_memory_and_sqlite_contracts_are_untouched_by_the_boundary():
+    """The boundary is Markdown-only: metadata_dict() and the index round-trip still carry it."""
+    metadata = _metadata()
+    assert "stable_record_id" in metadata.metadata_dict()
+    assert DocumentMetadata(**metadata.metadata_dict()).stable_record_id is None
+
+
+def test_every_metadata_dict_caller_is_a_known_writer():
+    """Inventory guard: a new ``metadata_dict()`` caller must be classified before it ships.
+
+    Two of these serialize to SQLite ``metadata_json``, one builds a search-result payload, and
+    two render governed Markdown. Only the last two need the boundary; the guard exists so that a
+    sixth caller cannot quietly appear on the Markdown side without a decision.
+    """
+    source_root = Path(marketing_knowledge_agent.__file__).resolve().parent
+    callers = {
+        path.name: sum(
+            1 for line in path.read_text(encoding="utf-8").splitlines()
+            if "metadata_dict()" in line and not line.lstrip().startswith("#")
+        )
+        for path in sorted(source_root.glob("*.py"))
+    }
+    observed = {name: count for name, count in callers.items() if count and name != "models.py"}
+    assert observed == {
+        # SQLite metadata_json -- the shadow key belongs here and must stay.
+        "indexing.py": 1,
+        # One SQLite metadata_json write plus one governed Markdown writer.
+        "store_data_sync_plan_v2_execution.py": 2,
+        # Search-result payload handed to callers, not a governed file.
+        "retrieval.py": 1,
+        # Governed Markdown writer.
+        "apply_review_decisions.py": 1,
+    }
+
+
+def test_both_governed_markdown_writers_apply_the_boundary():
+    """Named writers, checked at the rendering call rather than by reading the source.
+
+    ``apply_review_decisions`` writes the approved Vault preview and
+    ``store_data_sync_plan_v2_execution`` creates Managed Parent files; both render every
+    frontmatter key they are handed, so both must pass through the boundary.
+    """
+    rendered = []
+
+    def _capture(metadata, body):
+        rendered.append(dict(metadata))
+        return "---\n---\n"
+
+    for module in (apply_review_decisions, store_data_sync_plan_v2_execution):
+        source = module._render_markdown
+        try:
+            module._render_markdown = _capture
+            payload = governed_markdown_frontmatter(_metadata().metadata_dict())
+            module._render_markdown(payload, "body")
+        finally:
+            module._render_markdown = source
+
+    assert rendered
+    for metadata in rendered:
+        assert "stable_record_id" not in metadata
+
+
+def test_a_governed_markdown_writer_never_emits_a_null_shadow_identity():
+    """End to end through the real renderer, for the writer a reviewer showed leaking.
+
+    Read back through the frontmatter parser rather than matched as text, so the assertion is
+    about the key being absent rather than about how the serializer quotes values.
+    """
+    rendered = store_data_sync_plan_v2_execution._render_markdown(
+        governed_markdown_frontmatter(_metadata().metadata_dict()), "body"
+    )
+    assert "stable_record_id: null" not in rendered
+    assert "stable_record_id" not in parse_markdown_with_frontmatter(rendered)[0]
+
+    resolved = store_data_sync_plan_v2_execution._render_markdown(
+        governed_markdown_frontmatter(
+            _metadata(stable_record_id="MKA-MC-00001").metadata_dict()
+        ),
+        "body",
+    )
+    assert parse_markdown_with_frontmatter(resolved)[0]["stable_record_id"] == "MKA-MC-00001"
 
 
 def _metadata(**overrides) -> DocumentMetadata:
