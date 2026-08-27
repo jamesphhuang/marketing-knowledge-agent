@@ -5,6 +5,139 @@
 ## Lock
 
 - State: active
+- Milestone state: SLACK_FACETED_SEARCH_MVP_IMPLEMENTED_UNCOMMITTED
+- Task: Slack Faceted Search MVP
+- Implementer: Claude Code
+- Reviewer: not yet reviewed for this WP
+- Branch: codex/impl/slack-faceted-search-mvp
+- Worktree: `/private/tmp/mka-slack-faceted-search-mvp` (isolated; does not touch the running UAT
+  bot's worktree/process, and does not touch the main worktree at
+  `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent`, whose `main` was left exactly as found —
+  behind `origin/main` by 20 commits (a clean fast-forward gap, not a divergence) and dirty with
+  unrelated pre-existing local files that this WP did not read, touch, stash, or commit)
+- Baseline commit: 5e1f73ce34d6c5b6791d9d0ff126c4dc0c784c40 (= `origin/main` at start; local `main`
+  was behind by 20 commits and dirty, so the new worktree was created directly from
+  `origin/main`/this worktree's own prior HEAD rather than from the stale local `main`)
+- Product behavior changed: YES (Slack surface only, default OFF; existing behavior bit-for-bit
+  unchanged when `enable_faceted_search=false`, the default)
+- Intended scope: a structured, Block-Kit-driven Slack search entry point (year / Sales Category
+  LV2 / content-tag multi-select + optional free text) that builds `TypedQueryPlan` hard constraints
+  directly rather than routing selections back through the natural-language parser, reducing
+  dependence on Search Taxonomy Authority resolution for the three fields a user can now pick
+  explicitly. New `search_facets.py` (`FacetCatalog`), `structured_search.py`
+  (`StructuredSearchRequest` + plan builder + execution), `slack_faceted_search.py` (Block Kit view
+  and payload parsing); additive changes to `query_planning.py` (`"in"`/`"contains_any"` operator
+  execution, `preresolved_fields` parameter), `slack_presentation.py` (multi-value constraint
+  rendering) and `slack_interface.py` (new `SlackConfig` fields, trigger detection, action/view
+  handler registration). No production `.mka/slack_config.json` change, no Slack Bot start/restart,
+  no production sync, no production re-index, no Stable Record V2 activation, no row_v1 retirement,
+  no Search Taxonomy Authority workbook modification, no `allowed_exposure_channels` policy change,
+  no unrelated refactor.
+- Started at: 2026-08-27
+- Last updated: 2026-08-27
+
+```text
+IMPLEMENTATION_AUTHORIZED=YES
+UAT_ACTIVATION_AUTHORIZED=NO
+PRODUCTION_ACTIVATION_AUTHORIZED=NO
+MAIN_UPDATE_AUTHORIZED=NO
+PRODUCTION_REINDEX_AUTHORIZED=NO
+UAT_RUNTIME_UNCHANGED=YES
+UAT_ACTIVATED=NO
+PRODUCTION_ACTIVATED=NO
+MAIN_UPDATED=NO
+```
+
+### Slack Faceted Search MVP (this WP)
+
+Full design record: `docs/specs/SLACK_FACETED_SEARCH_MVP.md`.
+
+Implemented behind `SlackConfig.enable_faceted_search` (default `false`). `load_slack_config`
+requires `search_taxonomy_workbook`/`search_taxonomy_sha256` together whenever either is present
+(regardless of the flag) and requires both when the flag is on; `run_slack_bot` loads the pinned
+Authority and builds a `FacetCatalog` exactly once at startup, before the `slack_bolt` `App` or
+Socket Mode handler is constructed, and any load failure propagates unchanged (fail closed, no
+fallback). The `open_faceted_search_modal` action handler and the `faceted_search_modal` view
+handler are registered only when the flag is on; `handle_slack_event` only recognises the "搜尋"／
+"條件搜尋" trigger phrase when told the flag is on, and otherwise behaves exactly as before.
+
+`FacetCatalog` offers a year/LV2/tag only when it is both an Authority canonical value and actually
+carried by at least one document that would survive the existing external-governance,
+non-retrievable-record-type, pending-metric and restricted-customer-denylist filters — counted by
+distinct `document_id`, never by chunk. LV1 has no field on the type at all. `catalog_version` is a
+pure function of the Authority's pinned sha256, a hash of the content-index file's own bytes, and
+the catalog builder's own schema version; a stale submission (version mismatch) is refused before
+execution and the user is told to reopen the modal.
+
+`StructuredSearchRequest` selections become `QueryConstraint`s directly — `"in"` for
+`interview_year`/`sales_category_lv2`, `"contains_any"` for `content_tags` (operators the field
+registry already declared but nothing previously executed) — never serialized back into natural
+language for the free-text parser to re-resolve. `build_query_plan` gained an additive
+`preresolved_fields` parameter so a free-text goal is only parsed for taxonomy fields the modal left
+untouched; any residual constraint or taxonomy ambiguity concerning an already-modal-decided field
+is dropped, while an ambiguity spanning an undecided field still blocks. Retrieval order is always
+hard structured filters before lexical/semantic scoring (reusing the pre-existing
+`SQLiteRetriever.search` contract, which already filtered before scoring); a pure structured browse
+(blank free text) is ordered deterministically by interview year (newest first) then a stable
+per-record id, rather than depending on the content index's unspecified row order. Restricted
+-customer, non-retrievable and pending records are excluded identically on both the free-text
+(`pipeline.ask_index`-reused) and pure-browse execution paths, and `apply_governance_to_answer`/
+`enforce_external_citations` run on both. A submitted search never widens or overrides a
+modal-selected field with free text, and a zero-result search reports the filters actually applied
+without auto-relaxing them; "調整條件" (reopening the modal prefilled from the prior selection) is
+the only relaxation path in this MVP.
+
+Every entry point (the original `app_mention`, the button-click action, and the view submission)
+re-validates `allowed_channel_ids` independently from its own payload; `private_metadata` carries
+only `channel_id`, `thread_ts` and `catalog_version`. A new `slack_faceted_search` audit event
+reuses the existing Slack audit CSV schema and records only the structured facet selection, the
+catalog version, and the free-text goal — the same class of content the pre-existing `slack_qa`
+event already records for natural-language queries.
+
+Tests: `tests/test_search_facets.py` (12), `tests/test_structured_search.py` (17),
+`tests/test_slack_faceted_search.py` (25, Block Kit view/payload only),
+`tests/test_slack_faceted_search_interface.py` (21, `run_slack_bot`/handler wiring via a hand-built
+fake `App`/`SocketModeHandler`/client — no real Slack connection), and
+`tests/test_structured_query_operators.py` (8, the additive `query_planning.py` operator/
+`preresolved_fields` behaviour) — 83 new tests, all synthetic/hermetic fixtures, no gitignored
+production DB, Vault, token or real Slack. `compileall` and `git diff --check` both pass.
+
+Targeted run: the 5 new files plus every existing test file that touches `query_planning`,
+`slack_interface`, `slack_presentation`, `search_taxonomy`, `pipeline`, `retrieval`, or structured
+-result rendering (`test_query_gating.py`, `test_search_taxonomy.py`, `test_typed_query_retrieval.py`,
+`test_pipeline.py`, `test_slack_interface.py`, `test_slack_search_presentation_v1.py`,
+`test_slack_search_presentation_v2.py`, `test_slack_exact_alias_query.py`,
+`test_slack_exact_alias_truncation.py`, `test_slack_retriever_truncation_propagation.py`,
+`test_slack_output_preview.py`, `test_content_index.py`, `test_content_index_lineage.py`,
+`test_search_quality_evaluation.py`, `test_production_search_alias_runtime.py`,
+`test_slack_structured_governance.py`): **634 passed, 1 skipped**, plus 20 pre-existing errors, all
+in `test_slack_structured_governance.py`, all `FileNotFoundError` on the same gitignored
+`.mka/content_index.sqlite` fixture dependency this isolated worktree never had — unrelated to any
+file this WP touched.
+
+Full suite: **137 failed, 1391 passed, 65 skipped, 72 errors**. The failed/skipped/errors counts
+(137/65/72) are byte-for-byte identical to the count already on record in this file for the R1
+remediation candidate plus the B2 hardening WP's five additional tests (137/1303+5=1308/65/72); the
+passed count's growth (1308 → 1391, +83) matches exactly this WP's new tests. Every failing/erroring
+test file was checked and belongs to an unrelated subsystem (governance decision store, production
+search-alias plan/confirmation/execution, parent sync, historical fixture immutability, sample
+vault, store-data-sync plan v2) whose gitignored production fixtures are absent from this isolated
+worktree — the same pre-existing environment blocker recorded repeatedly elsewhere in this file, not
+a regression this WP introduced.
+
+Not run: full application suite beyond the above; comprehensive/adversarial review; standalone
+lint/type tools (not configured in this repo); production sync, re-index, deploy, Slack Bot
+start/restart, UAT activation, or independent review of this WP.
+
+### Superseded lock record: B2 Real Writer Regression Test Hardening
+
+The lock below describes a separate, unrelated WP on a different branch
+(`codex/test/b2-governed-writer-regression`) that this worktree's copy of this file happened to
+carry forward from its baseline commit. It is retained unchanged as that WP's record; nothing in
+this Slack Faceted Search MVP WP alters its state, its branch is untouched by this worktree, and
+`main` is still not updated by either.
+
+- State: active (on its own branch, not this one)
 - Milestone state: B2_REAL_WRITER_REGRESSION_TESTS_ADDED_UNCOMMITTED
 - Task: B2 Real Writer Regression Test Hardening
 - Implementer: Claude Code
@@ -22,7 +155,7 @@
 - Started at: 2026-08-26
 - Last updated: 2026-08-26
 
-### B2 Real Writer Regression Test Hardening (this WP)
+### B2 Real Writer Regression Test Hardening
 
 Accepted nonblocking backlog item 6 said the B2 fix was correct but unguarded: the two writer
 tests in `test_stable_record_shadow.py` applied `governed_markdown_frontmatter()` themselves and
