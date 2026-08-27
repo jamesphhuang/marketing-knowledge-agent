@@ -5,11 +5,12 @@
 ## Lock
 
 - State: active
-- Milestone state: SLACK_FACETED_SEARCH_MVP_CODEX_REVIEW_R1_REMEDIATED_AWAITING_RE_REVIEW
+- Milestone state: SLACK_FACETED_SEARCH_MVP_CODEX_REVIEW_R2_REMEDIATED_AWAITING_R3_REVIEW
 - Task: Slack Faceted Search MVP
 - Implementer: Claude Code
-- Reviewer: Codex — first review returned CHANGES_REQUESTED (6 findings) against `3a7648f`. All six
-  are remediated below; **this WP is NOT re-reviewed and NOT accepted.** Codex re-review pending.
+- Reviewer: Codex — R1 CHANGES_REQUESTED (6 findings) against `3a7648f`, all remediated; R2
+  CHANGES_REQUESTED (1 blocking finding, cross-user prefill disclosure) against `934d719`,
+  remediated below. **This WP is NOT reviewed and NOT accepted.** Codex R3 review pending.
 - Branch: codex/impl/slack-faceted-search-mvp
 - Worktree: `/private/tmp/mka-slack-faceted-search-mvp` (isolated; does not touch the running UAT
   bot's worktree/process, and does not touch the main worktree at
@@ -50,13 +51,80 @@ MAIN_UPDATED=NO
 CODEX_REVIEW_R1=CHANGES_REQUESTED
 CODEX_REVIEW_R1_FINDINGS=6
 CODEX_REVIEW_R1_REMEDIATED=6
-CODEX_RE_REVIEW=PENDING
+CODEX_REVIEW_R2=CHANGES_REQUESTED
+CODEX_REVIEW_R2_BLOCKING_FINDINGS=1
+CODEX_REVIEW_R2_REMEDIATED=1
+CODEX_R3_REVIEW=PENDING
 INTEGRATION_ORDER_DECIDED=YES
 ```
 
 Integration order settled by `DEC-20260827-01`: this branch merges to `main` first and the Search
 Taxonomy Slack wiring WP adapts to it. That decision settles **order only** — `main` promotion still
 requires Codex re-review to pass and a separate explicit authorization.
+
+### Codex review R2 — cross-user prefill disclosure (2026-08-27)
+
+Reviewed snapshot: `934d719dae44e1b031f57a508333b1fa5a369709`. R1's six findings passed. One new
+**blocking** finding, reproduced before being fixed.
+
+**The blocker.** The "調整條件" button is posted into a Slack thread, so every member who can see it
+can click it. The request token resolved on presentation alone — it was bound to a
+`StructuredSearchRequest` and to nothing else — so U2 clicking U1's button reopened the modal
+prefilled with U1's filters *and* U1's free-text goal. Search intent typed into what looks like a
+private dialog was therefore readable by the whole channel. Reproduced directly: `store.get(token)`
+returned U1's `free_text` verbatim to a caller that supplied no identity at all.
+
+A second half was reproduced in the same pass and is arguably worse: `request_token_store.store(...)`
+ran **unconditionally**, including after a denylist refusal. A restricted customer name typed into
+the free-text box was retained in the shared token store and a prefill button offering it was
+published — the exact disclosure the refusal exists to prevent.
+
+**The fix**, scoped to the blocker and nothing else:
+
+- The token store now holds a `RequestContext` envelope — request, `owner_user_id`, `channel_id`,
+  `thread_ts`, `expires_at` — instead of a bare request. `store()` requires all three context
+  values and **refuses empty ones**, because an empty stored value would compare equal to an empty
+  derived value and silently turn the check off for exactly the requests whose provenance is least
+  clear. `get()` is replaced by `resolve(token, *, user_id, channel_id, thread_ts)`, which returns
+  `None` unless all three match; the rename is deliberate so no call site could keep the old
+  unchecked behaviour by accident.
+- Unknown, expired and "not yours" are deliberately indistinguishable to the clicker: all three
+  open an empty modal. Reporting "not yours" would confirm that someone else's search exists.
+- The handler derives `(user_id, channel_id, thread_ts)` from the **interaction payload**
+  (`body.user.id`, `container.channel_id`/`channel.id`, `container.thread_ts`/`message_ts`), never
+  from the button's `value`. The value is content this bot posted into a channel and every member
+  sees the same copy, so it describes the button rather than the person pressing it. An incomplete
+  payload fails closed rather than defaulting to empty strings. `channel_id`/`thread_ts` were
+  removed from the button value entirely rather than left as untrusted duplicates.
+- The refusal path stores nothing and offers no prefill button. It posts a token-free 「重新搜尋」
+  button (`build_restart_search_message`) that opens a blank modal. Kept as its own builder so
+  "no token" is a property of the call site that decided it, not an argument that could default
+  its way in.
+- The owner reopening in the same channel and thread still works unchanged.
+
+Test count 116 → 130 (+14). Full suite failed/skipped/errors unchanged at 137/65/72; passed
+1424 → 1438, matching the added tests exactly.
+
+#### R2 mutation-strength evidence
+
+Probes run on a copy under `/private/tmp/mka-r2-probe`, deleted afterwards; the repository source
+was never mutated.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| Owner check | drop `owner_user_id` from `RequestContext.matches` | `3 failed` — at all three layers: store unit test, handler test, real-bolt routing test |
+| Refusal path | `if refused:` → `if False:` (store and offer prefill again) | `1 failed` — the denylist-refusal retention test |
+| Context source | trust the button value's `channel_id`/`thread_ts` instead of the payload | `1 failed` — the different-thread test |
+
+#### Accepted nonblocking backlog, recorded not fixed (R2)
+
+Explicitly out of scope for this remediation, per instruction:
+
+1. `catalog_version` does not incorporate a denylist hash, so a denylist change alone does not
+   invalidate an in-flight catalog version.
+2. `SQLiteIndex` opens the content index read-write; `assert_readable_content_index` prevents
+   *creating* one but the connection is not yet `mode=ro`.
+3. A facet option value longer than 75 characters is still truncated by the Block Kit builder.
 
 ### Codex review R1 findings and remediation (2026-08-27)
 
@@ -642,9 +710,9 @@ gives both options and prefers copying over moving, since PID 42332 is reading t
 
 ### For this WP (Slack Faceted Search MVP)
 
-1. **Codex re-review of `3a7648f..b33218d`** (4 commits: remediation source, remediation tests,
-   docs, bolt contract tests). This is the blocking gate. `CODEX_RE_REVIEW=PENDING`; this WP is
-   deliberately not marked reviewed or accepted by its own implementer.
+1. **Codex R3 review.** R2 returned CHANGES_REQUESTED on one blocking finding (cross-user prefill
+   disclosure); it is remediated above. `CODEX_R3_REVIEW=PENDING`; this WP is deliberately not
+   marked reviewed or accepted by its own implementer.
 2. **`SlackConfig` field collision — RESOLVED** by `DEC-20260827-01` (2026-08-27): this branch is
    the integration order's first, and the Search Taxonomy Slack wiring WP
    (`codex/impl/slack-search-taxonomy-uat`, still uncommitted on its own branch) adapts to the

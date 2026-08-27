@@ -52,12 +52,26 @@ while keeping natural language for everything else (brand name, metric goals, fr
   characters and an embedded maximal request measured 3206, which makes `chat.postMessage` reject
   the whole message so the user gets no button at all. The request itself lives in
   `slack_request_tokens` (bounded by TTL and entry count, in-memory, process-local, mirroring
-  `slack_pagination`); an expired token reopens an *empty* modal rather than a reconstructed one,
-  because prefilling filters the user never chose is worse than prefilling nothing. A
-  `multi_static_select` carrying more than 100 options raises rather than truncating — today's
-  counts (8 / 22 / 37) sit far below that, and crossing it means the "static options at
-  modal-open time" premise no longer holds and the field needs an `external_select` data source.
-  Truncating would hide eligible values from every user with no visible symptom.
+  `slack_pagination`). A `multi_static_select` carrying more than 100 options raises rather than
+  truncating — today's counts (8 / 22 / 37) sit far below that, and crossing it means the "static
+  options at modal-open time" premise no longer holds and the field needs an `external_select`
+  data source. Truncating would hide eligible values from every user with no visible symptom.
+- **A request token is not a capability.** The button is posted into a channel, so everyone who can
+  see the thread can click it. A token therefore resolves only when the *interaction* matches the
+  context it was minted in: same `owner_user_id`, same `channel_id`, same `thread_ts`. That context
+  is read from the interaction payload Slack sends on the click (`body.user.id`,
+  `container.channel_id`/`channel.id`, `container.thread_ts`/`message_ts`) and never from the
+  button's own `value` — the value is content this bot posted into a channel, and every member sees
+  the same copy of it, so it describes the button rather than the person pressing it. Unknown,
+  expired, and "belongs to somebody else" are deliberately indistinguishable to the clicker: all
+  three open an empty modal, which reveals nothing and is never worse than prefilling a search the
+  clicker did not choose. An interaction payload missing any of the three fails closed rather than
+  defaulting to empty strings, which would compare equal to an empty stored value and silently turn
+  the check off.
+- **A refused query is never retained and never offered back.** After a denylist refusal nothing
+  goes into the token store — it is shared across every viewer of the channel, so keeping restricted
+  text there "only for the owner" would still be keeping it — and no prefill button is published.
+  A token-free 「重新搜尋」 button opens a blank modal instead.
 - The original `@mention` free-text flow, its pagination, and approved-asset-URL behaviour are
   unchanged; none of this is reachable unless `enable_faceted_search` is on, and none of it changes
   how the plain NL path behaves when it is on.
