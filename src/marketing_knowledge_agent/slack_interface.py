@@ -15,6 +15,20 @@ from .governance import metadata_allows_written_external_use
 from .llm import DEFAULT_LLM_CONFIG_PATH, load_llm_config
 from .models import SearchFilters
 from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, agent_ask
+from .search_facets import FacetCatalog, build_facet_catalog
+from .search_taxonomy import SearchTaxonomy, load_search_taxonomy
+from .slack_faceted_search import (
+    FREE_TEXT_BLOCK_ID,
+    OPEN_SEARCH_MODAL_ACTION_ID,
+    FACETED_SEARCH_MODAL_CALLBACK_ID,
+    build_adjust_filters_message,
+    build_facet_modal_view,
+    build_open_search_reply,
+    is_faceted_search_trigger,
+    parse_open_modal_button_value,
+    parse_structured_search_request,
+    prefill_from_button_payload,
+)
 from .slack_output_preview import (
     apply_approved_asset_url_overlay,
     load_index_bound_approved_asset_url_overlay,
@@ -30,6 +44,13 @@ from .slack_presentation import (
     build_structured_slack_pages,
     format_structured_slack_reply,
 )
+from .structured_search import (
+    StaleFacetCatalogError,
+    StructuredSearchRequest,
+    StructuredSearchValidationError,
+    execute_structured_search,
+    validate_structured_search_request,
+)
 
 
 DEFAULT_SLACK_CONFIG_PATH = Path(".mka/slack_config.json")
@@ -41,6 +62,7 @@ DENIED_CHANNEL_MESSAGE = "此頻道未啟用行銷知識查詢"
 ANSWER_TRUNCATION_NOTICE = "(內容過長已截斷,完整結果請用內部工具查詢)"
 SLACK_NO_RESULTS_MESSAGE = "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
 PAGINATION_EXPIRED_MESSAGE = "此搜尋工作階段已失效，請重新執行原搜尋。"
+FACETED_SEARCH_STALE_CATALOG_MESSAGE = "搜尋條件已過期，請重新點擊「開啟條件搜尋」再試一次。"
 # How much of a structured result the Slack surface materialises before paging over it. These are
 # display capacity, not ranking: the ordered candidate set and every governance gate in front of
 # it are unchanged, and raising the ceiling only lets Slack show more of the same ranked result.
@@ -74,6 +96,9 @@ class SlackConfig:
     notify_owner_on_denylist: bool = False
     max_answer_chars: int = 2500
     enable_approved_asset_urls: bool = False
+    enable_faceted_search: bool = False
+    search_taxonomy_workbook: Optional[str] = None
+    search_taxonomy_sha256: Optional[str] = None
 
 
 def load_slack_config(path: Path = DEFAULT_SLACK_CONFIG_PATH) -> SlackConfig:
@@ -101,11 +126,37 @@ def load_slack_config(path: Path = DEFAULT_SLACK_CONFIG_PATH) -> SlackConfig:
     enable_approved_asset_urls = payload.get("enable_approved_asset_urls", False)
     if not isinstance(enable_approved_asset_urls, bool):
         raise SlackInterfaceError("enable_approved_asset_urls 必須是 boolean。")
+    enable_faceted_search = payload.get("enable_faceted_search", False)
+    if not isinstance(enable_faceted_search, bool):
+        raise SlackInterfaceError("enable_faceted_search 必須是 boolean。")
+    search_taxonomy_workbook = payload.get("search_taxonomy_workbook")
+    if search_taxonomy_workbook is not None and (
+        not isinstance(search_taxonomy_workbook, str) or not search_taxonomy_workbook.strip()
+    ):
+        raise SlackInterfaceError("search_taxonomy_workbook 必須是非空字串。")
+    search_taxonomy_sha256 = payload.get("search_taxonomy_sha256")
+    if search_taxonomy_sha256 is not None and (
+        not isinstance(search_taxonomy_sha256, str) or not search_taxonomy_sha256.strip()
+    ):
+        raise SlackInterfaceError("search_taxonomy_sha256 必須是非空字串。")
+    if bool(search_taxonomy_workbook) != bool(search_taxonomy_sha256):
+        raise SlackInterfaceError(
+            "search_taxonomy_workbook 與 search_taxonomy_sha256 必須同時提供或同時省略，"
+            "不允許只設定其中一個。"
+        )
+    if enable_faceted_search and not (search_taxonomy_workbook and search_taxonomy_sha256):
+        raise SlackInterfaceError(
+            "enable_faceted_search 為 true 時必須同時提供 search_taxonomy_workbook 與 "
+            "search_taxonomy_sha256。"
+        )
     return SlackConfig(
         allowed_channel_ids=[value.strip() for value in allowed_channel_ids],
         notify_owner_on_denylist=notify_owner,
         max_answer_chars=max_answer_chars,
         enable_approved_asset_urls=enable_approved_asset_urls,
+        enable_faceted_search=enable_faceted_search,
+        search_taxonomy_workbook=search_taxonomy_workbook.strip() if search_taxonomy_workbook else None,
+        search_taxonomy_sha256=search_taxonomy_sha256.strip() if search_taxonomy_sha256 else None,
     )
 
 
@@ -118,6 +169,7 @@ def handle_slack_event(
     llm_config_path: Path = DEFAULT_LLM_CONFIG_PATH,
     audit_log_path: Path = DEFAULT_SLACK_AUDIT_LOG,
     pagination_store: Optional[SlackPaginationStore] = None,
+    faceted_search_enabled: bool = False,
 ) -> dict:
     channel_id = str(event.get("channel") or "")
     user_id = str(event.get("user") or "")
@@ -144,6 +196,11 @@ def handle_slack_event(
         # governance decision and no audit row, because nothing new is being queried or disclosed.
         page = store.next_page(thread_key)
         return _reply_dict(channel_id, thread_ts, page or PAGINATION_EXPIRED_MESSAGE)
+
+    if faceted_search_enabled and is_faceted_search_trigger(question):
+        # Opening the button costs no retrieval, no governance decision and discloses nothing that
+        # is not already visible in this channel, so no audit row is written for it either.
+        return build_open_search_reply(channel_id, thread_ts)
 
     llm_config = load_llm_config(llm_config_path)
     answer = ask_fn(
@@ -286,6 +343,21 @@ def run_slack_bot(
             "Slack tokens 未設定；請設定 SLACK_BOT_TOKEN 與 SLACK_APP_TOKEN。"
         )
 
+    taxonomy: Optional[SearchTaxonomy] = None
+    facet_catalog: Optional[FacetCatalog] = None
+    if config.enable_faceted_search:
+        # Loaded exactly once, before the App or Socket Mode handler is constructed, and closed
+        # over for the whole process lifetime -- never re-read per query, never re-built per Slack
+        # interaction. Any failure here (missing workbook, hash mismatch, unreadable index) stops
+        # startup before Socket Mode opens; there is no fallback that disables the feature silently.
+        taxonomy = load_search_taxonomy(
+            workbook_path=Path(config.search_taxonomy_workbook),
+            expected_sha256=config.search_taxonomy_sha256,
+        )
+        facet_catalog = build_facet_catalog(
+            db_path, taxonomy, restricted_customers_path=restricted_customers_path
+        )
+
     if app_factory is None:
         from slack_bolt import App
 
@@ -308,10 +380,128 @@ def run_slack_bot(
             llm_config_path=llm_config_path,
             audit_log_path=audit_log_path,
             pagination_store=pagination_store,
+            faceted_search_enabled=config.enable_faceted_search,
         )
         post_slack_reply(client, reply)
 
+    if config.enable_faceted_search:
+        _register_faceted_search_handlers(
+            app,
+            config=config,
+            taxonomy=taxonomy,
+            facet_catalog=facet_catalog,
+            db_path=db_path,
+            restricted_customers_path=restricted_customers_path,
+            audit_log_path=audit_log_path,
+            pagination_store=pagination_store,
+        )
+
     socket_mode_handler_factory(app, app_token).start()
+
+
+def _register_faceted_search_handlers(
+    app,
+    config: SlackConfig,
+    taxonomy: SearchTaxonomy,
+    facet_catalog: FacetCatalog,
+    db_path: Path,
+    restricted_customers_path: Path,
+    audit_log_path: Path,
+    pagination_store: SlackPaginationStore,
+) -> None:
+    """Register the button-click and modal-submission handlers behind the faceted-search flag.
+
+    Both entry points re-validate ``allowed_channel_ids`` independently of the original
+    ``app_mention`` check: a button or a modal is a separate Slack interaction, carrying its own
+    payload, and this Slack surface has exactly one channel allowlist, checked at every entry.
+    """
+
+    @app.action(OPEN_SEARCH_MODAL_ACTION_ID)
+    def handle_open_faceted_search_modal(ack, body, client):
+        ack()
+        actions = body.get("actions") or [{}]
+        payload = parse_open_modal_button_value(actions[0].get("value"))
+        channel_id = str(payload.get("channel_id", ""))
+        thread_ts = str(payload.get("thread_ts", ""))
+        if channel_id not in config.allowed_channel_ids:
+            return
+        prefill = prefill_from_button_payload(payload)
+        view = build_facet_modal_view(
+            facet_catalog, channel_id=channel_id, thread_ts=thread_ts, prefill=prefill
+        )
+        client.views_open(trigger_id=body["trigger_id"], view=view)
+
+    @app.view(FACETED_SEARCH_MODAL_CALLBACK_ID)
+    def handle_faceted_search_submission(ack, body, client, view):
+        metadata = parse_open_modal_button_value(view.get("private_metadata"))
+        channel_id = str(metadata.get("channel_id", ""))
+        thread_ts = str(metadata.get("thread_ts", ""))
+        catalog_version = str(metadata.get("catalog_version", ""))
+
+        if channel_id not in config.allowed_channel_ids:
+            ack()
+            return
+
+        state_values = ((view.get("state") or {}).get("values")) or {}
+        request = parse_structured_search_request(state_values, catalog_version)
+
+        try:
+            validate_structured_search_request(request, facet_catalog)
+        except StaleFacetCatalogError:
+            ack()
+            client.chat_postMessage(
+                channel=channel_id, thread_ts=thread_ts, text=FACETED_SEARCH_STALE_CATALOG_MESSAGE
+            )
+            return
+        except StructuredSearchValidationError as exc:
+            ack(response_action="errors", errors={FREE_TEXT_BLOCK_ID: str(exc)})
+            return
+
+        ack()
+        answer = execute_structured_search(
+            request,
+            db_path=db_path,
+            taxonomy=taxonomy,
+            restricted_customers_path=restricted_customers_path,
+            audit_log_path=audit_log_path,
+            parent_cap=SLACK_SEARCH_PARENT_CAP,
+            asset_cap=SLACK_SEARCH_ASSET_CAP,
+        )
+        _append_slack_audit(
+            audit_log_path,
+            event="slack_faceted_search",
+            channel_id=channel_id,
+            user_id=str((body.get("user") or {}).get("id", "")),
+            citation_count=len(answer.citations),
+            warning_count=len(answer.warnings),
+            query=_structured_audit_query(request, catalog_version),
+        )
+
+        thread_key = pagination_key(channel_id, thread_ts)
+        pages = build_structured_slack_pages(answer)
+        if pages is None:
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=_format_unstructured_slack_reply(answer, config.max_answer_chars),
+            )
+        else:
+            pagination_store.start(thread_key, pages.pages)
+            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=pages.pages[0])
+        client.chat_postMessage(**build_adjust_filters_message(channel_id, thread_ts, request))
+
+
+def _structured_audit_query(request: StructuredSearchRequest, catalog_version: str) -> str:
+    parts = [f"catalog_version={catalog_version}"]
+    if request.interview_years:
+        parts.append("years=" + ",".join(str(year) for year in request.interview_years))
+    if request.sales_category_lv2:
+        parts.append("lv2=" + "|".join(request.sales_category_lv2))
+    if request.content_tags:
+        parts.append("tags=" + "|".join(request.content_tags))
+    if request.free_text:
+        parts.append(f"text={request.free_text}")
+    return " ".join(parts)
 
 
 def _append_slack_audit(

@@ -514,6 +514,7 @@ def build_query_plan(
     raw_query: str,
     catalog: QueryCatalog,
     taxonomy: Optional["SearchTaxonomy"] = None,
+    preresolved_fields: Sequence[str] = (),
 ) -> TypedQueryPlan:
     """Build a typed plan, optionally reading vocabulary from a pinned Search Taxonomy Authority.
 
@@ -522,6 +523,14 @@ def build_query_plan(
     the alias source for its three fields, and adds two ways to refuse rather than guess -- a term
     that names more than one canonical value, and a term the Authority knows that the formal index
     does not carry.
+
+    ``preresolved_fields`` names taxonomy fields a caller has already decided by some other route --
+    a Slack structured-search modal selection, for instance -- so this free-text pass must not
+    reopen them. Any Authority signal whose candidate fields are entirely inside this set (a clean
+    resolution, a not-indexed refusal, or an ambiguity every one of whose candidates is already
+    preresolved) is suppressed exactly as if the free text had never mentioned the term: no
+    constraint, no ambiguity flag, no abstain reason. An ambiguity that also names a field the
+    caller left undecided still blocks, because the caller's choice covers only part of it.
     """
     normalized = normalize_query_text(raw_query)
     constraints: List[QueryConstraint] = []
@@ -532,7 +541,7 @@ def build_query_plan(
     parser_warnings: List[str] = []
     matched_fragments: List[str] = []
     identity_fragments: List[str] = []
-    taxonomy_decided_fields: set = set()
+    taxonomy_decided_fields: set = set(preresolved_fields)
     taxonomy_fragments: List[str] = []
     # Text an explicitly typed constraint has claimed. The user named the field, so that span is
     # spent whatever the Authority went on to say about the value -- including when it says
@@ -546,6 +555,12 @@ def build_query_plan(
         field_name, raw_value = match.group(1), match.group(2)
         value, explicit_operator = _explicit_constraint_value(field_name, raw_value)
         explicit_fragments.append(match.group(0))
+        if field_name in TAXONOMY_FIELDS and field_name in preresolved_fields:
+            # The caller already decided this field by another route; an explicit mention of it in
+            # free text is spent text, not a second, possibly conflicting constraint.
+            parsed_terms.append(match.group(0))
+            matched_fragments.append(match.group(0))
+            continue
         if taxonomy is not None and field_name in TAXONOMY_FIELDS:
             # An explicitly typed field states the taxonomy domain, so the Authority resolves inside
             # that domain only. This is the one way past a cross-level collision.
@@ -882,9 +897,14 @@ def _metadata_matches_constraint(metadata: DocumentMetadata, constraint: QueryCo
         return normalize_exact_value(metadata.merchant_handle, handle=True) == normalize_exact_value(value, handle=True)
     if field_name in {"sales_category_lv1", "sales_category_lv2", "merchant_status", "claim_status"}:
         source_field = FIELD_REGISTRY[field_name].source_field
-        return normalize_exact_value(getattr(metadata, source_field or "", None)) == normalize_exact_value(value)
+        actual = normalize_exact_value(getattr(metadata, source_field or "", None))
+        if constraint.operator == "in":
+            return actual in {normalize_exact_value(item) for item in constraint.value}
+        return actual == normalize_exact_value(value)
     if field_name == "content_tags":
         normalized_tags = {normalize_exact_value(item) for item in metadata.content_tags}
+        if constraint.operator == "contains_any":
+            return any(normalize_exact_value(item) in normalized_tags for item in constraint.value)
         return normalize_exact_value(value) in normalized_tags
     if field_name == "metric_name":
         return normalize_exact_value(metadata.metric_name) == normalize_exact_value(value)

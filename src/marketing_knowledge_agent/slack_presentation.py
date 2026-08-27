@@ -612,6 +612,8 @@ def _condition_label(field: str, constraint: Mapping[str, object]) -> str:
 def _constraint_value(field: str, value: object, operator: object) -> str:
     if operator == "range" and isinstance(value, (list, tuple)) and len(value) == 2:
         return f"{value[0]}～{value[1]}"
+    if operator in {"in", "contains_any"} and isinstance(value, (list, tuple)):
+        return "、".join(str(item) for item in value)
     if field == "asset_type":
         return ASSET_LABELS.get(str(value), str(value))
     return str(value) if value is not None else ""
