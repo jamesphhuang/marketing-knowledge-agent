@@ -5,10 +5,11 @@
 ## Lock
 
 - State: active
-- Milestone state: SLACK_FACETED_SEARCH_MVP_IMPLEMENTED_UNCOMMITTED
+- Milestone state: SLACK_FACETED_SEARCH_MVP_CODEX_REVIEW_R1_REMEDIATED_AWAITING_RE_REVIEW
 - Task: Slack Faceted Search MVP
 - Implementer: Claude Code
-- Reviewer: not yet reviewed for this WP
+- Reviewer: Codex — first review returned CHANGES_REQUESTED (6 findings) against `3a7648f`. All six
+  are remediated below; **this WP is NOT re-reviewed and NOT accepted.** Codex re-review pending.
 - Branch: codex/impl/slack-faceted-search-mvp
 - Worktree: `/private/tmp/mka-slack-faceted-search-mvp` (isolated; does not touch the running UAT
   bot's worktree/process, and does not touch the main worktree at
@@ -46,7 +47,45 @@ UAT_RUNTIME_UNCHANGED=YES
 UAT_ACTIVATED=NO
 PRODUCTION_ACTIVATED=NO
 MAIN_UPDATED=NO
+CODEX_REVIEW_R1=CHANGES_REQUESTED
+CODEX_REVIEW_R1_FINDINGS=6
+CODEX_REVIEW_R1_REMEDIATED=6
+CODEX_RE_REVIEW=PENDING
 ```
+
+### Codex review R1 findings and remediation (2026-08-27)
+
+Reviewed commit: `3a7648f576f091d120c17ea22db8762456156f99`. Six findings, all accepted, all
+remediated. Every one was **reproduced first** against the reviewed commit, then fixed, then guarded
+by a test proven to fail without the fix (mutation probes below). None was taken on faith.
+
+| # | Finding | Reproduced as | Remediation |
+| --- | --- | --- | --- |
+| 1 | Denylist audit leak | `slack_faceted_search` row contained `text=SECRET_CUSTOMER_NAME 的成長案例`; and `denylist_query_hit` landed under the bare `command,event,match_count` schema, recording **neither** channel nor user | `is_restricted_refusal()` added; the search audit row is skipped entirely on refusal (parity with the NL path's `slack_qa` skip); `query_audit_metadata` threaded through `ask_index` → `precheck_restricted_query`, so the hit is written under the Slack schema with channel/user and an empty query column |
+| 2 | Button `value` 2000-char limit | A maximal request serialized to **3206 chars, 1206 over** — Slack rejects the whole message, so the user gets no button | New `slack_request_tokens.py` (TTL + entry bounded, in-memory, mirrors `slack_pagination`); the button carries a fixed-width opaque token, so payload size is now independent of free-text length. `_button_value()` asserts the 2000 budget and raises rather than truncating; `max_length` set on the Block Kit input **and** re-validated server-side (refuse, never truncate) |
+| 3 | Denylist must fail closed | `{"brand_name": "..."}` (valid JSON, not a list) returned an **empty denylist with no warning at all** — indistinguishable downstream from a genuinely empty one | `load_required_governance_index()` refuses missing / unparseable / non-array denylists. Called at startup (before App/SocketModeHandler), in `build_facet_catalog`, and in `execute_structured_search`. Pure browse can no longer run without a loaded governance index — the parameter lost its `None` default entirely |
+| 4 | Approved asset URL parity | The faceted result bypassed the overlay, the refusal guard and the unavailable-audit code | Same `enable_approved_asset_urls` flag, same `not refused` guard, same payload-free `APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE` audit code, in the view-submission handler |
+| 5 | Pagination lifecycle | `start()` self-supersedes, but a refusal/unstructured reply produced no pages, so the **previous** search's continuation stayed live and 「顯示更多」 could resume it | `pagination_store.discard(thread_key)` before the reply, on every branch |
+| 6 | Read-only + Slack platform guards | `SQLiteIndex.load_chunks()` on a missing path **created a 0-byte `.sqlite` file** before failing; no `multi_static_select` option-count guard existed | `assert_readable_content_index()` checks before opening, so nothing is created; `_multi_select_block` raises `SlackFacetModalError` above 100 options, naming the facet, the limit, and the `external_select` remedy |
+
+`allowed_exposure_channels=[]` semantics are untouched by this remediation, as instructed.
+
+#### Mutation-strength evidence
+
+Each probe copies `src/` and `tests/` to `/private/tmp/mka-faceted-probes`, mutates **there** so the
+repository source is never touched, runs, and is then deleted. A test that does not fail under its
+probe is not guarding anything.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| 1a | `refused = False` (write the search row despite refusal) | `2 failed` — audit-leak test + refusal overlay-guard test |
+| 1b | drop `query_audit_metadata` from the `execute_structured_search` call | `1 failed` — the hit loses channel/user attribution |
+| 2 | remove the 2000-char assertion from `_button_value` | `1 failed` |
+| 3 | make `load_required_governance_index` tolerant again | `7 failed` across all three layers (facets, execution, startup) |
+| 4 | `overlay_issue = None` (remove approved-URL parity) | `2 failed` |
+| 5 | remove `pagination_store.discard(thread_key)` | `1 failed` — the refusal case, precisely the one that was broken |
+| 6a | remove the content-index existence guard | `2 failed` — both "does not create an empty database" tests |
+| 6b | remove the 100-option guard | `1 failed` |
 
 ### Slack Faceted Search MVP (this WP)
 
@@ -94,13 +133,15 @@ reuses the existing Slack audit CSV schema and records only the structured facet
 catalog version, and the free-text goal — the same class of content the pre-existing `slack_qa`
 event already records for natural-language queries.
 
-Tests: `tests/test_search_facets.py` (12), `tests/test_structured_search.py` (17),
-`tests/test_slack_faceted_search.py` (25, Block Kit view/payload only),
-`tests/test_slack_faceted_search_interface.py` (21, `run_slack_bot`/handler wiring via a hand-built
+Tests after remediation: `tests/test_search_facets.py` (16), `tests/test_structured_search.py` (22),
+`tests/test_slack_faceted_search.py` (32, Block Kit view/payload only),
+`tests/test_slack_faceted_search_interface.py` (33, `run_slack_bot`/handler wiring via a hand-built
 fake `App`/`SocketModeHandler`/client — no real Slack connection), and
 `tests/test_structured_query_operators.py` (8, the additive `query_planning.py` operator/
-`preresolved_fields` behaviour) — 83 new tests, all synthetic/hermetic fixtures, no gitignored
-production DB, Vault, token or real Slack. `compileall` and `git diff --check` both pass.
+`preresolved_fields` behaviour) — **111 tests** (83 at `3a7648f`, +28 from this remediation), all
+synthetic/hermetic fixtures, no gitignored production DB, Vault, token or real Slack. `compileall`
+and `git diff --check` both pass, and no `.mka/` directory or stray `.sqlite` file exists in this
+worktree after the full run — the read-only claim in finding 6, checked rather than asserted.
 
 Targeted run: the 5 new files plus every existing test file that touches `query_planning`,
 `slack_interface`, `slack_presentation`, `search_taxonomy`, `pipeline`, `retrieval`, or structured
@@ -110,24 +151,30 @@ Targeted run: the 5 new files plus every existing test file that touches `query_
 `test_slack_exact_alias_truncation.py`, `test_slack_retriever_truncation_propagation.py`,
 `test_slack_output_preview.py`, `test_content_index.py`, `test_content_index_lineage.py`,
 `test_search_quality_evaluation.py`, `test_production_search_alias_runtime.py`,
-`test_slack_structured_governance.py`): **634 passed, 1 skipped**, plus 20 pre-existing errors, all
-in `test_slack_structured_governance.py`, all `FileNotFoundError` on the same gitignored
+`test_slack_structured_governance.py`, plus `test_agentic.py`, `test_generation.py`,
+`test_governance_evals.py`, `test_validation.py`): **676 passed, 1 skipped**, plus 20 pre-existing
+errors, all in `test_slack_structured_governance.py`, all `FileNotFoundError` on the same gitignored
 `.mka/content_index.sqlite` fixture dependency this isolated worktree never had — unrelated to any
 file this WP touched.
 
-Full suite: **137 failed, 1391 passed, 65 skipped, 72 errors**. The failed/skipped/errors counts
-(137/65/72) are byte-for-byte identical to the count already on record in this file for the R1
-remediation candidate plus the B2 hardening WP's five additional tests (137/1303+5=1308/65/72); the
-passed count's growth (1308 → 1391, +83) matches exactly this WP's new tests. Every failing/erroring
-test file was checked and belongs to an unrelated subsystem (governance decision store, production
-search-alias plan/confirmation/execution, parent sync, historical fixture immutability, sample
-vault, store-data-sync plan v2) whose gitignored production fixtures are absent from this isolated
-worktree — the same pre-existing environment blocker recorded repeatedly elsewhere in this file, not
-a regression this WP introduced.
+Full suite after remediation: **137 failed, 1419 passed, 65 skipped, 72 errors**. The
+failed/skipped/errors counts (137/65/72) are unchanged from both the pre-remediation run of this WP
+and the counts already on record in this file for the preceding milestones; the passed count moved
+1391 → 1419 (+28), matching exactly the tests this remediation added, and the set of failing/erroring
+*files* is identical to the pre-remediation set. Every one belongs to an unrelated subsystem
+(governance decision store, production search-alias plan/confirmation/execution, parent sync,
+historical fixture immutability, sample vault, store-data-sync plan v2) whose gitignored production
+fixtures are absent from this isolated worktree — the same pre-existing environment blocker recorded
+repeatedly elsewhere in this file, not a regression this WP introduced.
 
-Not run: full application suite beyond the above; comprehensive/adversarial review; standalone
-lint/type tools (not configured in this repo); production sync, re-index, deploy, Slack Bot
-start/restart, UAT activation, or independent review of this WP.
+Not run / not verified: comprehensive adversarial review; standalone lint/type tools (not configured
+in this repo); production sync, re-index, deploy, Slack Bot start/restart, or UAT activation. **No
+live Slack round trip has ever been exercised** — every Slack interaction in these tests goes through
+a hand-built fake `App`/client, so the Block Kit payloads are asserted against the documented limits
+rather than against Slack's actual acceptance; the `views_open` / `view_submission` contract itself
+is unverified until UAT. The 26 pre-existing failing/erroring test files were identified by name and
+subsystem but not individually re-run against a clean baseline in this round. Codex re-review of this
+remediation has not happened.
 
 ### Superseded lock record: B2 Real Writer Regression Test Hardening
 

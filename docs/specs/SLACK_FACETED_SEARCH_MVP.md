@@ -38,14 +38,26 @@ while keeping natural language for everything else (brand name, metric goals, fr
   `FacetCatalog` every time.
 - The modal has four optional fields: 採訪年份 (`multi_static_select`, max 3), Sales Category LV2
   (`multi_static_select`, max 3, LV1 never offered), 內容相關標籤 (`multi_static_select`, max 3),
-  and 你想找什麼內容或成果 (`plain_text_input`, multiline). At least one must be non-empty, enforced
-  by a `view_submission` block-level error, not by making any one field required.
-  A facet with zero eligible options is omitted from the modal entirely rather than shown empty.
+  and 你想找什麼內容或成果 (`plain_text_input`, multiline, `max_length` = `FREE_TEXT_MAX_LENGTH`).
+  At least one must be non-empty, enforced by a `view_submission` block-level error, not by making
+  any one field required. A facet with zero eligible options is omitted from the modal entirely
+  rather than shown empty.
 - Submitting posts the result to the original channel/thread as one message (reusing the existing
   structured-result renderer and the existing `SlackPaginationStore`, so 「顯示更多」 continues to
   work exactly as it does for natural-language search), followed by a second, short message
   carrying a "調整條件" button. That button reopens the same modal prefilled with the prior
   selection.
+- **Block Kit limits are asserted, never assumed, and every one of them fails closed.** The
+  "調整條件" button carries an opaque token, not the request: Slack caps a button `value` at 2000
+  characters and an embedded maximal request measured 3206, which makes `chat.postMessage` reject
+  the whole message so the user gets no button at all. The request itself lives in
+  `slack_request_tokens` (bounded by TTL and entry count, in-memory, process-local, mirroring
+  `slack_pagination`); an expired token reopens an *empty* modal rather than a reconstructed one,
+  because prefilling filters the user never chose is worse than prefilling nothing. A
+  `multi_static_select` carrying more than 100 options raises rather than truncating — today's
+  counts (8 / 22 / 37) sit far below that, and crossing it means the "static options at
+  modal-open time" premise no longer holds and the field needs an `external_select` data source.
+  Truncating would hide eligible values from every user with no visible symptom.
 - The original `@mention` free-text flow, its pagination, and approved-asset-URL behaviour are
   unchanged; none of this is reachable unless `enable_faceted_search` is on, and none of it changes
   how the plain NL path behaves when it is on.
@@ -66,6 +78,18 @@ content index.
   non-`pending_metric`), the `NON_RETRIEVABLE_RECORD_TYPES` exclusion, and the restricted-customer
   denylist (`filter_restricted_results`). A value whose only carriers fail any of these never
   appears as an option.
+- **Both inputs are required and both fail closed** (`load_required_governance_index`,
+  `assert_readable_content_index`). `pipeline.load_restricted_customers_governance_index` is
+  deliberately forgiving — a missing file yields `(None, warning)` — which is the right default for
+  an offline developer query and the wrong one here: a catalog computed without a denylist can
+  offer a facet value whose only carrier is a restricted customer, disclosing that the customer
+  exists through the option list alone, before any search runs. Three shapes are refused: the file
+  is absent/unreadable; it does not parse; or it parses as JSON but is **not a list**. The last is
+  the dangerous one — upstream's record comprehension then iterates something yielding no dicts and
+  returns an empty denylist *with no warning at all*, indistinguishable downstream from a genuinely
+  empty one. A missing content index is likewise refused before opening, because `sqlite3.connect`
+  would otherwise create an empty database at that exact path — a write, by a read-only surface, at
+  the moment it is least expected.
 - Counted by distinct `document_id`, never by chunk count, so a long case does not outweigh a short
   one.
 - `catalog_version` is a pure function of the Authority's pinned sha256, a hash of the content index
@@ -90,7 +114,11 @@ StructuredSearchRequest
 the live `FacetCatalog` -- never trusting Slack's displayed option text, only the option *value*,
 and never trusting that a value valid under an old catalog is still valid under the current one. A
 `catalog_version` mismatch is `StaleFacetCatalogError`, refused before anything else; a stale
-submission is never "upgraded" by re-running against the new catalog silently.
+submission is never "upgraded" by re-running against the new catalog silently. `free_text` is
+bounded at `FREE_TEXT_MAX_LENGTH` here as well as in the Block Kit element, and an over-long one is
+**refused, never truncated**: silently shortening a stated goal would run a different search than
+the user asked for without saying so, and a Block Kit constraint is a property of the payload Slack
+sent rather than a fact this process may assume about it.
 
 `build_structured_query_plan(request, query_catalog, taxonomy)` builds a `TypedQueryPlan` directly:
 
@@ -156,12 +184,33 @@ existing single-value constraint continues to behave exactly as before.
 - `execute_structured_search` reuses `pipeline.ask_index`'s existing restricted-query precheck (for
   the free-text half) and the same restricted-customer/denylist filtering described in §5 for both
   paths; there is no second, parallel retrieval pipeline that governance could be bypassed through.
-- A new audit event, `slack_faceted_search`, is appended to the existing Slack audit CSV schema
-  (same header, same file) recording only the structured facet selection, the catalog version, and
-  the free-text goal -- the same class of content the pre-existing `slack_qa` event already records
-  for natural-language queries. The audit CSV's broader schema-risk is a pre-existing,
-  out-of-scope follow-up (see `CURRENT_WORK.md`'s accepted nonblocking backlog item 1 on Slack
-  taxonomy activation, and the "Non-goals" section below).
+- The denylist is also loaded once at startup purely to fail fast, so a bot that cannot read it
+  never reaches the point of accepting a query — rather than discovering the fault on the first
+  search and answering it anyway. This is scoped to the faceted surface: the natural-language
+  path's existing "denylist missing → warn on the answer" behaviour is a frozen contract this WP
+  does not change, and `enable_faceted_search=false` still starts without a denylist file.
+- **A refused query's text is never written down.** When the free-text goal hits the denylist,
+  `ask_index` returns before any retrieval; `is_restricted_refusal` detects that and the
+  `slack_faceted_search` row is skipped **entirely**, exactly as the natural-language path already
+  skips `slack_qa` on a refusal. The refusal is still recorded and still attributable:
+  `execute_structured_search` forwards `query_audit_metadata`, so `precheck_restricted_query`
+  writes `denylist_query_hit` under the Slack schema with `channel_id`/`user_id` and an empty
+  query column, instead of falling back to the bare `command,event,match_count` schema that
+  records neither.
+- A `slack_faceted_search` audit event is appended to the existing Slack audit CSV schema (same
+  header, same file) recording only the structured facet selection, the catalog version, and the
+  free-text goal — the same class of content the pre-existing `slack_qa` event already records for
+  natural-language queries. The audit CSV's broader schema-risk is a pre-existing, out-of-scope
+  follow-up (see the "Non-goals" section below).
+- Approved asset URLs behave identically to the natural-language path: the same
+  `enable_approved_asset_urls` flag, the same refusal guard (a refused answer has nothing to
+  enrich and is not enriched), and the same payload-free
+  `APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE` audit code when the authority cannot be verified —
+  which never aborts the search.
+- Every submission supersedes whatever its thread was previously paging through, on **every**
+  branch — including a refusal or an unstructured reply that produces no pages at all. The discard
+  happens before the reply is sent, so 「顯示更多」 can never resume a result the user has already
+  moved on from in a thread whose latest search was refused outright.
 
 ## 8. Feature flag and activation
 
