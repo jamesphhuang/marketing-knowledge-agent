@@ -44,6 +44,7 @@ from marketing_knowledge_agent.slack_interface import (
     run_slack_bot,
 )
 from marketing_knowledge_agent.slack_pagination import SlackPaginationStore
+from marketing_knowledge_agent.slack_request_tokens import SlackRequestTokenStore
 from marketing_knowledge_agent.structured_search import StructuredSearchGovernanceError
 
 from test_search_taxonomy import write_taxonomy_workbook
@@ -215,6 +216,35 @@ def _write_slack_config(
     path = tmp_path / "slack_config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
     return path
+
+
+def _action_body(
+    *, user_id="U1", channel_id="C123", thread_ts="1", value=None, trigger_id="T1"
+):
+    """A block_actions payload shaped the way Slack actually sends one.
+
+    Real payloads always carry ``user``, ``container`` and ``channel``; the handler reads the
+    interaction context from those rather than from the button's own ``value``, because the value
+    is content the bot posted into a channel and every member sees the same copy of it.
+    """
+    return {
+        "type": "block_actions",
+        "trigger_id": trigger_id,
+        "user": {"id": user_id},
+        "container": {
+            "type": "message",
+            "channel_id": channel_id,
+            "message_ts": "999.1",
+            "thread_ts": thread_ts,
+            "is_ephemeral": False,
+        },
+        "channel": {"id": channel_id},
+        "actions": [{
+            "type": "button",
+            "action_id": OPEN_SEARCH_MODAL_ACTION_ID,
+            "value": value if value is not None else json.dumps({}),
+        }],
+    }
 
 
 def _denylist(tmp_path, brand_names=()):
@@ -518,7 +548,8 @@ def test_flag_disabled_still_starts_without_a_denylist_file(tmp_path):
 
 
 def _run_bot_and_get_app(
-    tmp_path, db_path=None, denylist_brands=(), enable_approved_asset_urls=None
+    tmp_path, db_path=None, denylist_brands=(), enable_approved_asset_urls=None,
+    request_token_store=None,
 ):
     db_path = db_path or _build_index(tmp_path)
     workbook_path, sha256 = _write_taxonomy(tmp_path)
@@ -529,6 +560,21 @@ def _run_bot_and_get_app(
         enable_approved_asset_urls=enable_approved_asset_urls,
     )
     container = {}
+    if request_token_store is not None:
+        # run_slack_bot reaches for the process-wide default; swap it so a test can inspect it.
+        import marketing_knowledge_agent.slack_interface as _si
+
+        _original = _si.default_request_token_store
+        _si.default_request_token_store = lambda: request_token_store
+    try:
+        _run_bot(config_path, db_path, tmp_path, denylist_brands, container)
+    finally:
+        if request_token_store is not None:
+            _si.default_request_token_store = _original
+    return container["app"], tmp_path
+
+
+def _run_bot(config_path, db_path, tmp_path, denylist_brands, container):
     run_slack_bot(
         config_path=config_path,
         db_path=db_path,
@@ -538,7 +584,6 @@ def _run_bot_and_get_app(
         app_factory=_capturing_app_factory(container),
         socket_mode_handler_factory=_capturing_socket_mode_handler_factory(container),
     )
-    return container["app"], tmp_path
 
 
 def test_open_modal_action_opens_the_view_for_an_allowed_channel(tmp_path):
@@ -546,10 +591,7 @@ def test_open_modal_action_opens_the_view_for_an_allowed_channel(tmp_path):
     handler = app.actions[OPEN_SEARCH_MODAL_ACTION_ID]
     ack = FakeAck()
     client = FakeSlackClient()
-    body = {
-        "trigger_id": "T1",
-        "actions": [{"value": json.dumps({"channel_id": "C123", "thread_ts": "1"})}],
-    }
+    body = _action_body()
 
     handler(ack=ack, body=body, client=client)
 
@@ -564,10 +606,7 @@ def test_open_modal_action_refuses_a_disallowed_channel(tmp_path):
     handler = app.actions[OPEN_SEARCH_MODAL_ACTION_ID]
     ack = FakeAck()
     client = FakeSlackClient()
-    body = {
-        "trigger_id": "T1",
-        "actions": [{"value": json.dumps({"channel_id": "C_NOT_ALLOWED", "thread_ts": "1"})}],
-    }
+    body = _action_body(channel_id="C_NOT_ALLOWED")
 
     handler(ack=ack, body=body, client=client)
 
@@ -602,7 +641,7 @@ def test_adjust_button_prefills_the_reopened_modal_via_its_request_token(tmp_pat
     reopen_client = FakeSlackClient()
     open_handler(
         ack=FakeAck(),
-        body={"trigger_id": "T2", "actions": [{"value": adjust_button["value"]}]},
+        body=_action_body(trigger_id="T2", value=adjust_button["value"]),
         client=reopen_client,
     )
 
@@ -620,20 +659,9 @@ def test_an_expired_request_token_reopens_an_empty_modal_rather_than_guessing(tm
 
     open_handler(
         ack=FakeAck(),
-        body={
-            "trigger_id": "T1",
-            "actions": [
-                {
-                    "value": json.dumps(
-                        {
-                            "channel_id": "C123",
-                            "thread_ts": "1",
-                            "request_token": "expired-or-never-issued",
-                        }
-                    )
-                }
-            ],
-        },
+        body=_action_body(
+            value=json.dumps({"request_token": "expired-or-never-issued"})
+        ),
         client=client,
     )
 
@@ -668,10 +696,7 @@ def _private_metadata(app, channel_id="C123", thread_ts="1"):
     client = FakeSlackClient()
     open_handler(
         ack=ack,
-        body={
-            "trigger_id": "T1",
-            "actions": [{"value": json.dumps({"channel_id": channel_id, "thread_ts": thread_ts})}],
-        },
+        body=_action_body(channel_id=channel_id, thread_ts=thread_ts),
         client=client,
     )
     return client.opened_views[0]["view"]["private_metadata"]
@@ -1002,3 +1027,171 @@ def test_a_refusal_discards_the_previous_pagination_rather_than_leaving_it_resum
         client=mention_client,
     )
     assert mention_client.messages[0]["text"] == PAGINATION_EXPIRED_MESSAGE
+
+
+# --------------------------------------------------------------------------------------
+# Codex R2 blocker: cross-user prefill disclosure via the public "調整條件" button
+# --------------------------------------------------------------------------------------
+
+
+def _submit_and_get_adjust_button(app, *, state_values, user_id="U1", thread_ts="1"):
+    """Run one submission and return (client, the adjust/restart button that followed it)."""
+    handler = app.views[FACETED_SEARCH_MODAL_CALLBACK_ID]
+    client = FakeSlackClient()
+    handler(
+        ack=FakeAck(),
+        body={"user": {"id": user_id}},
+        client=client,
+        view={
+            "private_metadata": _private_metadata(app, thread_ts=thread_ts),
+            "state": {"values": state_values},
+        },
+    )
+    return client, client.messages[-1]["blocks"][-1]["elements"][0]
+
+
+def _reopen(app, button_value, *, user_id, channel_id="C123", thread_ts="1"):
+    client = FakeSlackClient()
+    app.actions[OPEN_SEARCH_MODAL_ACTION_ID](
+        ack=FakeAck(),
+        body=_action_body(
+            user_id=user_id, channel_id=channel_id, thread_ts=thread_ts, value=button_value
+        ),
+        client=client,
+    )
+    return client
+
+
+def _modal_prefill(view):
+    """Everything the reopened modal would show the clicker, as one comparable structure."""
+    blocks = {b.get("block_id"): b for b in view["blocks"]}
+    selected = {}
+    for block_id in (INTERVIEW_YEARS_BLOCK_ID, SALES_CATEGORY_LV2_BLOCK_ID, CONTENT_TAGS_BLOCK_ID):
+        element = blocks[block_id]["element"]
+        selected[block_id] = [o["value"] for o in element.get("initial_options", [])]
+    selected[FREE_TEXT_BLOCK_ID] = blocks[FREE_TEXT_BLOCK_ID]["element"].get("initial_value", "")
+    return selected
+
+
+SECRET_GOAL = "U1 私人搜尋目標 competitor-churn"
+
+
+def test_the_owner_can_reopen_their_own_prefilled_search(tmp_path):
+    """Case A. The feature must still work for the person it belongs to."""
+    app, _tmp = _run_bot_and_get_app(tmp_path)
+    _client, button = _submit_and_get_adjust_button(
+        app, state_values=_state_values(years=["2024"], free_text=SECRET_GOAL), user_id="U1"
+    )
+
+    reopened = _reopen(app, button["value"], user_id="U1")
+
+    prefill = _modal_prefill(reopened.opened_views[0]["view"])
+    assert prefill[INTERVIEW_YEARS_BLOCK_ID] == ["2024"]
+    assert prefill[FREE_TEXT_BLOCK_ID] == SECRET_GOAL
+
+
+def test_a_different_user_clicking_the_same_button_sees_nothing_of_the_owners_search(tmp_path):
+    """Case B, the blocker itself.
+
+    The button is posted into the channel, so U2 can and will be able to click it. What U2 must not
+    get is U1's filters or U1's free-text goal -- search intent typed into what looks like a private
+    dialog. Failing closed to an empty modal is the required outcome, not an error message that
+    would confirm someone else's search exists.
+    """
+    app, _tmp = _run_bot_and_get_app(tmp_path)
+    _client, button = _submit_and_get_adjust_button(
+        app, state_values=_state_values(years=["2024"], free_text=SECRET_GOAL), user_id="U1"
+    )
+
+    reopened = _reopen(app, button["value"], user_id="U2")
+
+    view = reopened.opened_views[0]["view"]
+    prefill = _modal_prefill(view)
+    assert prefill[INTERVIEW_YEARS_BLOCK_ID] == []
+    assert prefill[SALES_CATEGORY_LV2_BLOCK_ID] == []
+    assert prefill[CONTENT_TAGS_BLOCK_ID] == []
+    assert prefill[FREE_TEXT_BLOCK_ID] == ""
+    # Nothing of U1's search may appear anywhere in the payload U2 receives.
+    assert SECRET_GOAL not in json.dumps(view, ensure_ascii=False)
+    assert "2024" not in json.dumps(
+        [b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID][0]
+        .get("element", {})
+        .get("initial_options", []),
+        ensure_ascii=False,
+    )
+
+
+def test_the_owner_in_a_different_channel_cannot_retrieve_the_request(tmp_path):
+    """Case C. Same person, different conversation, different audience."""
+    app, _tmp = _run_bot_and_get_app(tmp_path)
+    _client, button = _submit_and_get_adjust_button(
+        app, state_values=_state_values(years=["2024"], free_text=SECRET_GOAL), user_id="U1"
+    )
+
+    # C_OTHER is not allowlisted, so nothing opens at all -- the stronger of the two failures.
+    reopened = _reopen(app, button["value"], user_id="U1", channel_id="C_OTHER")
+    assert reopened.opened_views == []
+
+
+def test_the_owner_in_a_different_thread_cannot_retrieve_the_request(tmp_path):
+    """Case D. Same person, same channel, a thread the search was never run in."""
+    app, _tmp = _run_bot_and_get_app(tmp_path)
+    _client, button = _submit_and_get_adjust_button(
+        app, state_values=_state_values(years=["2024"], free_text=SECRET_GOAL), user_id="U1"
+    )
+
+    reopened = _reopen(app, button["value"], user_id="U1", thread_ts="999.9")
+
+    view = reopened.opened_views[0]["view"]
+    assert _modal_prefill(view)[FREE_TEXT_BLOCK_ID] == ""
+    assert SECRET_GOAL not in json.dumps(view, ensure_ascii=False)
+
+
+def test_an_interaction_payload_without_context_fails_closed(tmp_path):
+    """Case F's sibling: a malformed payload must not fall through to an empty-string match."""
+    app, _tmp = _run_bot_and_get_app(tmp_path)
+    client = FakeSlackClient()
+
+    app.actions[OPEN_SEARCH_MODAL_ACTION_ID](
+        ack=FakeAck(),
+        body={"trigger_id": "T1", "actions": [{"value": json.dumps({})}]},  # no user/container
+        client=client,
+    )
+
+    assert client.opened_views == []
+
+
+def test_a_denylist_refusal_stores_no_request_and_offers_no_prefill_button(tmp_path):
+    """Case E. Restricted text must not survive in the token store or in a button.
+
+    A refused query is exactly the text that must not be retained anywhere shared, and the token
+    store is shared across every viewer of the channel. Storing it "only for the owner" would still
+    be storing it, so the refusal path stores nothing and offers only a blank restart.
+    """
+    secret = "SECRET_CUSTOMER_NAME"
+    token_store = SlackRequestTokenStore()
+    app, tmp_path_ = _run_bot_and_get_app(
+        tmp_path, denylist_brands=[secret], request_token_store=token_store
+    )
+
+    client, button = _submit_and_get_adjust_button(
+        app, state_values=_state_values(years=["2024"], free_text=f"{secret} 的成長案例")
+    )
+
+    # Nothing retained, and no token to reopen with.
+    assert len(token_store) == 0
+    assert token_store.stored_requests() == ()
+    assert "request_token" not in json.loads(button["value"])
+    assert button["text"]["text"] == "重新搜尋"
+
+    # The restricted term appears in no observable surface.
+    observable = json.dumps(client.messages, ensure_ascii=False)
+    assert secret not in observable
+    assert secret not in (tmp_path_ / "audit.csv").read_text(encoding="utf-8")
+    assert secret not in json.dumps(
+        [r.free_text for r in token_store.stored_requests()], ensure_ascii=False
+    )
+
+    # And that restart button opens a genuinely blank modal.
+    reopened = _reopen(app, button["value"], user_id="U1")
+    assert _modal_prefill(reopened.opened_views[0]["view"])[FREE_TEXT_BLOCK_ID] == ""

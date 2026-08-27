@@ -39,6 +39,10 @@ from marketing_knowledge_agent.structured_search import (
 )
 
 
+OWNER = {"owner_user_id": "U1", "channel_id": "C1", "thread_ts": "1"}
+CLICK = {"user_id": "U1", "channel_id": "C1", "thread_ts": "1"}
+
+
 def _catalog():
     return FacetCatalog(
         catalog_version="v1",
@@ -71,16 +75,19 @@ def test_non_trigger_text_is_not_recognised(question):
 # --------------------------------------------------------------------------------------
 
 
-def test_open_search_reply_carries_a_button_with_routing_coordinates():
+def test_open_search_reply_carries_a_button_with_no_context_of_its_own():
+    """Routing lives on the message; the button value states only which action to take.
+
+    Channel and thread are deliberately absent: the button sits in a channel where every member
+    sees the same copy, so its value must not be the thing that decides whose context applies.
+    """
     reply = build_open_search_reply("C123", "100.1")
 
     assert reply["channel"] == "C123"
     assert reply["thread_ts"] == "100.1"
     button = reply["blocks"][-1]["elements"][0]
     assert button["action_id"] == OPEN_SEARCH_MODAL_ACTION_ID
-    payload = json.loads(button["value"])
-    assert payload == {"channel_id": "C123", "thread_ts": "100.1"}
-    assert "prefill" not in payload
+    assert json.loads(button["value"]) == {}
 
 
 def test_adjust_filters_message_carries_a_token_not_the_request_itself():
@@ -88,12 +95,9 @@ def test_adjust_filters_message_carries_a_token_not_the_request_itself():
 
     button = message["blocks"][-1]["elements"][0]
     payload = json.loads(button["value"])
-    assert payload["channel_id"] == "C123"
-    assert payload["thread_ts"] == "100.1"
-    assert payload["request_token"] == "deadbeef" * 4
-    # The request's own content must never be embedded: that is what blew the 2000-char budget.
-    assert "prefill" not in payload
-    assert "free_text" not in button["value"]
+    # The token, and nothing else. No request content (that blew the 2000-char budget) and no
+    # channel/thread (that would be the button deciding whose context applies).
+    assert payload == {"request_token": "deadbeef" * 4}
 
 
 def test_adjust_button_value_stays_within_slacks_2000_character_budget():
@@ -109,7 +113,7 @@ def test_adjust_button_value_stays_within_slacks_2000_character_budget():
         content_tags=("會員經營", "數位轉型", "團購解決方案"),
         free_text="會" * FREE_TEXT_MAX_LENGTH,
     )
-    token = store.store(maximal)
+    token = store.store(maximal, **OWNER)
 
     message = build_adjust_filters_message("C123", "100.1", token)
     value = message["blocks"][-1]["elements"][0]["value"]
@@ -118,7 +122,7 @@ def test_adjust_button_value_stays_within_slacks_2000_character_budget():
     # Bounded by construction, not merely "small enough today": the payload is routing coordinates
     # plus a fixed-width token, so the free-text length cannot move this number at all.
     shorter = build_adjust_filters_message("C123", "100.1", store.store(
-        StructuredSearchRequest(free_text="x")
+        StructuredSearchRequest(free_text="x"), **OWNER
     ))
     assert len(shorter["blocks"][-1]["elements"][0]["value"]) == len(value)
 
@@ -140,7 +144,7 @@ def test_malformed_button_value_parses_to_empty_dict():
 
 
 def test_request_token_is_none_for_a_fresh_open():
-    assert request_token_from_button_payload({"channel_id": "C1", "thread_ts": "1"}) is None
+    assert request_token_from_button_payload({}) is None
 
 
 def test_request_round_trips_through_the_token_store_not_the_button():
@@ -151,11 +155,11 @@ def test_request_round_trips_through_the_token_store_not_the_button():
         content_tags=(),
         free_text="測試",
     )
-    token = store.store(request)
+    token = store.store(request, **OWNER)
     message = build_adjust_filters_message("C1", "1", token)
     payload = parse_open_modal_button_value(message["blocks"][-1]["elements"][0]["value"])
 
-    restored = store.get(request_token_from_button_payload(payload))
+    restored = store.resolve(request_token_from_button_payload(payload), **CLICK)
 
     assert restored.interview_years == (2024, 2023)
     assert restored.sales_category_lv2 == ("食品/飲料",)
@@ -166,17 +170,55 @@ def test_request_round_trips_through_the_token_store_not_the_button():
 def test_an_expired_token_resolves_to_none_rather_than_a_reconstructed_request():
     clock = [1000.0]
     store = SlackRequestTokenStore(ttl_seconds=60, clock=lambda: clock[0])
-    token = store.store(StructuredSearchRequest(free_text="測試"))
+    token = store.store(StructuredSearchRequest(free_text="測試"), **OWNER)
 
-    assert store.get(token) is not None
+    assert store.resolve(token, **CLICK) is not None
     clock[0] += 61
-    assert store.get(token) is None
+    assert store.resolve(token, **CLICK) is None
 
 
 def test_an_unknown_token_resolves_to_none():
     store = SlackRequestTokenStore()
-    assert store.get("never-issued") is None
-    assert store.get(None) is None
+    assert store.resolve("never-issued", **CLICK) is None
+    assert store.resolve(None, **CLICK) is None
+
+
+def test_a_different_user_cannot_resolve_another_persons_token():
+    """The blocker: the button is public, so presentation alone must not be enough."""
+    store = SlackRequestTokenStore()
+    token = store.store(StructuredSearchRequest(free_text="U1 的私人搜尋"), **OWNER)
+
+    assert store.resolve(token, user_id="U2", channel_id="C1", thread_ts="1") is None
+
+
+def test_the_same_user_in_a_different_channel_cannot_resolve_the_token():
+    store = SlackRequestTokenStore()
+    token = store.store(StructuredSearchRequest(free_text="U1 的私人搜尋"), **OWNER)
+
+    assert store.resolve(token, user_id="U1", channel_id="C_OTHER", thread_ts="1") is None
+
+
+def test_the_same_user_in_a_different_thread_cannot_resolve_the_token():
+    store = SlackRequestTokenStore()
+    token = store.store(StructuredSearchRequest(free_text="U1 的私人搜尋"), **OWNER)
+
+    assert store.resolve(token, user_id="U1", channel_id="C1", thread_ts="999") is None
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"owner_user_id": "", "channel_id": "C1", "thread_ts": "1"},
+        {"owner_user_id": "U1", "channel_id": "", "thread_ts": "1"},
+        {"owner_user_id": "U1", "channel_id": "C1", "thread_ts": ""},
+        {"owner_user_id": "  ", "channel_id": "C1", "thread_ts": "1"},
+    ],
+)
+def test_storing_without_complete_context_is_refused(context):
+    """An empty stored value would compare equal to an empty derived one, disabling the check."""
+    store = SlackRequestTokenStore()
+    with pytest.raises(ValueError, match="context"):
+        store.store(StructuredSearchRequest(free_text="x"), **context)
 
 
 # --------------------------------------------------------------------------------------

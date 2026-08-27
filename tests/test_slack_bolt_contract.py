@@ -187,19 +187,37 @@ def _dispatch(app, body):
     return app.dispatch(BoltRequest(body=body, mode="socket_mode"))
 
 
-def _open_modal(app, slack_api, channel_id="C123", thread_ts="100.1"):
-    response = _dispatch(app, {
+def _action_payload(*, user_id="U1", channel_id="C123", thread_ts="100.1", value=None):
+    """A block_actions payload shaped the way Slack actually sends one.
+
+    ``container`` and ``channel`` are what the handler reads its interaction context from; the
+    button's ``value`` carries only the action's own data.
+    """
+    return {
         "type": "block_actions",
         "trigger_id": "T-1",
-        "user": {"id": "U1"},
+        "user": {"id": user_id},
+        "container": {
+            "type": "message",
+            "channel_id": channel_id,
+            "message_ts": "999.1",
+            "thread_ts": thread_ts,
+            "is_ephemeral": False,
+        },
         "channel": {"id": channel_id},
         "actions": [{
             "type": "button",
             "action_id": OPEN_SEARCH_MODAL_ACTION_ID,
             "block_id": "open_faceted_search_actions",
-            "value": json.dumps({"channel_id": channel_id, "thread_ts": thread_ts}),
+            "value": value if value is not None else json.dumps({}),
         }],
-    })
+    }
+
+
+def _open_modal(app, slack_api, channel_id="C123", thread_ts="100.1", **kwargs):
+    response = _dispatch(
+        app, _action_payload(channel_id=channel_id, thread_ts=thread_ts, **kwargs)
+    )
     return response, slack_api.views_open[-1]["view"] if slack_api.views_open else None
 
 
@@ -311,3 +329,42 @@ def test_real_bolt_returns_the_errors_response_action_for_an_empty_submission(bo
     assert body["response_action"] == "errors"
     assert FREE_TEXT_BLOCK_ID in body["errors"]
     assert slack_api.post_message == []
+
+
+def test_real_bolt_routes_distinct_user_contexts_to_the_right_prefill(bolt_app, slack_api):
+    """Case G: the user identity the handler acts on comes from bolt's own routed payload.
+
+    Both clicks carry the *same* button value -- that is the point, since the button is posted once
+    into a shared channel. Only ``body.user.id`` differs, and it is bolt that populates it, so this
+    exercises the real path rather than a hand-built kwarg.
+    """
+    _response, view_payload = _open_modal(bolt_app, slack_api)
+    slack_api.post_message.clear()
+
+    secret = "U1 私人搜尋 competitor-churn"
+    _dispatch(bolt_app, _submission_body(view_payload, years=["2024"], free_text=secret))
+    adjust_button = slack_api.post_message[-1]["blocks"][-1]["elements"][0]
+    assert "request_token" in json.loads(adjust_button["value"])
+
+    # The owner clicks: prefill comes back.
+    slack_api.views_open.clear()
+    _dispatch(bolt_app, _action_payload(user_id="U1", value=adjust_button["value"]))
+    owner_view = slack_api.views_open[-1]["view"]
+    free_text_block = next(
+        b for b in owner_view["blocks"] if b.get("block_id") == FREE_TEXT_BLOCK_ID
+    )
+    assert free_text_block["element"].get("initial_value") == secret
+
+    # A different member of the same channel clicks the same button: nothing of U1's search.
+    slack_api.views_open.clear()
+    _dispatch(bolt_app, _action_payload(user_id="U2", value=adjust_button["value"]))
+    other_view = slack_api.views_open[-1]["view"]
+    assert secret not in json.dumps(other_view, ensure_ascii=False)
+    other_free_text = next(
+        b for b in other_view["blocks"] if b.get("block_id") == FREE_TEXT_BLOCK_ID
+    )
+    assert "initial_value" not in other_free_text["element"]
+    years_block = next(
+        b for b in other_view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID
+    )
+    assert "initial_options" not in years_block["element"]
