@@ -25,11 +25,15 @@ from typing import Dict, Optional, Tuple
 from .indexing import SQLiteIndex
 from .governance import filter_restricted_results
 from .models import SearchFilters, SearchResult
-from .pipeline import DEFAULT_RESTRICTED_CUSTOMERS_PATH, load_restricted_customers_governance_index
 from .query_gating import apply_intent_gating
 from .query_planning import normalize_query_text
 from .retrieval import matches_filters
 from .search_taxonomy import FIELD_CONTENT_TAGS, FIELD_SALES_CATEGORY_LV2, SearchTaxonomy
+from .structured_search import (
+    StructuredSearchGovernanceError,
+    assert_readable_content_index,
+    load_required_governance_index,
+)
 
 
 # Bumped only when this builder's own eligibility rules change shape -- a new governance filter, a
@@ -96,7 +100,7 @@ class FacetCatalog:
 def build_facet_catalog(
     db_path: Path,
     taxonomy: SearchTaxonomy,
-    restricted_customers_path: Optional[Path] = DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    restricted_customers_path: Path,
 ) -> FacetCatalog:
     """Build one read-only facet catalog from the pinned Authority and the live content index.
 
@@ -104,18 +108,28 @@ def build_facet_catalog(
     ``SearchFilters(intent="external")`` gating, the same non-retrievable record-type exclusion, and
     the same restricted-customer denylist. A document is counted once per distinct ``document_id``,
     never once per chunk, so a long document never outweighs a short one in a facet count.
+
+    Both inputs are required and both fail closed. A denylist that could not be loaded would produce
+    a catalog whose options were computed without it -- offering a facet value whose only carrier is
+    a restricted customer, and thereby disclosing that the customer exists through the option list
+    alone, before any search is ever run.
     """
+    try:
+        # Checked before opening: ``sqlite3.connect`` would otherwise create an empty database at
+        # this path, and a read-only surface must not bring a content index into existence.
+        assert_readable_content_index(db_path)
+        # Raises rather than warning: an ignored warning here becomes a governance-free option list.
+        governance_index = load_required_governance_index(restricted_customers_path)
+    except StructuredSearchGovernanceError as exc:
+        # Re-typed so this function has exactly one failure type for a caller to handle, without
+        # losing the original cause.
+        raise FacetCatalogError(str(exc)) from exc
+
     try:
         index = SQLiteIndex(Path(db_path))
         indexed_chunks = index.load_chunks()
     except (sqlite3.Error, OSError) as exc:
         raise FacetCatalogError(f"無法讀取內容索引 {db_path} 以建立 facet catalog：{exc}") from exc
-
-    governance_index = None
-    if restricted_customers_path is not None:
-        governance_index, _load_warning = load_restricted_customers_governance_index(
-            Path(restricted_customers_path)
-        )
 
     filters = apply_intent_gating(SearchFilters(intent="external"))
     authority_lv2 = {

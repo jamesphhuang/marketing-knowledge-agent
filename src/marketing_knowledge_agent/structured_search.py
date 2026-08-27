@@ -20,24 +20,27 @@ Semantics, restated because they are load-bearing:
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Mapping, Optional, Tuple
 
 from .governance import (
     RESTRICTED_RESULT_REMOVAL_WARNING,
+    GovernanceIndex,
     apply_governance_to_answer,
     filter_restricted_results,
 )
 from .indexing import SQLiteIndex
 from .models import GeneratedAnswer, SearchFilters, SearchResult
-from .pipeline import (
-    DEFAULT_RESTRICTED_CUSTOMERS_PATH,
-    ask_index,
-    load_restricted_customers_governance_index,
+from .pipeline import ask_index, load_restricted_customers_governance_index
+from .query_gating import (
+    DEFAULT_QUERY_AUDIT_LOG,
+    RESTRICTED_QUERY_REFUSAL,
+    apply_intent_gating,
+    enforce_external_citations,
 )
-from .query_gating import DEFAULT_QUERY_AUDIT_LOG, apply_intent_gating, enforce_external_citations
 from .query_planning import (
     TAXONOMY_FIELDS,
     QueryCatalog,
@@ -48,13 +51,19 @@ from .query_planning import (
     normalize_exact_value,
 )
 from .retrieval import matches_filters
-from .search_facets import FacetCatalog
 from .search_taxonomy import SearchTaxonomy
 from .structured_results import DEFAULT_ASSET_CAP, DEFAULT_PARENT_CAP, generate_structured_answer
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; search_facets imports this module at runtime
+    from .search_facets import FacetCatalog
 
 
 MAX_SELECTED_PER_FIELD = 3
 STRUCTURED_SEARCH_SOURCE = "slack_modal"
+# The free-text goal is bounded server-side as well as in the Block Kit element, and an over-long
+# one is refused rather than truncated: silently shortening a user's stated goal would run a
+# different search than the one they asked for, without saying so.
+FREE_TEXT_MAX_LENGTH = 1000
 
 
 class StructuredSearchValidationError(ValueError):
@@ -63,6 +72,73 @@ class StructuredSearchValidationError(ValueError):
 
 class StaleFacetCatalogError(StructuredSearchValidationError):
     """Raised when a submission was built against a facet catalog that is no longer current."""
+
+
+class StructuredSearchGovernanceError(ValueError):
+    """Raised when the restricted-customer governance authority cannot be trusted or loaded.
+
+    This is deliberately not a ``StructuredSearchValidationError``: a validation error is something
+    the user can fix by resubmitting, whereas this is an operator-facing fault that must stop the
+    surface entirely rather than be reported into a Slack channel as if the user had mistyped.
+    """
+
+
+def load_required_governance_index(restricted_customers_path: Path) -> GovernanceIndex:
+    """Load the restricted-customer denylist, or refuse to run at all.
+
+    ``pipeline.load_restricted_customers_governance_index`` is deliberately forgiving: a missing
+    file yields ``(None, warning)`` so a developer running an offline query gets a warning rather
+    than a crash. That is the wrong default for a Slack surface, where "no denylist loaded" means
+    every restricted customer is one query away from disclosure and the warning is attached to an
+    answer that has already been rendered.
+
+    Two failure shapes matter and neither is caught upstream:
+
+    - the file is absent or unreadable -- upstream returns ``None`` plus a warning that a caller is
+      free to ignore;
+    - the file parses as JSON but is not a list (``{}``, ``"x"``, ``null``). Upstream's record
+      comprehension then iterates something that yields no dicts, producing an **empty denylist with
+      no warning at all** -- indistinguishable, to every later stage, from a genuinely empty one.
+
+    Both fail closed here.
+    """
+    path = Path(restricted_customers_path)
+    if not path.is_file():
+        raise StructuredSearchGovernanceError(
+            f"restricted customer denylist 不存在或不是一般檔案：{path}；"
+            "在 denylist 不可用時不得執行 Slack 搜尋。"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StructuredSearchGovernanceError(
+            f"restricted customer denylist 無法解析：{path}：{exc}"
+        ) from exc
+    if not isinstance(payload, list):
+        raise StructuredSearchGovernanceError(
+            f"restricted customer denylist 必須是 JSON array：{path}；"
+            f"實際為 {type(payload).__name__}。非陣列的內容會被靜默讀成空 denylist。"
+        )
+
+    governance_index, load_warning = load_restricted_customers_governance_index(path)
+    if governance_index is None or load_warning:
+        raise StructuredSearchGovernanceError(
+            f"restricted customer denylist 載入失敗：{path}：{load_warning or 'unknown error'}"
+        )
+    return governance_index
+
+
+def is_restricted_refusal(answer: GeneratedAnswer) -> bool:
+    """Whether this answer is a denylist refusal rather than a search result.
+
+    A refusal returns before any retrieval, so it carries no ``structured_result`` and its body is
+    the canonical refusal text. Callers use this to keep the refused query out of their own audit
+    rows, exactly as the natural-language Slack path already does with its ``trace.mode`` check.
+    """
+    return (
+        getattr(answer, "structured_result", None) is None
+        and getattr(answer, "answer", None) == RESTRICTED_QUERY_REFUSAL
+    )
 
 
 @dataclass(frozen=True)
@@ -74,7 +150,9 @@ class StructuredSearchRequest:
     catalog_version: str = ""
 
 
-def validate_structured_search_request(request: StructuredSearchRequest, catalog: FacetCatalog) -> None:
+def validate_structured_search_request(
+    request: StructuredSearchRequest, catalog: "FacetCatalog"
+) -> None:
     """Re-validate a submission server-side against the live facet catalog, or refuse it.
 
     Nothing here trusts the Slack payload's display text. Every selected value is re-checked
@@ -92,6 +170,11 @@ def validate_structured_search_request(request: StructuredSearchRequest, catalog
         or request.free_text.strip()
     ):
         raise StructuredSearchValidationError("請至少填寫一個搜尋條件。")
+
+    if len(request.free_text) > FREE_TEXT_MAX_LENGTH:
+        raise StructuredSearchValidationError(
+            f"搜尋文字請縮短到 {FREE_TEXT_MAX_LENGTH} 字以內（目前 {len(request.free_text)} 字）。"
+        )
 
     for label, values, is_valid in (
         ("採訪年份", request.interview_years, catalog.is_valid_year),
@@ -232,14 +315,31 @@ def build_structured_query_plan(
     )
 
 
+def assert_readable_content_index(db_path: Path) -> Path:
+    """Refuse a content index that is not already a file, without bringing one into existence.
+
+    ``sqlite3.connect`` creates an empty database for a path that does not exist, so simply reading
+    through ``SQLiteIndex`` would leave a 0-byte ``.sqlite`` file behind at the very path an
+    operator is about to investigate -- a write, by a surface that must never write, at the moment
+    it is least expected. Checking first keeps the read read-only.
+    """
+    path = Path(db_path)
+    if not path.is_file():
+        raise StructuredSearchGovernanceError(
+            f"內容索引不存在或不是一般檔案：{path}；不會建立空索引，也不會在無索引時回覆結果。"
+        )
+    return path
+
+
 def execute_structured_search(
     request: StructuredSearchRequest,
     db_path: Path,
-    taxonomy: SearchTaxonomy,
-    restricted_customers_path: Optional[Path] = DEFAULT_RESTRICTED_CUSTOMERS_PATH,
+    taxonomy: Optional[SearchTaxonomy],
+    restricted_customers_path: Path,
     audit_log_path: Path = DEFAULT_QUERY_AUDIT_LOG,
     parent_cap: int = DEFAULT_PARENT_CAP,
     asset_cap: int = DEFAULT_ASSET_CAP,
+    query_audit_metadata: Optional[Mapping[str, str]] = None,
 ) -> GeneratedAnswer:
     """Execute a validated structured-search request and return a governed answer.
 
@@ -248,7 +348,16 @@ def execute_structured_search(
     blank this is a pure structured browse and there is nothing to rank, so results are ordered
     deterministically by interview year (newest first) and then by a stable record id, instead of
     depending on undefined SQLite row order.
+
+    ``restricted_customers_path`` is required and must resolve to a loadable denylist. It has no
+    ``None`` default on purpose: an optional governance authority is one an caller can forget to
+    pass, and forgetting it here means disclosing restricted customers rather than failing.
     """
+    assert_readable_content_index(db_path)
+    # Loaded before anything is read out of the index, so a denylist fault stops the search rather
+    # than surfacing results and appending a warning to them after the fact.
+    governance_index = load_required_governance_index(restricted_customers_path)
+
     chunks = SQLiteIndex(Path(db_path)).load_chunks()
     query_catalog = QueryCatalog.from_metadata(item.chunk.metadata for item in chunks)
     query_plan = build_structured_query_plan(request, query_catalog, taxonomy)
@@ -259,17 +368,18 @@ def execute_structured_search(
             free_text,
             db_path,
             filters=SearchFilters(intent="external"),
-            restricted_customers_path=restricted_customers_path,
+            governance_index=governance_index,
             audit_log_path=audit_log_path,
             query_plan=query_plan,
             parent_cap=parent_cap,
             asset_cap=asset_cap,
+            query_audit_metadata=query_audit_metadata,
         )
 
     return _execute_structured_browse(
         query_plan,
         db_path=db_path,
-        restricted_customers_path=restricted_customers_path,
+        governance_index=governance_index,
         parent_cap=parent_cap,
         asset_cap=asset_cap,
     )
@@ -278,17 +388,10 @@ def execute_structured_search(
 def _execute_structured_browse(
     query_plan: TypedQueryPlan,
     db_path: Path,
-    restricted_customers_path: Optional[Path],
+    governance_index: GovernanceIndex,
     parent_cap: int,
     asset_cap: int,
 ) -> GeneratedAnswer:
-    governance_index = None
-    load_warning = None
-    if restricted_customers_path is not None:
-        governance_index, load_warning = load_restricted_customers_governance_index(
-            Path(restricted_customers_path)
-        )
-
     filters = apply_intent_gating(SearchFilters(intent="external"))
     by_document: "OrderedDict[str, object]" = OrderedDict()
     for indexed_chunk in SQLiteIndex(Path(db_path)).load_chunks():
@@ -320,8 +423,6 @@ def _execute_structured_browse(
         warning = RESTRICTED_RESULT_REMOVAL_WARNING.format(count=removed_count)
         if warning not in answer.warnings:
             answer.warnings.append(warning)
-    if load_warning and load_warning not in answer.warnings:
-        answer.warnings.append(load_warning)
     enforce_external_citations(answer, SearchFilters(intent="external"))
     return answer
 

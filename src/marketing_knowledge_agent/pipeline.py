@@ -193,14 +193,20 @@ def ask_index(
     parent_cap: int = DEFAULT_PARENT_CAP,
     asset_cap: int = DEFAULT_ASSET_CAP,
     taxonomy: Optional["SearchTaxonomy"] = None,
+    query_audit_metadata: Optional[Mapping[str, str]] = None,
 ) -> GeneratedAnswer:
     filters = filters or SearchFilters()
     governance_index, load_warning = resolve_governance_index(governance_index, restricted_customers_path)
+    # ``query_audit_metadata`` mirrors ``agent_ask``: without it a denylist hit is recorded under the
+    # bare command schema, losing the channel and user a Slack-originated refusal has to be
+    # attributable to. It never carries the query itself -- ``append_denylist_query_audit`` writes an
+    # empty query column for this event by construction.
     refused = precheck_restricted_query(
         question,
         governance_index,
         command="ask",
         audit_log_path=audit_log_path,
+        audit_metadata=query_audit_metadata,
     )
     if refused is not None:
         return refused

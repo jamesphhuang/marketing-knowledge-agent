@@ -27,8 +27,9 @@ from .slack_faceted_search import (
     is_faceted_search_trigger,
     parse_open_modal_button_value,
     parse_structured_search_request,
-    prefill_from_button_payload,
+    request_token_from_button_payload,
 )
+from .slack_request_tokens import SlackRequestTokenStore, default_request_token_store
 from .slack_output_preview import (
     apply_approved_asset_url_overlay,
     load_index_bound_approved_asset_url_overlay,
@@ -49,6 +50,8 @@ from .structured_search import (
     StructuredSearchRequest,
     StructuredSearchValidationError,
     execute_structured_search,
+    is_restricted_refusal,
+    load_required_governance_index,
     validate_structured_search_request,
 )
 
@@ -348,12 +351,18 @@ def run_slack_bot(
     if config.enable_faceted_search:
         # Loaded exactly once, before the App or Socket Mode handler is constructed, and closed
         # over for the whole process lifetime -- never re-read per query, never re-built per Slack
-        # interaction. Any failure here (missing workbook, hash mismatch, unreadable index) stops
-        # startup before Socket Mode opens; there is no fallback that disables the feature silently.
+        # interaction. Any failure here (missing workbook, hash mismatch, unreadable index,
+        # missing or unparseable denylist) stops startup before Socket Mode opens; there is no
+        # fallback that disables the feature silently or serves results without governance.
         taxonomy = load_search_taxonomy(
             workbook_path=Path(config.search_taxonomy_workbook),
             expected_sha256=config.search_taxonomy_sha256,
         )
+        # Loaded here purely to fail fast. Every query path reloads it for itself, so this call's
+        # value is discarded -- what matters is that a bot which cannot read its denylist never
+        # reaches the point of accepting a query at all, rather than discovering the fault on the
+        # first search and answering it anyway.
+        load_required_governance_index(restricted_customers_path)
         facet_catalog = build_facet_catalog(
             db_path, taxonomy, restricted_customers_path=restricted_customers_path
         )
@@ -394,6 +403,7 @@ def run_slack_bot(
             restricted_customers_path=restricted_customers_path,
             audit_log_path=audit_log_path,
             pagination_store=pagination_store,
+            request_token_store=default_request_token_store(),
         )
 
     socket_mode_handler_factory(app, app_token).start()
@@ -408,6 +418,7 @@ def _register_faceted_search_handlers(
     restricted_customers_path: Path,
     audit_log_path: Path,
     pagination_store: SlackPaginationStore,
+    request_token_store: SlackRequestTokenStore,
 ) -> None:
     """Register the button-click and modal-submission handlers behind the faceted-search flag.
 
@@ -425,7 +436,9 @@ def _register_faceted_search_handlers(
         thread_ts = str(payload.get("thread_ts", ""))
         if channel_id not in config.allowed_channel_ids:
             return
-        prefill = prefill_from_button_payload(payload)
+        # An expired or unknown token reopens an empty modal rather than a reconstructed one:
+        # prefilling filters the user did not choose would be worse than prefilling nothing.
+        prefill = request_token_store.get(request_token_from_button_payload(payload))
         view = build_facet_modal_view(
             facet_catalog, channel_id=channel_id, thread_ts=thread_ts, prefill=prefill
         )
@@ -444,6 +457,7 @@ def _register_faceted_search_handlers(
 
         state_values = ((view.get("state") or {}).get("values")) or {}
         request = parse_structured_search_request(state_values, catalog_version)
+        thread_key = pagination_key(channel_id, thread_ts)
 
         try:
             validate_structured_search_request(request, facet_catalog)
@@ -458,6 +472,7 @@ def _register_faceted_search_handlers(
             return
 
         ack()
+        user_id = str((body.get("user") or {}).get("id", ""))
         answer = execute_structured_search(
             request,
             db_path=db_path,
@@ -466,18 +481,48 @@ def _register_faceted_search_handlers(
             audit_log_path=audit_log_path,
             parent_cap=SLACK_SEARCH_PARENT_CAP,
             asset_cap=SLACK_SEARCH_ASSET_CAP,
-        )
-        _append_slack_audit(
-            audit_log_path,
-            event="slack_faceted_search",
-            channel_id=channel_id,
-            user_id=str((body.get("user") or {}).get("id", "")),
-            citation_count=len(answer.citations),
-            warning_count=len(answer.warnings),
-            query=_structured_audit_query(request, catalog_version),
+            # Without this a denylist hit is recorded under the bare command schema, losing the
+            # channel and user the refusal must be attributable to. The query column stays empty
+            # for that event by construction, so this adds attribution, not content.
+            query_audit_metadata={"channel_id": channel_id, "user_id": user_id},
         )
 
-        thread_key = pagination_key(channel_id, thread_ts)
+        # This search supersedes whatever this thread was previously paging through -- including
+        # when it produced no pages at all. Done before the reply is sent and on every branch
+        # below, so 「顯示更多」 can never resume a result the user has already moved on from.
+        pagination_store.discard(thread_key)
+
+        refused = is_restricted_refusal(answer)
+        overlay_issue = (
+            _apply_approved_asset_urls(answer, db_path)
+            if config.enable_approved_asset_urls and not refused
+            else None
+        )
+        if not refused:
+            if overlay_issue is not None:
+                _append_slack_audit(
+                    audit_log_path,
+                    event=overlay_issue,
+                    channel_id=channel_id,
+                    user_id=user_id,
+                    citation_count=0,
+                    warning_count=0,
+                    query="",
+                )
+            # Skipped entirely on a refusal, exactly as the natural-language path skips ``slack_qa``:
+            # the facet selection is safe to record, but the free-text goal that hit the denylist is
+            # the very text that must not be written down. ``precheck_restricted_query`` has already
+            # recorded the hit itself, with an empty query column.
+            _append_slack_audit(
+                audit_log_path,
+                event="slack_faceted_search",
+                channel_id=channel_id,
+                user_id=user_id,
+                citation_count=len(answer.citations),
+                warning_count=len(answer.warnings),
+                query=_structured_audit_query(request, catalog_version),
+            )
+
         pages = build_structured_slack_pages(answer)
         if pages is None:
             client.chat_postMessage(
@@ -488,7 +533,10 @@ def _register_faceted_search_handlers(
         else:
             pagination_store.start(thread_key, pages.pages)
             client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=pages.pages[0])
-        client.chat_postMessage(**build_adjust_filters_message(channel_id, thread_ts, request))
+        request_token = request_token_store.store(request)
+        client.chat_postMessage(
+            **build_adjust_filters_message(channel_id, thread_ts, request_token)
+        )
 
 
 def _structured_audit_query(request: StructuredSearchRequest, catalog_version: str) -> str:
