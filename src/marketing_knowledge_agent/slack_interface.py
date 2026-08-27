@@ -24,6 +24,7 @@ from .slack_faceted_search import (
     build_adjust_filters_message,
     build_facet_modal_view,
     build_open_search_reply,
+    build_restart_search_message,
     is_faceted_search_trigger,
     parse_open_modal_button_value,
     parse_structured_search_request,
@@ -430,15 +431,25 @@ def _register_faceted_search_handlers(
     @app.action(OPEN_SEARCH_MODAL_ACTION_ID)
     def handle_open_faceted_search_modal(ack, body, client):
         ack()
-        actions = body.get("actions") or [{}]
-        payload = parse_open_modal_button_value(actions[0].get("value"))
-        channel_id = str(payload.get("channel_id", ""))
-        thread_ts = str(payload.get("thread_ts", ""))
+        # Who clicked, and where, is read from the interaction payload -- never from the button's
+        # own value. The button sits in a channel where everyone who can see the thread can click
+        # it, so its value states which action to take, not whose context to take it in.
+        context = _interaction_context(body)
+        if context is None:
+            return
+        user_id, channel_id, thread_ts = context
         if channel_id not in config.allowed_channel_ids:
             return
-        # An expired or unknown token reopens an empty modal rather than a reconstructed one:
-        # prefilling filters the user did not choose would be worse than prefilling nothing.
-        prefill = request_token_store.get(request_token_from_button_payload(payload))
+        payload = parse_open_modal_button_value((body.get("actions") or [{}])[0].get("value"))
+        # Resolves only for the user, channel and thread the token was minted in. Unknown, expired
+        # and "not yours" are deliberately indistinguishable here: all three reopen an empty modal,
+        # which tells a clicker nothing and is never worse than prefilling a search nobody chose.
+        prefill = request_token_store.resolve(
+            request_token_from_button_payload(payload),
+            user_id=user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+        )
         view = build_facet_modal_view(
             facet_catalog, channel_id=channel_id, thread_ts=thread_ts, prefill=prefill
         )
@@ -533,10 +544,47 @@ def _register_faceted_search_handlers(
         else:
             pagination_store.start(thread_key, pages.pages)
             client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=pages.pages[0])
-        request_token = request_token_store.store(request)
+
+        if refused:
+            # A refused query's text must not survive anywhere shared, and the token store is shared
+            # across every viewer of this channel. So nothing is stored and nothing is offered to
+            # reopen -- only a way back to a blank modal. Storing it "just for the owner" would
+            # still be storing it.
+            client.chat_postMessage(**build_restart_search_message(channel_id, thread_ts))
+            return
+
+        request_token = request_token_store.store(
+            request, owner_user_id=user_id, channel_id=channel_id, thread_ts=thread_ts
+        )
         client.chat_postMessage(
             **build_adjust_filters_message(channel_id, thread_ts, request_token)
         )
+
+
+def _interaction_context(body: dict) -> Optional[tuple]:
+    """Who clicked and where, read from the Slack interaction payload itself.
+
+    Returns ``(user_id, channel_id, thread_ts)``, or ``None`` when any of the three is missing.
+
+    Deliberately does not read the button's ``value``: that is content this bot posted into a
+    channel, echoed back by whoever clicked it, so it describes the button rather than the person
+    now pressing it. Every channel member sees the same value. Only the payload Slack constructs at
+    click time says who is acting and in which conversation.
+
+    ``container`` is preferred over the top-level ``channel`` because it is the message the button
+    actually lives in. ``thread_ts`` falls back to ``message_ts`` for a button that is not itself a
+    threaded reply -- in that case the message's own timestamp is the thread root any reply would
+    use. A missing piece fails closed rather than defaulting to an empty string, because an empty
+    value would compare equal to an empty stored value and quietly turn the context check off.
+    """
+    container = body.get("container") or {}
+    channel = body.get("channel") or {}
+    user_id = str((body.get("user") or {}).get("id") or "").strip()
+    channel_id = str(container.get("channel_id") or channel.get("id") or "").strip()
+    thread_ts = str(container.get("thread_ts") or container.get("message_ts") or "").strip()
+    if not user_id or not channel_id or not thread_ts:
+        return None
+    return user_id, channel_id, thread_ts
 
 
 def _structured_audit_query(request: StructuredSearchRequest, catalog_version: str) -> str:

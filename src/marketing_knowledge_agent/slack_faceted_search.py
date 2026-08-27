@@ -66,8 +66,13 @@ def is_faceted_search_trigger(question: str) -> bool:
 
 
 def build_open_search_reply(channel_id: str, thread_ts: str) -> dict:
-    """The message posted in reply to the trigger command: one button, no retrieval."""
-    button_value = _button_value({"channel_id": channel_id, "thread_ts": thread_ts})
+    """The message posted in reply to the trigger command: one button, no retrieval.
+
+    The button's ``value`` deliberately carries no channel or thread. Those are read from the
+    interaction payload Slack sends on the click instead -- see ``_interaction_context`` in
+    ``slack_interface``. A button posted in a channel is clickable by everyone who can see it, so
+    its ``value`` describes only *which* action to take, never *whose* context to take it in.
+    """
     return {
         "channel": channel_id,
         "thread_ts": thread_ts,
@@ -83,7 +88,7 @@ def build_open_search_reply(channel_id: str, thread_ts: str) -> dict:
             {
                 "type": "actions",
                 "block_id": "open_faceted_search_actions",
-                "elements": [_open_modal_button("開啟條件搜尋", button_value)],
+                "elements": [_open_modal_button("開啟條件搜尋", _button_value({}))],
             },
         ],
     }
@@ -98,13 +103,14 @@ def build_adjust_filters_message(channel_id: str, thread_ts: str, request_token:
     would reopen the modal with a quietly different search. The request stays server-side in
     ``slack_request_tokens``; see that module for what it does and does not hold.
 
+    The token is not a capability. This message is posted into a channel, so anyone who can see the
+    thread can click it; the token resolves only for the user, channel and thread it was minted in,
+    and that check reads the interaction payload rather than anything carried here.
+
     Sent as its own message rather than attached to the result text: a Block Kit section's mrkdwn
     text is capped at 3000 characters, far below the result page's own budget, so the two must stay
     separate messages rather than one.
     """
-    button_value = _button_value(
-        {"channel_id": channel_id, "thread_ts": thread_ts, "request_token": request_token}
-    )
     return {
         "channel": channel_id,
         "thread_ts": thread_ts,
@@ -113,7 +119,31 @@ def build_adjust_filters_message(channel_id: str, thread_ts: str, request_token:
             {
                 "type": "actions",
                 "block_id": "adjust_faceted_search_actions",
-                "elements": [_open_modal_button("調整條件", button_value)],
+                "elements": [
+                    _open_modal_button("調整條件", _button_value({"request_token": request_token}))
+                ],
+            }
+        ],
+    }
+
+
+def build_restart_search_message(channel_id: str, thread_ts: str) -> dict:
+    """The follow-up posted after a refused query: a way back in, carrying nothing.
+
+    A refused query's text must not survive anywhere shared, so there is no token to reopen and
+    nothing to prefill. This button opens a blank modal. It is a separate builder rather than
+    ``build_adjust_filters_message(token=None)`` so that "no token" is a property of the call site
+    that decided it, and cannot be reached by an optional argument defaulting its way in.
+    """
+    return {
+        "channel": channel_id,
+        "thread_ts": thread_ts,
+        "text": "可重新輸入搜尋條件。",
+        "blocks": [
+            {
+                "type": "actions",
+                "block_id": "restart_faceted_search_actions",
+                "elements": [_open_modal_button("重新搜尋", _button_value({}))],
             }
         ],
     }
