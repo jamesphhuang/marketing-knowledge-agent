@@ -18,18 +18,25 @@ from marketing_knowledge_agent.slack_faceted_search import (
     FREE_TEXT_BLOCK_ID,
     INTERVIEW_YEARS_ACTION_ID,
     INTERVIEW_YEARS_BLOCK_ID,
+    MAX_BUTTON_VALUE_CHARS,
+    MAX_STATIC_SELECT_OPTIONS,
     OPEN_SEARCH_MODAL_ACTION_ID,
     SALES_CATEGORY_LV2_ACTION_ID,
     SALES_CATEGORY_LV2_BLOCK_ID,
+    SlackFacetModalError,
     build_adjust_filters_message,
     build_facet_modal_view,
     build_open_search_reply,
     is_faceted_search_trigger,
     parse_open_modal_button_value,
     parse_structured_search_request,
-    prefill_from_button_payload,
+    request_token_from_button_payload,
 )
-from marketing_knowledge_agent.structured_search import StructuredSearchRequest
+from marketing_knowledge_agent.slack_request_tokens import SlackRequestTokenStore
+from marketing_knowledge_agent.structured_search import (
+    FREE_TEXT_MAX_LENGTH,
+    StructuredSearchRequest,
+)
 
 
 def _catalog():
@@ -76,24 +83,49 @@ def test_open_search_reply_carries_a_button_with_routing_coordinates():
     assert "prefill" not in payload
 
 
-def test_adjust_filters_message_encodes_the_prior_selection():
-    request = StructuredSearchRequest(
-        interview_years=(2024,),
-        sales_category_lv2=("食品/飲料",),
-        content_tags=("會員經營",),
-        free_text="會員回購率",
-    )
-
-    message = build_adjust_filters_message("C123", "100.1", request)
+def test_adjust_filters_message_carries_a_token_not_the_request_itself():
+    message = build_adjust_filters_message("C123", "100.1", "deadbeef" * 4)
 
     button = message["blocks"][-1]["elements"][0]
     payload = json.loads(button["value"])
     assert payload["channel_id"] == "C123"
     assert payload["thread_ts"] == "100.1"
-    assert payload["prefill"]["interview_years"] == [2024]
-    assert payload["prefill"]["sales_category_lv2"] == ["食品/飲料"]
-    assert payload["prefill"]["content_tags"] == ["會員經營"]
-    assert payload["prefill"]["free_text"] == "會員回購率"
+    assert payload["request_token"] == "deadbeef" * 4
+    # The request's own content must never be embedded: that is what blew the 2000-char budget.
+    assert "prefill" not in payload
+    assert "free_text" not in button["value"]
+
+
+def test_adjust_button_value_stays_within_slacks_2000_character_budget():
+    """The regression this token indirection exists for.
+
+    Embedding the request put a maximal one at 3206 characters -- 1206 over Slack's limit, which
+    makes ``chat.postMessage`` reject the whole message, so the user gets no button at all.
+    """
+    store = SlackRequestTokenStore()
+    maximal = StructuredSearchRequest(
+        interview_years=(2025, 2024, 2023),
+        sales_category_lv2=("食品/飲料", "居家生活相關", "男裝"),
+        content_tags=("會員經營", "數位轉型", "團購解決方案"),
+        free_text="會" * FREE_TEXT_MAX_LENGTH,
+    )
+    token = store.store(maximal)
+
+    message = build_adjust_filters_message("C123", "100.1", token)
+    value = message["blocks"][-1]["elements"][0]["value"]
+
+    assert len(value) <= MAX_BUTTON_VALUE_CHARS
+    # Bounded by construction, not merely "small enough today": the payload is routing coordinates
+    # plus a fixed-width token, so the free-text length cannot move this number at all.
+    shorter = build_adjust_filters_message("C123", "100.1", store.store(
+        StructuredSearchRequest(free_text="x")
+    ))
+    assert len(shorter["blocks"][-1]["elements"][0]["value"]) == len(value)
+
+
+def test_an_oversized_button_payload_is_refused_rather_than_truncated():
+    with pytest.raises(SlackFacetModalError, match="2000"):
+        build_adjust_filters_message("C123", "100.1", "t" * (MAX_BUTTON_VALUE_CHARS + 1))
 
 
 # --------------------------------------------------------------------------------------
@@ -107,28 +139,44 @@ def test_malformed_button_value_parses_to_empty_dict():
     assert parse_open_modal_button_value("[1, 2, 3]") == {}
 
 
-def test_prefill_is_none_for_a_fresh_open():
-    assert prefill_from_button_payload({"channel_id": "C1", "thread_ts": "1"}) is None
+def test_request_token_is_none_for_a_fresh_open():
+    assert request_token_from_button_payload({"channel_id": "C1", "thread_ts": "1"}) is None
 
 
-def test_prefill_round_trips_through_the_button_value():
+def test_request_round_trips_through_the_token_store_not_the_button():
+    store = SlackRequestTokenStore()
     request = StructuredSearchRequest(
         interview_years=(2024, 2023),
         sales_category_lv2=("食品/飲料",),
         content_tags=(),
         free_text="測試",
     )
-    message = build_adjust_filters_message("C1", "1", request)
+    token = store.store(request)
+    message = build_adjust_filters_message("C1", "1", token)
     payload = parse_open_modal_button_value(message["blocks"][-1]["elements"][0]["value"])
 
-    prefill = prefill_from_button_payload(payload)
+    restored = store.get(request_token_from_button_payload(payload))
 
-    assert prefill.interview_years == (2024, 2023)
-    assert prefill.sales_category_lv2 == ("食品/飲料",)
-    assert prefill.content_tags == ()
-    assert prefill.free_text == "測試"
-    # The live catalog version is stamped in when the view is built, never trusted from a button.
-    assert prefill.catalog_version == ""
+    assert restored.interview_years == (2024, 2023)
+    assert restored.sales_category_lv2 == ("食品/飲料",)
+    assert restored.content_tags == ()
+    assert restored.free_text == "測試"
+
+
+def test_an_expired_token_resolves_to_none_rather_than_a_reconstructed_request():
+    clock = [1000.0]
+    store = SlackRequestTokenStore(ttl_seconds=60, clock=lambda: clock[0])
+    token = store.store(StructuredSearchRequest(free_text="測試"))
+
+    assert store.get(token) is not None
+    clock[0] += 61
+    assert store.get(token) is None
+
+
+def test_an_unknown_token_resolves_to_none():
+    store = SlackRequestTokenStore()
+    assert store.get("never-issued") is None
+    assert store.get(None) is None
 
 
 # --------------------------------------------------------------------------------------
@@ -211,6 +259,56 @@ def test_modal_free_text_prefill_sets_initial_value():
 
     free_text_block = next(b for b in view["blocks"] if b["block_id"] == FREE_TEXT_BLOCK_ID)
     assert free_text_block["element"]["initial_value"] == "會員回購率"
+
+
+def test_modal_free_text_declares_the_same_max_length_the_server_enforces():
+    """Client-side and server-side bounds must be the same number, or one of them is a lie."""
+    view = build_facet_modal_view(_catalog(), "C1", "1")
+
+    free_text_block = next(b for b in view["blocks"] if b["block_id"] == FREE_TEXT_BLOCK_ID)
+    assert free_text_block["element"]["max_length"] == FREE_TEXT_MAX_LENGTH
+
+
+def test_a_facet_at_the_100_option_limit_still_renders():
+    at_limit = FacetCatalog(
+        catalog_version="v1",
+        generated_at="2026-08-27T00:00:00+00:00",
+        taxonomy_workbook_sha256="a" * 64,
+        content_index_generation_id="b" * 64,
+        interview_years=(),
+        sales_category_lv2=tuple(
+            FacetValueOption(f"類別{i:03d}", 1) for i in range(MAX_STATIC_SELECT_OPTIONS)
+        ),
+        content_tags=(),
+    )
+
+    view = build_facet_modal_view(at_limit, "C1", "1")
+
+    lv2_block = next(b for b in view["blocks"] if b.get("block_id") == SALES_CATEGORY_LV2_BLOCK_ID)
+    assert len(lv2_block["element"]["options"]) == MAX_STATIC_SELECT_OPTIONS
+
+
+def test_a_facet_over_the_100_option_limit_fails_closed_with_an_operator_error():
+    """Silently dropping the overflow would hide eligible values from every user, invisibly."""
+    over_limit = FacetCatalog(
+        catalog_version="v1",
+        generated_at="2026-08-27T00:00:00+00:00",
+        taxonomy_workbook_sha256="a" * 64,
+        content_index_generation_id="b" * 64,
+        interview_years=(),
+        sales_category_lv2=(),
+        content_tags=tuple(
+            FacetValueOption(f"標籤{i:03d}", 1) for i in range(MAX_STATIC_SELECT_OPTIONS + 1)
+        ),
+    )
+
+    with pytest.raises(SlackFacetModalError) as exc_info:
+        build_facet_modal_view(over_limit, "C1", "1")
+
+    message = str(exc_info.value)
+    assert "內容相關標籤" in message  # names the offending facet
+    assert str(MAX_STATIC_SELECT_OPTIONS) in message  # and the limit it crossed
+    assert "external_select" in message  # and what to do about it
 
 
 def test_modal_callback_id_is_the_faceted_search_modal():

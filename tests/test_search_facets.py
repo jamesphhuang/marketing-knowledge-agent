@@ -125,9 +125,11 @@ def test_years_are_sorted_newest_first(tmp_path, taxonomy):
 def test_draft_status_is_excluded_by_external_governance(tmp_path, taxonomy):
     db_path = _build_index(tmp_path, _default_records())
 
-    # No restricted-customer path at all here, so only external governance (draft status) is in
+    # An empty (but successfully loaded) denylist, so only external governance (draft status) is in
     # play: 2023/"男裝" is carried solely by the draft record and must vanish on its own.
-    catalog = build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
+    catalog = build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     assert catalog.is_valid_year(2023) is False
     assert catalog.is_valid_sales_category_lv2("男裝") is False
@@ -136,9 +138,11 @@ def test_draft_status_is_excluded_by_external_governance(tmp_path, taxonomy):
 def test_restricted_customer_denylist_excludes_eligible_counts(tmp_path, taxonomy):
     db_path = _build_index(tmp_path, _default_records())
 
-    # "女裝"/2022's only carrier is "published" and externally quotable, so without a denylist it
-    # is eligible ...
-    without_denylist = build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
+    # "女裝"/2022's only carrier is "published" and externally quotable, so under an empty denylist
+    # it is eligible ...
+    without_denylist = build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
     assert without_denylist.is_valid_year(2022) is True
     assert without_denylist.is_valid_sales_category_lv2("女裝") is True
 
@@ -152,7 +156,9 @@ def test_restricted_customer_denylist_excludes_eligible_counts(tmp_path, taxonom
 def test_document_id_dedupe_counts_one_case_not_one_per_chunk(tmp_path, taxonomy):
     db_path = _build_index(tmp_path, _default_records())
 
-    catalog = build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
+    catalog = build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     # 三風製麵's document is long enough to be split into several chunks by chunk_documents; its
     # eligible count must still be 1, not the chunk count -- so 食品/飲料's total is exactly two
@@ -163,7 +169,9 @@ def test_document_id_dedupe_counts_one_case_not_one_per_chunk(tmp_path, taxonomy
 
 def test_lv1_is_never_present_on_the_facet_catalog(tmp_path, taxonomy):
     db_path = _build_index(tmp_path, _default_records())
-    catalog = build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
+    catalog = build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     assert not hasattr(catalog, "sales_category_lv1")
     assert "sales_category_lv1" not in vars(catalog)
@@ -171,7 +179,9 @@ def test_lv1_is_never_present_on_the_facet_catalog(tmp_path, taxonomy):
 
 def test_lv2_only_offered_when_it_is_both_authority_canonical_and_indexed(tmp_path, taxonomy):
     db_path = _build_index(tmp_path, _default_records())
-    catalog = build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
+    catalog = build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     lv2_values = {option.canonical_value for option in catalog.sales_category_lv2}
     # The Authority states "未進索引LV2" as canonical, but no document ever carries it.
@@ -182,7 +192,9 @@ def test_lv2_only_offered_when_it_is_both_authority_canonical_and_indexed(tmp_pa
 
 def test_content_tag_only_offered_when_it_is_both_authority_canonical_and_indexed(tmp_path, taxonomy):
     db_path = _build_index(tmp_path, _default_records())
-    catalog = build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
+    catalog = build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     tag_values = {option.canonical_value for option in catalog.content_tags}
     assert "未進索引標籤" not in tag_values
@@ -193,8 +205,12 @@ def test_content_tag_only_offered_when_it_is_both_authority_canonical_and_indexe
 def test_catalog_version_is_reproducible_for_identical_inputs(tmp_path, taxonomy):
     db_path = _build_index(tmp_path, _default_records())
 
-    first = build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
-    second = build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
+    first = build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
+    second = build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     assert first.catalog_version == second.catalog_version
     assert first.content_index_generation_id == second.content_index_generation_id
@@ -202,13 +218,17 @@ def test_catalog_version_is_reproducible_for_identical_inputs(tmp_path, taxonomy
 
 def test_catalog_version_changes_when_the_content_index_changes(tmp_path, taxonomy):
     db_path = _build_index(tmp_path, _default_records())
-    before = build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
+    before = build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     extra_records = _default_records() + [
         _metadata("New Brand", "newbrand", "男裝", [], 2026, source_row=6)
     ]
     db_path2 = _build_index(tmp_path, extra_records, name="content_index_v2.sqlite")
-    after = build_facet_catalog(db_path2, taxonomy, restricted_customers_path=None)
+    after = build_facet_catalog(
+        db_path2, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     assert before.catalog_version != after.catalog_version
 
@@ -224,8 +244,12 @@ def test_catalog_version_changes_when_the_taxonomy_authority_changes(tmp_path):
     sha_b = write_taxonomy_workbook(path_b, sales_rows=SALES_CATEGORY_ROWS, tag_rows=tag_rows_b)
     taxonomy_b = load_search_taxonomy(workbook_path=path_b, expected_sha256=sha_b)
 
-    catalog_a = build_facet_catalog(db_path, taxonomy_a, restricted_customers_path=None)
-    catalog_b = build_facet_catalog(db_path, taxonomy_b, restricted_customers_path=None)
+    catalog_a = build_facet_catalog(
+        db_path, taxonomy_a, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
+    catalog_b = build_facet_catalog(
+        db_path, taxonomy_b, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     assert catalog_a.catalog_version != catalog_b.catalog_version
 
@@ -236,7 +260,9 @@ def test_taxonomy_workbook_and_content_index_are_untouched_by_building_the_catal
     workbook_path = Path(taxonomy.workbook_path)
     before_workbook = workbook_path.read_bytes()
 
-    build_facet_catalog(db_path, taxonomy, restricted_customers_path=None)
+    build_facet_catalog(
+        db_path, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+    )
 
     assert db_path.read_bytes() == before_db
     assert workbook_path.read_bytes() == before_workbook
@@ -244,4 +270,59 @@ def test_taxonomy_workbook_and_content_index_are_untouched_by_building_the_catal
 
 def test_missing_content_index_fails_closed(tmp_path, taxonomy):
     with pytest.raises(FacetCatalogError):
-        build_facet_catalog(tmp_path / "absent.sqlite", taxonomy, restricted_customers_path=None)
+        build_facet_catalog(
+            tmp_path / "absent.sqlite",
+            taxonomy,
+            restricted_customers_path=_restricted_customers_path(tmp_path, []),
+        )
+
+
+def test_missing_content_index_does_not_create_an_empty_database(tmp_path, taxonomy):
+    """A read-only surface must not bring a content index into existence just by looking for one.
+
+    ``sqlite3.connect`` creates an empty database for a path that does not exist, so reading
+    through ``SQLiteIndex`` without checking first leaves a 0-byte ``.sqlite`` file behind at
+    exactly the path an operator is about to investigate.
+    """
+    absent = tmp_path / "absent.sqlite"
+
+    with pytest.raises(FacetCatalogError):
+        build_facet_catalog(
+            absent, taxonomy, restricted_customers_path=_restricted_customers_path(tmp_path, [])
+        )
+
+    assert not absent.exists()
+
+
+def test_missing_denylist_fails_closed(tmp_path, taxonomy):
+    db_path = _build_index(tmp_path, _default_records())
+
+    with pytest.raises(FacetCatalogError, match="denylist"):
+        build_facet_catalog(
+            db_path, taxonomy, restricted_customers_path=tmp_path / "absent_restricted.json"
+        )
+
+
+def test_malformed_denylist_fails_closed(tmp_path, taxonomy):
+    db_path = _build_index(tmp_path, _default_records())
+    broken = tmp_path / "broken_restricted.json"
+    broken.write_text("{not json at all", encoding="utf-8")
+
+    with pytest.raises(FacetCatalogError, match="denylist"):
+        build_facet_catalog(db_path, taxonomy, restricted_customers_path=broken)
+
+
+def test_non_list_denylist_fails_closed_rather_than_reading_as_empty(tmp_path, taxonomy):
+    """Valid JSON that is not an array is the dangerous shape, not the obviously-broken one.
+
+    ``load_restricted_customers_governance_index`` comprehends over the payload looking for dicts.
+    Given ``{"brand_name": "..."}`` it iterates the *keys*, finds no dicts, and returns an empty
+    denylist with **no warning at all** -- indistinguishable downstream from a genuinely empty one,
+    and silently disclosing every restricted customer the file was meant to protect.
+    """
+    db_path = _build_index(tmp_path, _default_records())
+    non_list = tmp_path / "non_list_restricted.json"
+    non_list.write_text(json.dumps({"brand_name": "Restricted Brand"}), encoding="utf-8")
+
+    with pytest.raises(FacetCatalogError, match="array"):
+        build_facet_catalog(db_path, taxonomy, restricted_customers_path=non_list)

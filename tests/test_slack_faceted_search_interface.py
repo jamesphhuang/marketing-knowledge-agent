@@ -11,6 +11,7 @@ dependency-injection seam ``run_slack_bot`` already exposes for its pre-existing
 tests -- so none of this touches a real Slack connection.
 """
 
+import csv
 import json
 from datetime import date
 
@@ -33,7 +34,9 @@ from marketing_knowledge_agent.slack_faceted_search import (
     SALES_CATEGORY_LV2_BLOCK_ID,
 )
 from marketing_knowledge_agent.slack_interface import (
+    APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE,
     FACETED_SEARCH_STALE_CATALOG_MESSAGE,
+    PAGINATION_EXPIRED_MESSAGE,
     SlackConfig,
     SlackInterfaceError,
     handle_slack_event,
@@ -41,6 +44,7 @@ from marketing_knowledge_agent.slack_interface import (
     run_slack_bot,
 )
 from marketing_knowledge_agent.slack_pagination import SlackPaginationStore
+from marketing_knowledge_agent.structured_search import StructuredSearchGovernanceError
 
 from test_search_taxonomy import write_taxonomy_workbook
 
@@ -193,14 +197,30 @@ def _write_taxonomy(tmp_path):
     return path, sha256
 
 
-def _write_slack_config(tmp_path, db_path=None, workbook_path=None, sha256=None, enable=True):
+def _write_slack_config(
+    tmp_path,
+    db_path=None,
+    workbook_path=None,
+    sha256=None,
+    enable=True,
+    enable_approved_asset_urls=None,
+):
     config = {"allowed_channel_ids": ["C123"], "enable_faceted_search": enable}
     if workbook_path is not None:
         config["search_taxonomy_workbook"] = str(workbook_path)
     if sha256 is not None:
         config["search_taxonomy_sha256"] = sha256
+    if enable_approved_asset_urls is not None:
+        config["enable_approved_asset_urls"] = enable_approved_asset_urls
     path = tmp_path / "slack_config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+def _denylist(tmp_path, brand_names=()):
+    """A loadable restricted-customer denylist. Required by every faceted-search entry point."""
+    path = tmp_path / "restricted_customers.json"
+    path.write_text(json.dumps([{"brand_name": n} for n in brand_names]), encoding="utf-8")
     return path
 
 
@@ -388,7 +408,7 @@ def test_flag_enabled_loads_taxonomy_and_builds_catalog_and_registers_handlers(t
     run_slack_bot(
         config_path=config_path,
         db_path=db_path,
-        restricted_customers_path=tmp_path / "absent_restricted.json",
+        restricted_customers_path=_denylist(tmp_path),
         audit_log_path=tmp_path / "audit.csv",
         environ={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"},
         app_factory=_capturing_app_factory(container),
@@ -410,6 +430,7 @@ def test_flag_enabled_fails_closed_on_sha_mismatch_before_socket_mode(tmp_path):
         run_slack_bot(
             config_path=config_path,
             db_path=db_path,
+            restricted_customers_path=_denylist(tmp_path),
             environ={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"},
             app_factory=_never_called_factory("app_factory"),
             socket_mode_handler_factory=_never_called_factory("socket_mode_handler_factory"),
@@ -426,10 +447,69 @@ def test_flag_enabled_fails_closed_on_missing_workbook_before_socket_mode(tmp_pa
         run_slack_bot(
             config_path=config_path,
             db_path=db_path,
+            restricted_customers_path=_denylist(tmp_path),
             environ={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"},
             app_factory=_never_called_factory("app_factory"),
             socket_mode_handler_factory=_never_called_factory("socket_mode_handler_factory"),
         )
+
+
+def test_flag_enabled_fails_closed_on_missing_denylist_before_socket_mode(tmp_path):
+    """A bot that cannot read its denylist must never reach the point of accepting a query."""
+    db_path = _build_index(tmp_path)
+    workbook_path, sha256 = _write_taxonomy(tmp_path)
+    config_path = _write_slack_config(tmp_path, workbook_path=workbook_path, sha256=sha256)
+
+    with pytest.raises(StructuredSearchGovernanceError, match="denylist"):
+        run_slack_bot(
+            config_path=config_path,
+            db_path=db_path,
+            restricted_customers_path=tmp_path / "absent_restricted.json",
+            environ={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"},
+            app_factory=_never_called_factory("app_factory"),
+            socket_mode_handler_factory=_never_called_factory("socket_mode_handler_factory"),
+        )
+
+
+def test_flag_enabled_fails_closed_on_malformed_denylist_before_socket_mode(tmp_path):
+    db_path = _build_index(tmp_path)
+    workbook_path, sha256 = _write_taxonomy(tmp_path)
+    config_path = _write_slack_config(tmp_path, workbook_path=workbook_path, sha256=sha256)
+    broken = tmp_path / "broken_restricted.json"
+    broken.write_text("{not json at all", encoding="utf-8")
+
+    with pytest.raises(StructuredSearchGovernanceError, match="denylist"):
+        run_slack_bot(
+            config_path=config_path,
+            db_path=db_path,
+            restricted_customers_path=broken,
+            environ={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"},
+            app_factory=_never_called_factory("app_factory"),
+            socket_mode_handler_factory=_never_called_factory("socket_mode_handler_factory"),
+        )
+
+
+def test_flag_disabled_still_starts_without_a_denylist_file(tmp_path):
+    """The fail-closed requirement is scoped to the faceted surface, not to the whole bot.
+
+    The natural-language path's existing "denylist missing -> warn on the answer" behaviour is a
+    frozen contract this WP must not change; only the new surface refuses to start without one.
+    """
+    config_path = tmp_path / "slack_config.json"
+    config_path.write_text(json.dumps({"allowed_channel_ids": ["C123"]}), encoding="utf-8")
+    container = {}
+
+    run_slack_bot(
+        config_path=config_path,
+        db_path=_build_index(tmp_path),
+        restricted_customers_path=tmp_path / "absent_restricted.json",
+        environ={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"},
+        app_factory=_capturing_app_factory(container),
+        socket_mode_handler_factory=_capturing_socket_mode_handler_factory(container),
+    )
+
+    assert container["handler"].started is True
+    assert container["app"].actions == {}
 
 
 # --------------------------------------------------------------------------------------
@@ -437,15 +517,22 @@ def test_flag_enabled_fails_closed_on_missing_workbook_before_socket_mode(tmp_pa
 # --------------------------------------------------------------------------------------
 
 
-def _run_bot_and_get_app(tmp_path, db_path=None):
+def _run_bot_and_get_app(
+    tmp_path, db_path=None, denylist_brands=(), enable_approved_asset_urls=None
+):
     db_path = db_path or _build_index(tmp_path)
     workbook_path, sha256 = _write_taxonomy(tmp_path)
-    config_path = _write_slack_config(tmp_path, workbook_path=workbook_path, sha256=sha256)
+    config_path = _write_slack_config(
+        tmp_path,
+        workbook_path=workbook_path,
+        sha256=sha256,
+        enable_approved_asset_urls=enable_approved_asset_urls,
+    )
     container = {}
     run_slack_bot(
         config_path=config_path,
         db_path=db_path,
-        restricted_customers_path=tmp_path / "absent_restricted.json",
+        restricted_customers_path=_denylist(tmp_path, denylist_brands),
         audit_log_path=tmp_path / "audit.csv",
         environ={"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"},
         app_factory=_capturing_app_factory(container),
@@ -487,39 +574,74 @@ def test_open_modal_action_refuses_a_disallowed_channel(tmp_path):
     assert client.opened_views == []
 
 
-def test_adjust_button_prefills_the_reopened_modal(tmp_path):
-    app, _tmp_path = _run_bot_and_get_app(tmp_path)
-    handler = app.actions[OPEN_SEARCH_MODAL_ACTION_ID]
-    ack = FakeAck()
-    client = FakeSlackClient()
-    body = {
-        "trigger_id": "T1",
-        "actions": [
-            {
-                "value": json.dumps(
-                    {
-                        "channel_id": "C123",
-                        "thread_ts": "1",
-                        "prefill": {
-                            "interview_years": [2024],
-                            "sales_category_lv2": ["食品/飲料"],
-                            "content_tags": [],
-                            "free_text": "會員回購",
-                        },
-                    }
-                )
-            }
-        ],
-    }
+def test_adjust_button_prefills_the_reopened_modal_via_its_request_token(tmp_path):
+    """Full round trip: submit -> adjust button -> reopened modal carries the prior selection.
 
-    handler(ack=ack, body=body, client=client)
+    Driven end to end rather than by hand-building a button payload, because the prefill now
+    travels through the server-side token store rather than through the button's ``value``, and a
+    hand-built payload would not exercise the store at all.
+    """
+    app, _tmp_path = _run_bot_and_get_app(tmp_path)
+
+    view_handler = app.views[FACETED_SEARCH_MODAL_CALLBACK_ID]
+    submit_client = FakeSlackClient()
+    view_handler(
+        ack=FakeAck(),
+        body={"user": {"id": "U1"}},
+        client=submit_client,
+        view={
+            "private_metadata": _private_metadata(app),
+            "state": {"values": _state_values(years=["2024"], free_text="會員回購")},
+        },
+    )
+
+    adjust_button = submit_client.messages[-1]["blocks"][-1]["elements"][0]
+    assert json.loads(adjust_button["value"])["request_token"]
+
+    open_handler = app.actions[OPEN_SEARCH_MODAL_ACTION_ID]
+    reopen_client = FakeSlackClient()
+    open_handler(
+        ack=FakeAck(),
+        body={"trigger_id": "T2", "actions": [{"value": adjust_button["value"]}]},
+        client=reopen_client,
+    )
+
+    view = reopen_client.opened_views[0]["view"]
+    year_block = next(b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID)
+    assert {opt["value"] for opt in year_block["element"]["initial_options"]} == {"2024"}
+    free_text_block = next(b for b in view["blocks"] if b["block_id"] == FREE_TEXT_BLOCK_ID)
+    assert free_text_block["element"]["initial_value"] == "會員回購"
+
+
+def test_an_expired_request_token_reopens_an_empty_modal_rather_than_guessing(tmp_path):
+    app, _tmp_path = _run_bot_and_get_app(tmp_path)
+    open_handler = app.actions[OPEN_SEARCH_MODAL_ACTION_ID]
+    client = FakeSlackClient()
+
+    open_handler(
+        ack=FakeAck(),
+        body={
+            "trigger_id": "T1",
+            "actions": [
+                {
+                    "value": json.dumps(
+                        {
+                            "channel_id": "C123",
+                            "thread_ts": "1",
+                            "request_token": "expired-or-never-issued",
+                        }
+                    )
+                }
+            ],
+        },
+        client=client,
+    )
 
     view = client.opened_views[0]["view"]
     year_block = next(b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID)
-    selected = {opt["value"] for opt in year_block["element"]["initial_options"]}
-    assert selected == {"2024"}
+    assert "initial_options" not in year_block["element"]
     free_text_block = next(b for b in view["blocks"] if b["block_id"] == FREE_TEXT_BLOCK_ID)
-    assert free_text_block["element"]["initial_value"] == "會員回購"
+    assert "initial_value" not in free_text_block["element"]
 
 
 # --------------------------------------------------------------------------------------
@@ -626,8 +748,7 @@ def test_valid_submission_runs_exactly_one_search_and_posts_result_plus_adjust_b
     assert "大春煉皂" in client.messages[0]["text"]
     adjust_button = client.messages[1]["blocks"][-1]["elements"][0]
     assert adjust_button["action_id"] == OPEN_SEARCH_MODAL_ACTION_ID
-    prefill = json.loads(adjust_button["value"])["prefill"]
-    assert prefill["interview_years"] == [2024]
+    assert json.loads(adjust_button["value"])["request_token"]
 
     audit_rows = (tmp_path_ / "audit.csv").read_text(encoding="utf-8").splitlines()
     assert any("slack_faceted_search" in row for row in audit_rows)
@@ -678,3 +799,206 @@ def test_app_mention_and_view_submission_share_the_same_pagination_store(tmp_pat
     assert len(mention_client.messages) == 1
     assert mention_client.messages[0]["text"] not in ("", None)
     assert mention_client.messages[0]["text"] != client.messages[0]["text"]
+
+
+# --------------------------------------------------------------------------------------
+# Codex review remediation: audit leak, approved-URL parity, pagination lifecycle
+# --------------------------------------------------------------------------------------
+
+
+def _multi_page_records(count=16):
+    """Enough distinct eligible merchants under one tag to force a second result page."""
+    return [
+        _metadata(f"品牌{i:02d}", f"handle{i:02d}", "食品/飲料", ["會員經營"], 2024, source_row=i)
+        for i in range(1, count + 1)
+    ]
+
+
+def _submit(app, *, state_values, thread_ts="1", user_id="U1"):
+    handler = app.views[FACETED_SEARCH_MODAL_CALLBACK_ID]
+    ack = FakeAck()
+    client = FakeSlackClient()
+    handler(
+        ack=ack,
+        body={"user": {"id": user_id}},
+        client=client,
+        view={
+            "private_metadata": _private_metadata(app, thread_ts=thread_ts),
+            "state": {"values": state_values},
+        },
+    )
+    return ack, client
+
+
+def test_restricted_free_text_never_reaches_the_faceted_search_audit_row(tmp_path):
+    """Finding 1, at the Slack handler layer.
+
+    The refused free text must appear nowhere in the audit file -- not in the ``slack_faceted_search``
+    row, and not in the ``denylist_query_hit`` row that records the refusal itself.
+    """
+    secret = "SECRET_CUSTOMER_NAME"
+    app, tmp_path_ = _run_bot_and_get_app(tmp_path, denylist_brands=[secret])
+
+    _ack, client = _submit(
+        app, state_values=_state_values(years=["2024"], free_text=f"{secret} 的成長案例")
+    )
+
+    audit_text = (tmp_path_ / "audit.csv").read_text(encoding="utf-8")
+    assert secret not in audit_text
+    rows = list(csv.reader((tmp_path_ / "audit.csv").open(encoding="utf-8", newline="")))
+    events = [row[1] for row in rows[1:]]
+    # The hit is recorded; the search row is skipped entirely, exactly as the NL path skips slack_qa.
+    assert "denylist_query_hit" in events
+    assert "slack_faceted_search" not in events
+    hit = next(row for row in rows[1:] if row[1] == "denylist_query_hit")
+    assert hit[2] == "C123" and hit[3] == "U1"
+    assert hit[-1] == ""
+    # The user still gets the refusal, and it does not echo the restricted term back either.
+    assert client.messages and secret not in client.messages[0]["text"]
+
+
+def test_a_non_restricted_search_still_records_its_facets_in_the_audit_row(tmp_path):
+    """The audit row is skipped only on refusal -- an ordinary search is still attributable."""
+    app, tmp_path_ = _run_bot_and_get_app(tmp_path)
+
+    _submit(app, state_values=_state_values(years=["2024"], free_text="會員回購"))
+
+    rows = list(csv.reader((tmp_path_ / "audit.csv").open(encoding="utf-8", newline="")))
+    row = next(row for row in rows[1:] if row[1] == "slack_faceted_search")
+    assert row[2] == "C123" and row[3] == "U1"
+    assert "years=2024" in row[-1]
+    assert "會員回購" in row[-1]
+
+
+def test_approved_asset_urls_are_applied_when_enabled(tmp_path, monkeypatch):
+    """Finding 4: the faceted result must go through the same overlay the NL path does."""
+    applied = []
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_interface._apply_approved_asset_urls",
+        lambda answer, db_path: applied.append(db_path) or None,
+    )
+    app, _tmp_path = _run_bot_and_get_app(tmp_path, enable_approved_asset_urls=True)
+
+    _submit(app, state_values=_state_values(years=["2024"]))
+
+    assert len(applied) == 1
+
+
+def test_approved_asset_urls_are_not_applied_when_disabled(tmp_path, monkeypatch):
+    applied = []
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_interface._apply_approved_asset_urls",
+        lambda answer, db_path: applied.append(db_path) or None,
+    )
+    app, _tmp_path = _run_bot_and_get_app(tmp_path, enable_approved_asset_urls=False)
+
+    _submit(app, state_values=_state_values(years=["2024"]))
+
+    assert applied == []
+
+
+def test_approved_asset_url_overlay_unavailable_is_audited_without_aborting_the_search(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_interface._apply_approved_asset_urls",
+        lambda answer, db_path: APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE,
+    )
+    app, tmp_path_ = _run_bot_and_get_app(tmp_path, enable_approved_asset_urls=True)
+
+    _ack, client = _submit(app, state_values=_state_values(years=["2024"]))
+
+    rows = list(csv.reader((tmp_path_ / "audit.csv").open(encoding="utf-8", newline="")))
+    events = [row[1] for row in rows[1:]]
+    assert APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE in events
+    # The audit code is payload-free and the search still answered.
+    issue_row = next(row for row in rows[1:] if row[1] == APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE)
+    assert issue_row[-1] == ""
+    assert client.messages and "大春煉皂" in client.messages[0]["text"]
+
+
+def test_approved_asset_urls_are_skipped_on_a_denylist_refusal(tmp_path, monkeypatch):
+    """The refusal guard: a refused answer has nothing to enrich and must not be enriched."""
+    applied = []
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_interface._apply_approved_asset_urls",
+        lambda answer, db_path: applied.append(db_path) or None,
+    )
+    secret = "SECRET_CUSTOMER_NAME"
+    app, _tmp_path = _run_bot_and_get_app(
+        tmp_path, denylist_brands=[secret], enable_approved_asset_urls=True
+    )
+
+    _submit(app, state_values=_state_values(years=["2024"], free_text=f"{secret} 案例"))
+
+    assert applied == []
+
+
+def test_a_new_submission_supersedes_the_previous_pagination_in_the_same_thread(tmp_path, monkeypatch):
+    """Finding 5, the ordinary case: a second paged search replaces the first thread's pages."""
+    sentinel_store = SlackPaginationStore()
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_interface.default_pagination_store", lambda: sentinel_store
+    )
+    db_path = tmp_path / "bulk.sqlite"
+    documents = [
+        Document(id=f"doc-{i}", metadata=m, content=c)
+        for i, (m, c) in enumerate(_multi_page_records(), start=1)
+    ]
+    SQLiteIndex(db_path).rebuild(documents, chunk_documents(documents))
+    app, _tmp_path = _run_bot_and_get_app(tmp_path, db_path=db_path)
+
+    _submit(app, state_values=_state_values(tags=["會員經營"]), thread_ts="1")
+    first_continuation = sentinel_store.next_page(("C123", "1"))
+    assert first_continuation is not None
+
+    # A second search in the same thread must start its own continuation, not extend the first.
+    _submit(app, state_values=_state_values(tags=["會員經營"]), thread_ts="1")
+    resumed = sentinel_store.next_page(("C123", "1"))
+    assert resumed == first_continuation  # page 2 of the *new* search, from the start
+
+
+def test_a_refusal_discards_the_previous_pagination_rather_than_leaving_it_resumable(
+    tmp_path, monkeypatch
+):
+    """Finding 5, the case that was actually broken.
+
+    A refused or unstructured submission produces no pages, so the old ``start()`` call never ran
+    and the previous search's continuation stayed live -- 「顯示更多」 would then resume a result the
+    user had already moved on from, in a thread whose latest search was refused outright.
+    """
+    sentinel_store = SlackPaginationStore()
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_interface.default_pagination_store", lambda: sentinel_store
+    )
+    secret = "SECRET_CUSTOMER_NAME"
+    db_path = tmp_path / "bulk.sqlite"
+    documents = [
+        Document(id=f"doc-{i}", metadata=m, content=c)
+        for i, (m, c) in enumerate(_multi_page_records(), start=1)
+    ]
+    SQLiteIndex(db_path).rebuild(documents, chunk_documents(documents))
+    app, _tmp_path = _run_bot_and_get_app(tmp_path, db_path=db_path, denylist_brands=[secret])
+
+    # A first search that pages, leaving a live continuation.
+    _submit(app, state_values=_state_values(tags=["會員經營"]), thread_ts="1")
+    assert len(sentinel_store) == 1
+
+    # Then a refused submission in the same thread.
+    _submit(
+        app,
+        state_values=_state_values(tags=["會員經營"], free_text=f"{secret} 案例"),
+        thread_ts="1",
+    )
+
+    assert len(sentinel_store) == 0
+    assert sentinel_store.next_page(("C123", "1")) is None
+
+    # And 「顯示更多」 says the session expired rather than replaying the superseded result.
+    app_mention_handler = app.events["app_mention"]
+    mention_client = FakeSlackClient()
+    app_mention_handler(
+        event={"text": "<@BOT> 顯示更多", "channel": "C123", "user": "U1", "ts": "1"},
+        client=mention_client,
+    )
+    assert mention_client.messages[0]["text"] == PAGINATION_EXPIRED_MESSAGE

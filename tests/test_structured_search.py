@@ -6,6 +6,7 @@ structured browse (no free text), hard filters applied before any lexical/semant
 restricted/non-retrievable/pending records never surface through either execution path.
 """
 
+import csv
 import json
 from datetime import date
 
@@ -17,13 +18,17 @@ from marketing_knowledge_agent.models import Document, DocumentMetadata
 from marketing_knowledge_agent.query_planning import QueryCatalog
 from marketing_knowledge_agent.search_facets import build_facet_catalog
 from marketing_knowledge_agent.search_taxonomy import load_search_taxonomy
+from marketing_knowledge_agent.slack_interface import SLACK_AUDIT_HEADER
 from marketing_knowledge_agent.slack_presentation import format_structured_slack_reply
 from marketing_knowledge_agent.structured_search import (
+    FREE_TEXT_MAX_LENGTH,
     StaleFacetCatalogError,
+    StructuredSearchGovernanceError,
     StructuredSearchRequest,
     StructuredSearchValidationError,
     build_structured_query_plan,
     execute_structured_search,
+    is_restricted_refusal,
     validate_structured_search_request,
 )
 
@@ -178,6 +183,26 @@ def test_a_valid_single_field_selection_passes(facet_catalog):
     catalog, _db_path, _restricted_path = facet_catalog
     request = StructuredSearchRequest(interview_years=(2024,), catalog_version=catalog.catalog_version)
     validate_structured_search_request(request, catalog)  # must not raise
+
+
+def test_free_text_at_the_limit_passes_and_over_the_limit_is_refused(facet_catalog):
+    """Refused, never truncated: a shortened goal would run a different search than the user asked.
+
+    The Block Kit element carries the same ``max_length``, but that is Slack's client-side courtesy,
+    not a fact this process may assume about the payload it received.
+    """
+    catalog, _db_path, _restricted_path = facet_catalog
+
+    at_limit = StructuredSearchRequest(
+        free_text="會" * FREE_TEXT_MAX_LENGTH, catalog_version=catalog.catalog_version
+    )
+    validate_structured_search_request(at_limit, catalog)  # must not raise
+
+    over_limit = StructuredSearchRequest(
+        free_text="會" * (FREE_TEXT_MAX_LENGTH + 1), catalog_version=catalog.catalog_version
+    )
+    with pytest.raises(StructuredSearchValidationError, match=str(FREE_TEXT_MAX_LENGTH)):
+        validate_structured_search_request(over_limit, catalog)
 
 
 # --------------------------------------------------------------------------------------
@@ -339,6 +364,82 @@ def test_slack_reply_renders_multi_value_filters_without_python_list_syntax(face
 
     assert "[" not in conditions_line and "]" not in conditions_line
     assert "2024、2023" in conditions_line or "2023、2024" in conditions_line
+
+
+def test_execution_fails_closed_when_the_denylist_is_missing(facet_catalog, tmp_path):
+    catalog, db_path, _restricted_path = facet_catalog
+    request = StructuredSearchRequest(
+        interview_years=(2024,), catalog_version=catalog.catalog_version
+    )
+
+    with pytest.raises(StructuredSearchGovernanceError, match="denylist"):
+        execute_structured_search(
+            request,
+            db_path=db_path,
+            taxonomy=None,
+            restricted_customers_path=tmp_path / "absent_restricted.json",
+        )
+
+
+def test_execution_fails_closed_when_the_denylist_is_not_a_json_array(facet_catalog, tmp_path):
+    """The silent-empty-denylist shape must stop the search, not quietly disclose everything."""
+    catalog, db_path, _restricted_path = facet_catalog
+    non_list = tmp_path / "non_list.json"
+    non_list.write_text(json.dumps({"brand_name": "Restricted Brand"}), encoding="utf-8")
+    request = StructuredSearchRequest(
+        interview_years=(2024,), catalog_version=catalog.catalog_version
+    )
+
+    with pytest.raises(StructuredSearchGovernanceError, match="array"):
+        execute_structured_search(
+            request, db_path=db_path, taxonomy=None, restricted_customers_path=non_list
+        )
+
+
+def test_execution_does_not_create_a_content_index_that_is_missing(facet_catalog, tmp_path):
+    catalog, _db_path, restricted_path = facet_catalog
+    absent = tmp_path / "absent_index.sqlite"
+    request = StructuredSearchRequest(
+        interview_years=(2024,), catalog_version=catalog.catalog_version
+    )
+
+    with pytest.raises(StructuredSearchGovernanceError):
+        execute_structured_search(
+            request, db_path=absent, taxonomy=None, restricted_customers_path=restricted_path
+        )
+
+    assert not absent.exists()
+
+
+def test_restricted_free_text_is_refused_and_never_written_to_the_audit_log(facet_catalog, tmp_path):
+    """The denylist refusal path must attribute the hit without recording the text that caused it."""
+    catalog, db_path, _restricted_path = facet_catalog
+    secret = "SECRET_CUSTOMER_NAME"
+    denylist = tmp_path / "denylist_with_secret.json"
+    denylist.write_text(json.dumps([{"brand_name": secret}]), encoding="utf-8")
+    audit_log = tmp_path / "audit.csv"
+
+    request = StructuredSearchRequest(
+        free_text=f"{secret} 的會員成長案例", catalog_version=catalog.catalog_version
+    )
+    answer = execute_structured_search(
+        request,
+        db_path=db_path,
+        taxonomy=None,
+        restricted_customers_path=denylist,
+        audit_log_path=audit_log,
+        query_audit_metadata={"channel_id": "C123", "user_id": "U1"},
+    )
+
+    assert is_restricted_refusal(answer) is True
+    audit_text = audit_log.read_text(encoding="utf-8")
+    assert secret not in audit_text
+    # ... and the hit is still recorded, under the Slack schema, attributable to channel and user.
+    rows = list(csv.reader(audit_log.open(encoding="utf-8", newline="")))
+    assert rows[0] == SLACK_AUDIT_HEADER
+    hit = next(row for row in rows[1:] if row[1] == "denylist_query_hit")
+    assert hit[2] == "C123" and hit[3] == "U1"
+    assert hit[-1] == ""  # query column stays empty for this event
 
 
 def test_content_index_and_denylist_are_untouched_by_execution(facet_catalog):
