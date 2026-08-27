@@ -617,14 +617,49 @@ SLACK_TAXONOMY_ACTIVATED=NO
 MAIN_UPDATED=NO
 ```
 
+### UAT activation runbook (documentation only, 2026-08-27)
+
+`docs/specs/SLACK_FACETED_SEARCH_UAT_RUNBOOK.md` closes the implementation WP's final deliverable
+("完成後只提供受控 UAT 啟用步驟，由使用者另行授權"). Nothing in it has been executed and it grants
+no authorization; `UAT_ACTIVATION_AUTHORIZED=NO` still holds.
+
+One operational finding, verified read-only, is worth surfacing here because it is a behaviour
+change an operator would otherwise meet as a mysterious startup failure: `run_slack_bot` resolves
+the content index and the restricted-customer denylist from **relative** defaults against the
+process CWD, and both are now **hard startup preconditions** when `enable_faceted_search=true` —
+where previously a missing denylist merely attached a warning to an answer. Verified: the running
+UAT bot's CWD is the main worktree, where both exist and the denylist is a valid JSON array of 11
+records, so it would satisfy the new loader; this feature worktree has neither, so starting there
+without first copying the gitignored runtime state fails closed at startup by design. The runbook
+gives both options and prefers copying over moving, since PID 42332 is reading the originals.
+
 ## Next exact action
+
+### For this WP (Slack Faceted Search MVP)
+
+1. **Codex re-review of `3a7648f..b33218d`** (4 commits: remediation source, remediation tests,
+   docs, bolt contract tests). This is the blocking gate. `CODEX_RE_REVIEW=PENDING`; this WP is
+   deliberately not marked reviewed or accepted by its own implementer.
+2. **Decide the `SlackConfig` field collision.** This branch and the separate Search Taxonomy Slack
+   wiring WP (`codex/impl/slack-search-taxonomy-uat`, uncommitted on its own branch) each
+   independently add `search_taxonomy_workbook` and `search_taxonomy_sha256`, gated by different
+   flags (`enable_faceted_search` vs `enable_search_taxonomy`). This is not merely a textual merge
+   conflict: two flags would each gate loading the *same* pinned Authority. The coherent end state
+   is one taxonomy pin consumed by two independent feature flags. **Decide before either branch
+   reaches `main`** — merging one first forces the other to rewrite already-reviewed code, which
+   throws away a review.
+3. Only then, and only with separate explicit authorization: UAT activation per
+   `docs/specs/SLACK_FACETED_SEARCH_UAT_RUNBOOK.md`.
+
+### Separate, still-open tracks (unchanged by this WP)
 
 - Review the B2 real-writer regression tests on `codex/test/b2-governed-writer-regression`. They
   are uncommitted; nothing has been staged, committed or pushed.
-- Then, separately, await explicit user authorization to promote
-  `codex/integrate/stable-shadow-search-taxonomy` to `main`. The integration candidate is prepared and verified; nothing has been pushed to
-  `main`. Do not activate Stable Record V2, retire row_v1, authorize a production re-index, or
-  wire the taxonomy to Slack as part of that promotion — each is a separate decision.
+- Separately, await explicit user authorization to promote
+  `codex/integrate/stable-shadow-search-taxonomy` to `main`. The integration candidate is prepared
+  and verified; nothing has been pushed to `main`. Do not activate Stable Record V2, retire row_v1,
+  authorize a production re-index, or wire the taxonomy to Slack as part of that promotion — each
+  is a separate decision.
 
 ### Nonblocking items R1 deliberately did not touch
 
