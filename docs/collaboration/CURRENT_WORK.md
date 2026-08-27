@@ -136,9 +136,10 @@ event already records for natural-language queries.
 Tests after remediation: `tests/test_search_facets.py` (16), `tests/test_structured_search.py` (22),
 `tests/test_slack_faceted_search.py` (32, Block Kit view/payload only),
 `tests/test_slack_faceted_search_interface.py` (33, `run_slack_bot`/handler wiring via a hand-built
-fake `App`/`SocketModeHandler`/client — no real Slack connection), and
+fake `App`/`SocketModeHandler`/client — no real Slack connection),
 `tests/test_structured_query_operators.py` (8, the additive `query_planning.py` operator/
-`preresolved_fields` behaviour) — **111 tests** (83 at `3a7648f`, +28 from this remediation), all
+`preresolved_fields` behaviour), and `tests/test_slack_bolt_contract.py` (5, real `slack_bolt`
+dispatcher, offline — see the contract-verification section above) — **116 tests** (83 at `3a7648f`, +28 from this remediation, +5 from bolt contract verification), all
 synthetic/hermetic fixtures, no gitignored production DB, Vault, token or real Slack. `compileall`
 and `git diff --check` both pass, and no `.mka/` directory or stray `.sqlite` file exists in this
 worktree after the full run — the read-only claim in finding 6, checked rather than asserted.
@@ -157,10 +158,10 @@ errors, all in `test_slack_structured_governance.py`, all `FileNotFoundError` on
 `.mka/content_index.sqlite` fixture dependency this isolated worktree never had — unrelated to any
 file this WP touched.
 
-Full suite after remediation: **137 failed, 1419 passed, 65 skipped, 72 errors**. The
+Full suite after remediation: **137 failed, 1424 passed, 65 skipped, 72 errors**. The
 failed/skipped/errors counts (137/65/72) are unchanged from both the pre-remediation run of this WP
 and the counts already on record in this file for the preceding milestones; the passed count moved
-1391 → 1419 (+28), matching exactly the tests this remediation added, and the set of failing/erroring
+1391 → 1419 (+28 remediation) → 1424 (+5 bolt contract), matching exactly the tests added, and the set of failing/erroring
 *files* is identical to the pre-remediation set. Every one belongs to an unrelated subsystem
 (governance decision store, production search-alias plan/confirmation/execution, parent sync,
 historical fixture immutability, sample vault, store-data-sync plan v2) whose gitignored production
@@ -168,13 +169,46 @@ fixtures are absent from this isolated worktree — the same pre-existing enviro
 repeatedly elsewhere in this file, not a regression this WP introduced.
 
 Not run / not verified: comprehensive adversarial review; standalone lint/type tools (not configured
-in this repo); production sync, re-index, deploy, Slack Bot start/restart, or UAT activation. **No
-live Slack round trip has ever been exercised** — every Slack interaction in these tests goes through
-a hand-built fake `App`/client, so the Block Kit payloads are asserted against the documented limits
-rather than against Slack's actual acceptance; the `views_open` / `view_submission` contract itself
-is unverified until UAT. The 26 pre-existing failing/erroring test files were identified by name and
-subsystem but not individually re-run against a clean baseline in this round. Codex re-review of this
-remediation has not happened.
+in this repo); production sync, re-index, deploy, Slack Bot start/restart, or UAT activation. The 26
+pre-existing failing/erroring test files were identified by name and subsystem but not individually
+re-run against a clean baseline in this round. Codex re-review of this remediation has not happened.
+
+**Still unverified after the bolt contract tests below: Slack itself.** The Block Kit views are
+validated against `slack_sdk`'s own view model, which is the closest offline proxy available, but no
+payload has ever been sent to Slack. The live `views_open` / `view_submission` round trip, the real
+3-second `ack` deadline under production latency, and whether Slack renders the modal as intended
+are all first exercised in UAT.
+
+### Real-`slack_bolt` contract verification (Claude Code, 2026-08-27)
+
+Every other Slack test in this WP drives a hand-built fake `App`, which proves the handlers do the
+right thing and proves nothing about whether `slack_bolt` will ever call them. That gap was worth
+closing on its own evidence: `build_required_kwargs` **does not raise** when a listener declares an
+argument bolt cannot inject — it logs `"<name> is not a valid argument"`, omits the kwarg, and the
+failure surfaces as a `TypeError` at the first real button click, in UAT, in front of a user.
+
+`tests/test_slack_bolt_contract.py` (5 tests) registers the real handlers on a real `slack_bolt.App`
+and dispatches synthetic `block_actions` / `view_submission` payloads through bolt's own dispatcher.
+It stays hermetic by stubbing `WebClient.api_call` — the single funnel every Slack API method goes
+through, patched at class level because bolt clones a fresh `WebClient` per request since 1.15, so
+an instance stub is simply bypassed. Any unexpected Slack API call raises rather than escaping to
+the network. Verified in both orders that `monkeypatch` restores it and the patch does not leak into
+the other Slack suites (`220 passed`, `82 passed`).
+
+Confirmed against real bolt: both handlers' argument names are injectable; a button click routes to
+`views_open`; `slack_sdk`'s `View.validate_json()` accepts the modal and it contains no LV1; a
+submission routes to a governed search posting exactly two messages with a `request_token` button;
+and `ack(response_action="errors")` survives bolt's response serialization with the error bound to a
+real `block_id`.
+
+Two fixture defects in the harness were found and fixed rather than worked around — a real
+`view_submission` payload carries `view.type`, and Socket Mode delivers the already-parsed payload
+dict as the body. Both were harness bugs; neither indicated a product defect.
+
+Mutation probe: renaming the view handler's `view` parameter to `submitted_view` (a name bolt cannot
+inject) fails 3 of the 5 contract tests, including the dedicated arg-injectability test, which
+compares against bolt's own injectable set and therefore catches any wrong name regardless of what
+the fake-`App` tests happen to call it.
 
 ### Superseded lock record: B2 Real Writer Regression Test Hardening
 
