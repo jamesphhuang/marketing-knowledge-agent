@@ -258,3 +258,57 @@ authorization to update `main`; that remains an explicit, separate human decisio
 This decision does not authorize updating `main`, Stable Record V2 activation, row_v1 retirement,
 Authority mutation, Vault/content-index mutation, production sync, production re-index, or Slack
 taxonomy activation.
+
+## DEC-20260827-01 — Faceted Search MVP merges to main first; taxonomy wiring adapts to it
+
+Two work packages independently added the same two `SlackConfig` fields, each gated by its own
+flag:
+
+| Branch | Flag | Shared fields |
+| --- | --- | --- |
+| `codex/impl/slack-faceted-search-mvp` (pushed, remediated) | `enable_faceted_search` | `search_taxonomy_workbook` + `search_taxonomy_sha256` |
+| `codex/impl/slack-search-taxonomy-uat` (uncommitted, separate worktree) | `enable_search_taxonomy` | the same two fields |
+
+This is not only a textual merge conflict. Two flags would each gate loading the *same* pinned
+Search Taxonomy Authority, which is an incoherent contract: there is one Authority, and whether it
+is loaded should not depend on which of two unrelated features happens to be on.
+
+### Decision
+
+**Faceted Search MVP is the integration order's first branch.** The Search Taxonomy Slack wiring WP
+adapts to whatever `SlackConfig` shape lands with it, rather than the reverse.
+
+Rationale: the faceted-search branch has completed a full review cycle (Codex R1
+CHANGES_REQUESTED → six findings remediated → re-review pending) and is committed and pushed. The
+taxonomy wiring WP is still uncommitted on its own branch, so adapting it costs no completed review
+work. Merging in the other order would force already-reviewed code to be rewritten, discarding a
+review.
+
+### Consequences for the taxonomy wiring WP
+
+Recorded here so whoever resumes that WP is not surprised. Its worktree was **not** modified by this
+decision — its uncommitted changes are untouched.
+
+- `search_taxonomy_workbook` and `search_taxonomy_sha256` will already exist in `SlackConfig`, along
+  with their both-or-neither validation. That WP must consume the existing fields, not redeclare
+  them.
+- `enable_search_taxonomy` remains its own flag and stays independent; the intended end state is
+  **one taxonomy pin consumed by two independent feature flags**, so neither feature's flag gates
+  the other's.
+- The taxonomy load itself should happen once at startup regardless of which flag or flags are on.
+
+### Governance boundary
+
+```text
+INTEGRATION_ORDER_DECIDED=YES
+CODEX_RE_REVIEW=PENDING
+MAIN_UPDATE_AUTHORIZED=NO
+MAIN_UPDATED=NO
+UAT_ACTIVATION_AUTHORIZED=NO
+UAT_ACTIVATED=NO
+PRODUCTION_ACTIVATED=NO
+```
+
+This decision settles **order only**. It is not an authorization to update `main`, and it does not
+bypass the outstanding gate: Codex re-review of `3a7648f..1afa27a` must pass first. Promotion to
+`main` remains an explicit, separate human decision, as does UAT activation.

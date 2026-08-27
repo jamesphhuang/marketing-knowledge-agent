@@ -51,7 +51,12 @@ CODEX_REVIEW_R1=CHANGES_REQUESTED
 CODEX_REVIEW_R1_FINDINGS=6
 CODEX_REVIEW_R1_REMEDIATED=6
 CODEX_RE_REVIEW=PENDING
+INTEGRATION_ORDER_DECIDED=YES
 ```
+
+Integration order settled by `DEC-20260827-01`: this branch merges to `main` first and the Search
+Taxonomy Slack wiring WP adapts to it. That decision settles **order only** — `main` promotion still
+requires Codex re-review to pass and a separate explicit authorization.
 
 ### Codex review R1 findings and remediation (2026-08-27)
 
@@ -640,15 +645,17 @@ gives both options and prefers copying over moving, since PID 42332 is reading t
 1. **Codex re-review of `3a7648f..b33218d`** (4 commits: remediation source, remediation tests,
    docs, bolt contract tests). This is the blocking gate. `CODEX_RE_REVIEW=PENDING`; this WP is
    deliberately not marked reviewed or accepted by its own implementer.
-2. **Decide the `SlackConfig` field collision.** This branch and the separate Search Taxonomy Slack
-   wiring WP (`codex/impl/slack-search-taxonomy-uat`, uncommitted on its own branch) each
-   independently add `search_taxonomy_workbook` and `search_taxonomy_sha256`, gated by different
-   flags (`enable_faceted_search` vs `enable_search_taxonomy`). This is not merely a textual merge
-   conflict: two flags would each gate loading the *same* pinned Authority. The coherent end state
-   is one taxonomy pin consumed by two independent feature flags. **Decide before either branch
-   reaches `main`** — merging one first forces the other to rewrite already-reviewed code, which
-   throws away a review.
-3. Only then, and only with separate explicit authorization: UAT activation per
+2. **`SlackConfig` field collision — RESOLVED** by `DEC-20260827-01` (2026-08-27): this branch is
+   the integration order's first, and the Search Taxonomy Slack wiring WP
+   (`codex/impl/slack-search-taxonomy-uat`, still uncommitted on its own branch) adapts to the
+   `SlackConfig` shape that lands with it. That WP must consume the existing
+   `search_taxonomy_workbook` / `search_taxonomy_sha256` fields rather than redeclare them; the
+   intended end state is one taxonomy pin consumed by two independent feature flags. **That
+   worktree was not modified by this decision** — its uncommitted changes are untouched.
+   No action is outstanding here for this WP.
+3. Promotion to `main` — still requires Codex re-review to pass **and** a separate explicit
+   authorization. `MAIN_UPDATE_AUTHORIZED=NO`. Deciding the order did not authorize the merge.
+4. Only after that, and only with separate explicit authorization: UAT activation per
    `docs/specs/SLACK_FACETED_SEARCH_UAT_RUNBOOK.md`.
 
 ### Separate, still-open tracks (unchanged by this WP)
