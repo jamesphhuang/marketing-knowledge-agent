@@ -81,7 +81,7 @@ STRUCTURED_REQUEST_SCHEMA_VERSION = "2"
 # 「全部年份」 is a UI sentinel for "no year constraint" and therefore narrows nothing either --
 # see ``interview_years`` below, which is empty in exactly that case.
 NARROWING_CONSTRAINT_REQUIRED_MESSAGE = (
-    "請至少選擇一個搜尋範圍，例如特定年份、Sales Category LV2 或內容相關標籤。"
+    "請至少選擇一個搜尋範圍，例如特定年份、品牌產業別或功能選項。"
 )
 
 

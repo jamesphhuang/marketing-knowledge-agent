@@ -344,12 +344,15 @@ def _render_page(
 
 
 def _entity_block(entity: Mapping[str, object], number: int) -> Tuple[List[str], int]:
-    lines = [
-        f"`{_inline(entity['entity_name'])}`",
-        f"_{_label_value('Handle', entity['merchant_handle'])}_",
-        f"_{_label_value('Sales Category LV1', entity['sales_category_lv1'])}_",
-        f"_{_label_value('Sales Category LV2', entity['sales_category_lv2'])}_",
-    ]
+    # Human UAT asked for the brand name and its assets, nothing else: the handle and the two
+    # category lines are data-model detail that pushed the actual content down the card.
+    #
+    # This is a *rendering* change and only that. ``merchant_handle``, ``sales_category_lv1`` and
+    # ``sales_category_lv2`` are still carried on every entity and are still what grouping,
+    # conflicting-handle detection, identity and governance run on -- see ``_presentation_entities``,
+    # which drops a whole group when its handles disagree. Removing them from the model would
+    # remove that protection; removing them from the card does not.
+    lines = [f"`{_inline(entity['entity_name'])}`"]
     assets = entity["assets"]
     for asset in assets:
         asset["number"] = number
@@ -618,9 +621,22 @@ def _render_conditions(question: str, plan: Mapping[str, object]) -> str:
     return "｜".join(f"`{_inline(label + '：' + '、'.join(values) if label else values[0])}`" for label, values in groups.items())
 
 
+# What the Slack surface calls a field when it echoes the conditions back. Scoped to this module on
+# purpose: ``FIELD_REGISTRY``'s own ``output_label`` is what the CLI, ``explain-query`` and every
+# non-Slack caller render, and renaming there would change output this work package has no business
+# touching. Slack asks the question as 「你在找什麼功能？」, so it answers in the same words.
+SLACK_CONDITION_LABELS = {
+    "sales_category_lv2": "品牌產業別",
+    "content_tags": "功能",
+}
+
+
 def _condition_label(field: str, constraint: Mapping[str, object]) -> str:
     if field in {"entity_name", "merchant_name", "partner_name", "merchant_handle"}:
         return "關鍵字" if field != "merchant_handle" else "Handle"
+    slack_label = SLACK_CONDITION_LABELS.get(field)
+    if slack_label:
+        return slack_label
     definition = FIELD_REGISTRY.get(field)
     return str(constraint.get("output_label") or (definition.output_label if definition else field))
 

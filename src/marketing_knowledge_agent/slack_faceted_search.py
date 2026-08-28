@@ -85,6 +85,21 @@ ENTRYPOINT_SLASH_COMMAND = "slash_command"
 ALL_YEARS_OPTION_VALUE = "__all_years__"
 ALL_YEARS_OPTION_LABEL = "全部年份"
 
+# What the modal calls each field. These are display strings only: the block ids, action ids,
+# ``StructuredSearchRequest`` fields, taxonomy field names, query-plan fields and audit columns all
+# keep their existing technical names, so renaming here cannot reach the index, the Authority or
+# anything a CLI user sees. Human UAT asked for wording a marketer reads without translating from
+# the data model.
+INTERVIEW_YEARS_LABEL = "採訪年份"
+SALES_CATEGORY_LV2_LABEL = "品牌產業別"
+CONTENT_TAGS_LABEL = "你在找什麼功能？"
+FREE_TEXT_LABEL = "你想找什麼內容或成果，請輸入關鍵字"
+# Shown under the year field, before the user submits. 「全部年份」 deliberately does not narrow a
+# search (see ``NARROWING_CONSTRAINT_REQUIRED_MESSAGE``), and UAT found the rule correct but late:
+# a user who reopened 調整條件, set the year back to 「全部年份」 and cleared the other fields only
+# learned it after submitting. The rule is unchanged; this says so up front.
+ALL_YEARS_HINT = f"選擇「{ALL_YEARS_OPTION_LABEL}」時，請再選擇{SALES_CATEGORY_LV2_LABEL}或功能選項。"
+
 # Fallback text for the follow-up messages, defined once so the notification preview and the block
 # a user actually reads cannot drift apart.
 ADJUST_FILTERS_TEXT = "可調整搜尋條件並重新搜尋。"
@@ -115,7 +130,9 @@ def build_open_search_reply(channel_id: str, thread_ts: str) -> dict:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "點擊下方按鈕，以年份、Sales Category LV2、內容相關標籤與關鍵字搜尋案例。",
+                    "text": (
+                        f"點擊下方按鈕，以年份、{SALES_CATEGORY_LV2_LABEL}、功能選項與關鍵字搜尋案例。"
+                    ),
                 },
             },
             {
@@ -355,8 +372,9 @@ def build_facet_modal_view(
         _single_select_block(
             INTERVIEW_YEARS_BLOCK_ID,
             INTERVIEW_YEARS_ACTION_ID,
-            "採訪年份",
+            INTERVIEW_YEARS_LABEL,
             year_options,
+            hint=ALL_YEARS_HINT,
             # An empty prior selection is 「全部年份」, not "nothing chosen": those are the same
             # state, and reopening on the sentinel is what makes 調整條件 round-trip faithfully.
             initial_value=str(prefilled_years[0]) if prefilled_years else ALL_YEARS_OPTION_VALUE,
@@ -372,7 +390,7 @@ def build_facet_modal_view(
             _multi_select_block(
                 SALES_CATEGORY_LV2_BLOCK_ID,
                 SALES_CATEGORY_LV2_ACTION_ID,
-                "Sales Category LV2",
+                SALES_CATEGORY_LV2_LABEL,
                 lv2_options,
                 initial_values=list(prefill.sales_category_lv2) if prefill else [],
             )
@@ -387,7 +405,7 @@ def build_facet_modal_view(
             _multi_select_block(
                 CONTENT_TAGS_BLOCK_ID,
                 CONTENT_TAGS_ACTION_ID,
-                "內容相關標籤",
+                CONTENT_TAGS_LABEL,
                 tag_options,
                 initial_values=list(prefill.content_tags) if prefill else [],
             )
@@ -444,6 +462,7 @@ def _single_select_block(
     label: str,
     options: Sequence[dict],
     initial_value: str,
+    hint: str = "",
 ) -> dict:
     """One ``static_select`` input, guarded by the same option ceiling as the multi-selects.
 
@@ -464,13 +483,18 @@ def _single_select_block(
             "Slack 會拒絕這個 view，不得靜默改用其他預設值。"
         )
     element["initial_option"] = initial_option
-    return {
+    block: Dict[str, Any] = {
         "type": "input",
         "block_id": block_id,
         "optional": True,
         "label": {"type": "plain_text", "text": label},
         "element": element,
     }
+    if hint:
+        # Block Kit's own hint surface, so the guidance sits under the field it is about rather
+        # than becoming another line of body text the user has to connect back to a control.
+        block["hint"] = {"type": "plain_text", "text": hint}
+    return block
 
 
 def _assert_option_count(label: str, options: Sequence[dict], element_type: str) -> None:
@@ -504,7 +528,7 @@ def _free_text_block(initial_value: str) -> dict:
         "type": "input",
         "block_id": FREE_TEXT_BLOCK_ID,
         "optional": True,
-        "label": {"type": "plain_text", "text": "你想找什麼內容或成果"},
+        "label": {"type": "plain_text", "text": FREE_TEXT_LABEL},
         "element": element,
     }
 

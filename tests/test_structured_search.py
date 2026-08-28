@@ -231,8 +231,8 @@ def test_the_refusal_message_names_the_fields_that_would_satisfy_it(facet_catalo
 
     message = str(exc_info.value)
     assert "年份" in message
-    assert "Sales Category LV2" in message
-    assert "內容相關標籤" in message
+    assert "品牌產業別" in message
+    assert "功能" in message
 
 
 @pytest.mark.parametrize(

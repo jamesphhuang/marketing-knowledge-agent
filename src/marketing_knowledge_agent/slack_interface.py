@@ -43,6 +43,11 @@ from .slack_faceted_search import (
     show_more_blocks,
 )
 from .slack_request_tokens import SlackRequestTokenStore, default_request_token_store
+from .slack_response_urls import (
+    SlackResponseUrlStore,
+    default_response_url_store,
+    is_valid_response_url,
+)
 from .slack_output_preview import (
     apply_approved_asset_url_overlay,
     load_index_bound_approved_asset_url_overlay,
@@ -109,6 +114,9 @@ FACETED_SEARCH_STALE_CATALOG_MESSAGE = "搜尋條件已過期，請重新點擊�
 # `/mka` sends them to a command that mode never registers, which would leave the guidance as stale
 # as the button that produced it -- the user is told to do something that also does nothing.
 STALE_ENTRY_MODE_MESSAGE_SLASH = "搜尋入口已更新，請輸入 `/mka` 重新開啟搜尋。"
+# Shown when a modal is submitted but its reply capability is gone -- expired, spent, or never
+# stored. Deliberately says nothing about which: the user's action is the same either way.
+SLASH_SESSION_EXPIRED_MESSAGE = "此搜尋階段已逾時，請重新輸入 `/mka` 開啟搜尋。"
 STALE_ENTRY_MODE_MESSAGE_MENTION = (
     f"此搜尋操作已失效，請重新標記 {SHOW_MORE_MENTION} 開始搜尋。"
 )
@@ -476,41 +484,66 @@ def post_slack_reply(client, reply: dict) -> None:
     client.chat_postMessage(**{**reply, "unfurl_links": False, "unfurl_media": False})
 
 
-def post_slack_ephemeral(client, reply: dict) -> None:
-    """The single boundary every ephemeral message this bot posts to Slack goes through.
+def post_slack_response_url(response_url: str, message: dict) -> None:
+    """The single boundary every slash-originated message this bot sends goes through.
 
-    The ``/mka`` flow answers the person who ran the command and nobody else, so its results leave
-    through ``chat.postEphemeral`` rather than ``chat.postMessage``. That is a second executable
-    posting API on this surface, so it gets the same treatment as the first: one call site, flags
-    written after the reply is unpacked, no way for a caller to re-enable unfurling.
+    Human UAT established why this exists rather than ``chat.postEphemeral``: a ``/mka`` invoked
+    from a conversation the bot was never added to entered the denial path correctly and then could
+    not deliver the denial, because Slack answers ``chat.postEphemeral`` with ``channel_not_found``
+    unless the app can post into that conversation. The user saw nothing at all. Slack's own
+    mechanism for replying to an interaction regardless of membership is the ``response_url`` its
+    payload carries, so that is what this surface replies through.
 
-    On the two unfurl flags, verified against the installed SDK rather than assumed:
-    ``slack_sdk`` 3.43.0's ``chat.postEphemeral`` binding does **not** declare ``unfurl_links`` or
-    ``unfurl_media`` as named parameters -- unlike its ``chat.postMessage`` one, which does. It
-    accepts
-    ``**kwargs`` and forwards them verbatim into the request body, so the flags are transmitted,
-    and they are set here so that this boundary's contract does not depend on which Slack method a
-    future call site happens to use. Whether Slack's ``chat.postEphemeral`` acts on them is not
-    established by this code and has not been exercised against live Slack; it is recorded as a UAT
-    check. Setting them costs nothing and cannot make unfurling *more* likely.
+    Four properties are forced here and cannot be overridden, because they are written *after* the
+    caller's message is unpacked:
+
+    - ``response_type="ephemeral"`` -- a slash result is addressed to the person who ran the
+      command and to nobody else. ``"in_channel"`` would publish one user's search to the whole
+      conversation, and no call site is allowed to ask for it;
+    - ``replace_original=False`` -- each message is its own reply. Replacing would silently destroy
+      the page a user is still reading;
+    - ``unfurl_links`` / ``unfurl_media`` false -- the no-unfurl contract, unchanged. Unlike
+      ``chat.postEphemeral``, whose binding does not declare these, ``WebhookClient.send`` declares
+      all four of these parameters explicitly (verified against the installed ``slack_sdk``
+      3.43.0), so they are part of the documented call rather than passengers in ``**kwargs``.
+
+    ``response_url`` is a bearer capability: it is passed in, used, and never stored, logged or
+    echoed here. See :mod:`slack_response_urls` for how it is held and why.
     """
-    client.chat_postEphemeral(**{**reply, "unfurl_links": False, "unfurl_media": False})
+    from slack_sdk.webhook import WebhookClient
+
+    WebhookClient(response_url).send(
+        **{
+            **message,
+            "response_type": "ephemeral",
+            "replace_original": False,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+    )
 
 
-def _ephemeral_dict(
-    channel_id: str, user_id: str, text: str, blocks: Optional[List[dict]] = None
-) -> dict:
-    """One ephemeral message, addressed to the invoking user rather than to the conversation.
+def _response_message(text: str, blocks: Optional[List[dict]] = None) -> dict:
+    """One message for the response_url boundary.
 
-    ``user`` is what makes the message visible to exactly one person, and it always comes from the
-    Slack payload -- never from anything a user could type. There is no ``thread_ts``: a slash
-    command is not a message, so it has no thread to answer in, and inventing one would attach the
-    reply to an unrelated conversation.
+    Carries no ``channel`` and no ``user``: a response_url already addresses the interaction it
+    came from, so there is nothing to route here and nothing that could be pointed elsewhere.
     """
-    reply: dict = {"channel": channel_id, "user": user_id, "text": text}
+    message: dict = {"text": text}
     if blocks:
-        reply["blocks"] = blocks
-    return reply
+        message["blocks"] = blocks
+    return message
+
+
+def _action_response_url(body: dict) -> str:
+    """The response_url carried by this interaction payload, or ``""`` when there is none.
+
+    A button click is a *new* interaction and Slack gives it its own capability, separately
+    budgeted and later-expiring than the command that started the session. Preferring it keeps a
+    long browsing session from exhausting the original ``/mka`` capability.
+    """
+    url = body.get("response_url")
+    return url.strip() if isinstance(url, str) and is_valid_response_url(url) else ""
 
 
 def _slash_session_key(user_id: str, session_id: str) -> str:
@@ -541,25 +574,20 @@ def stale_entry_mode_message(search_entry_mode: str) -> str:
     return STALE_ENTRY_MODE_MESSAGE_MENTION
 
 
-def _tell_stale_clicker_to_use_the_new_entry(client, body: dict, config: SlackConfig) -> None:
+def _tell_stale_clicker_to_use_the_new_entry(body: dict, config: SlackConfig) -> None:
     """Tell whoever clicked a superseded button where the search entry went, or say nothing.
 
     Best-effort and deliberately inert: fixed text, no query, no token, no prefill, and nothing
-    from the button that was clicked. It goes through the ephemeral boundary, so it is visible only
-    to the clicker and cannot become a public post. When the interaction payload does not identify
-    a user and conversation, or the conversation is not one this flow may answer in, the click is
-    simply a no-op -- a stale button doing nothing is an acceptable outcome, and is what this
-    remediation actually requires; the message is a courtesy on top of it.
+    from the button that was clicked. It answers through this interaction's own response_url, so it
+    reaches the clicker wherever they are and can never become a public post. With no usable
+    response_url the click is simply a no-op -- a stale button doing nothing is an acceptable
+    outcome and is what the remediation actually requires; the message is a courtesy on top.
     """
-    context = _slash_interaction_context(body)
-    if context is None:
+    response_url = _action_response_url(body)
+    if not response_url:
         return
-    user_id, channel_id = context
-    if not _slash_entry_allowed(config, channel_id):
-        return
-    post_slack_ephemeral(
-        client,
-        _ephemeral_dict(channel_id, user_id, stale_entry_mode_message(config.search_entry_mode)),
+    post_slack_response_url(
+        response_url, _response_message(stale_entry_mode_message(config.search_entry_mode))
     )
 
 
@@ -684,6 +712,7 @@ def run_slack_bot(
             audit_log_path=audit_log_path,
             pagination_store=pagination_store,
             request_token_store=default_request_token_store(),
+            response_url_store=default_response_url_store(),
         )
 
     socket_mode_handler_factory(app, app_token).start()
@@ -699,6 +728,7 @@ def _register_faceted_search_handlers(
     audit_log_path: Path,
     pagination_store: SlackPaginationStore,
     request_token_store: SlackRequestTokenStore,
+    response_url_store: Optional[SlackResponseUrlStore] = None,
 ) -> None:
     """Register the button-click and modal-submission handlers behind the faceted-search flag.
 
@@ -708,6 +738,8 @@ def _register_faceted_search_handlers(
     """
 
     slash_only = config.search_entry_mode == ENTRY_MODE_SLASH_FACETED_ONLY
+    if response_url_store is None:
+        response_url_store = default_response_url_store()
 
     @app.action(OPEN_SEARCH_MODAL_ACTION_ID)
     def handle_open_faceted_search_modal(ack, body, client):
@@ -722,7 +754,7 @@ def _register_faceted_search_handlers(
             # A button left over from a different entry mode -- still in the channel, still
             # clickable, now unusable. Refused before the modal is built, so no legacy modal can
             # come into existence under this mode at all.
-            _tell_stale_clicker_to_use_the_new_entry(client, body, config)
+            _tell_stale_clicker_to_use_the_new_entry(body, config)
             return
         if session_id:
             context = _slash_interaction_context(body)
@@ -734,6 +766,23 @@ def _register_faceted_search_handlers(
             session_key = _slash_session_key(user_id, session_id)
             thread_ts = ""
             entrypoint = ENTRYPOINT_SLASH_COMMAND
+            # 調整條件 and 重新搜尋 both lead to another submission, so the session is handed the
+            # capability from *this* click before the modal opens. Without the refresh the next
+            # result would have to be delivered through the ageing command capability, which is
+            # what runs out first in a long session. Ownership is not refreshed along with it:
+            # user and channel still come from the interaction payload, checked above.
+            refreshed = response_url_store.store(
+                _action_response_url(body),
+                owner_user_id=user_id,
+                channel_id=channel_id,
+                session_key=session_key,
+            )
+            if not refreshed and not response_url_store.can_reply(
+                user_id=user_id, channel_id=channel_id, session_key=session_key
+            ):
+                # Neither a fresh capability nor a live stored one: there is no way to answer the
+                # submission this modal would produce, so it is not opened.
+                return
         else:
             # Who clicked, and where, is read from the interaction payload -- never from the
             # button's own value. The button sits in a channel where everyone who can see the
@@ -777,6 +826,7 @@ def _register_faceted_search_handlers(
             user_id = str(body.get("user_id") or "").strip()
             channel_id = str(body.get("channel_id") or "").strip()
             trigger_id = str(body.get("trigger_id") or "").strip()
+            response_url = str(body.get("response_url") or "").strip()
             # ``body["text"]`` -- whatever the user typed after the command -- is deliberately never
             # read. ``/mka`` has exactly one meaning: open the modal. Treating trailing text as a
             # query would reintroduce free-text search through the one entry point that exists to
@@ -784,17 +834,32 @@ def _register_faceted_search_handlers(
             # checked against the denylist before being echoed, and never chosen from the catalog.
             if not user_id or not channel_id or not trigger_id:
                 return
+            if not is_valid_response_url(response_url):
+                # No reply path, so no session. Opening the modal here would let a user run a real
+                # search whose result could never be delivered -- work done, governance spent, and
+                # silence at the end of it. Refusing before the modal is the honest failure.
+                return
             if not _slash_entry_allowed(config, channel_id):
-                post_slack_ephemeral(
-                    client, _ephemeral_dict(channel_id, user_id, DENIED_CHANNEL_MESSAGE)
-                )
+                # Answered through this command's own capability rather than
+                # ``chat.postEphemeral``: the conversations this branch exists to turn away are
+                # exactly the ones the bot is least likely to be a member of, which is how the
+                # denial went undelivered in UAT.
+                post_slack_response_url(response_url, _response_message(DENIED_CHANNEL_MESSAGE))
+                return
+            session_id = new_slash_session_id()
+            if not response_url_store.store(
+                response_url,
+                owner_user_id=user_id,
+                channel_id=channel_id,
+                session_key=_slash_session_key(user_id, session_id),
+            ):
                 return
             view = build_facet_modal_view(
                 facet_catalog,
                 channel_id=channel_id,
                 prefill=None,
                 entrypoint=ENTRYPOINT_SLASH_COMMAND,
-                session_id=new_slash_session_id(),
+                session_id=session_id,
             )
             client.views_open(trigger_id=trigger_id, view=view)
 
@@ -829,19 +894,25 @@ def _register_faceted_search_handlers(
                 )
                 is not None
             )
+            # This click is its own interaction, so it carries its own capability. Using it keeps
+            # a long browsing session from spending down the original ``/mka`` capability, and
+            # keeps paging working after that one has expired.
+            reply_url = _action_response_url(body) or response_url_store.take(
+                user_id=user_id, channel_id=channel_id, session_key=session_key
+            )
+            if not reply_url:
+                return
             lane = pagination_key(channel_id, session_key)
             page = pagination_store.next_page(lane) if owns_session else None
             if page is None:
-                post_slack_ephemeral(
-                    client, _ephemeral_dict(channel_id, user_id, PAGINATION_EXPIRED_MESSAGE)
-                )
+                post_slack_response_url(reply_url, _response_message(PAGINATION_EXPIRED_MESSAGE))
                 return
             blocks = (
                 show_more_blocks(request_token, session_id)
                 if request_token and pagination_store.has_more(lane)
                 else None
             )
-            post_slack_ephemeral(client, _ephemeral_dict(channel_id, user_id, page, blocks))
+            post_slack_response_url(reply_url, _response_message(page, blocks))
 
     @app.view(FACETED_SEARCH_MODAL_CALLBACK_ID)
     def handle_faceted_search_submission(ack, body, client, view):
@@ -879,6 +950,19 @@ def _register_faceted_search_handlers(
                 ack()
                 return
             session_key = _slash_session_key(user_id, session_id)
+            if not response_url_store.can_reply(
+                user_id=user_id, channel_id=channel_id, session_key=session_key
+            ):
+                # Checked *before* the search, not after it. A capability expires on Slack's clock,
+                # not ours, so the interesting failure is the one where retrieval succeeds and
+                # there is then no way to hand the result back: work done, governance spent, and
+                # the user left staring at a modal that closed on nothing. Unknown, expired,
+                # exhausted and not-yours are one outcome here on purpose.
+                ack(
+                    response_action="errors",
+                    errors={FREE_TEXT_BLOCK_ID: SLASH_SESSION_EXPIRED_MESSAGE},
+                )
+                return
         else:
             if channel_id not in config.allowed_channel_ids:
                 ack()
@@ -900,6 +984,8 @@ def _register_faceted_search_handlers(
                 thread_ts=thread_ts,
                 user_id=user_id,
                 text=FACETED_SEARCH_STALE_CATALOG_MESSAGE,
+                session_key=session_key,
+                response_url_store=response_url_store,
             )
             return
         except StructuredSearchValidationError as exc:
@@ -974,6 +1060,8 @@ def _register_faceted_search_handlers(
             thread_ts=thread_ts,
             user_id=user_id,
             text=body_text,
+            session_key=session_key,
+            response_url_store=response_url_store,
         )
 
         if refused:
@@ -982,11 +1070,16 @@ def _register_faceted_search_handlers(
             # reopen -- only a way back to a blank modal. Storing it "just for the owner" would
             # still be storing it.
             if is_slash:
-                post_slack_ephemeral(
+                _post_search_reply(
                     client,
-                    _ephemeral_dict(
-                        channel_id, user_id, RESTART_SEARCH_TEXT, restart_search_blocks(session_id)
-                    ),
+                    is_slash=True,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    user_id=user_id,
+                    text=RESTART_SEARCH_TEXT,
+                    blocks=restart_search_blocks(session_id),
+                    session_key=session_key,
+                    response_url_store=response_url_store,
                 )
             else:
                 post_slack_reply(client, build_restart_search_message(channel_id, thread_ts))
@@ -1002,8 +1095,16 @@ def _register_faceted_search_handlers(
             if pages is not None and len(pages.pages) > 1:
                 follow_up.extend(show_more_blocks(request_token, session_id))
             follow_up.extend(adjust_filters_blocks(request_token, session_id))
-            post_slack_ephemeral(
-                client, _ephemeral_dict(channel_id, user_id, ADJUST_FILTERS_TEXT, follow_up)
+            _post_search_reply(
+                client,
+                is_slash=True,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                user_id=user_id,
+                text=ADJUST_FILTERS_TEXT,
+                blocks=follow_up,
+                session_key=session_key,
+                response_url_store=response_url_store,
             )
             return
         post_slack_reply(
@@ -1019,18 +1120,33 @@ def _post_search_reply(
     thread_ts: str,
     user_id: str,
     text: str,
-) -> None:
+    blocks: Optional[List[dict]] = None,
+    session_key: str = "",
+    response_url_store: Optional[SlackResponseUrlStore] = None,
+) -> bool:
     """Send one search-flow message through the boundary its entry point requires.
 
     A slash-initiated search is visible to the person who ran it and to nobody else, so it never
     takes the in-channel path. Routing is decided from the entry point recorded when the modal was
     opened, not from which fields happen to be populated, so a message cannot become public because
     a thread timestamp was missing.
+
+    Returns whether the message was sent. The slash path can legitimately fail to send -- the
+    capability may have been spent or expired between the pre-search check and here -- and the
+    caller stops rather than reaching for another way out.
     """
     if is_slash:
-        post_slack_ephemeral(client, _ephemeral_dict(channel_id, user_id, text))
-        return
+        if response_url_store is None:
+            return False
+        reply_url = response_url_store.take(
+            user_id=user_id, channel_id=channel_id, session_key=session_key
+        )
+        if not reply_url:
+            return False
+        post_slack_response_url(reply_url, _response_message(text, blocks))
+        return True
     post_slack_reply(client, _reply_dict(channel_id, thread_ts, text))
+    return True
 
 
 def _slash_interaction_context(body: dict) -> Optional[tuple]:

@@ -13,6 +13,7 @@ tests -- so none of this touches a real Slack connection.
 
 import csv
 import json
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -47,6 +48,7 @@ from marketing_knowledge_agent.slack_interface import (
     ENTRY_MODE_SLASH_FACETED_ONLY,
     FACETED_SEARCH_STALE_CATALOG_MESSAGE,
     PAGINATION_EXPIRED_MESSAGE,
+    SLASH_SESSION_EXPIRED_MESSAGE,
     STALE_ENTRY_MODE_MESSAGE_MENTION,
     STALE_ENTRY_MODE_MESSAGE_SLASH,
     SlackConfig,
@@ -139,11 +141,17 @@ class FakeAck:
         self.calls.append(kwargs)
 
 
+# A reserved fake capability. Never a real URL: the point of these tests is that this string does
+# not escape into metadata, buttons, audit rows or anything a user can see, so it has to be
+# recognisable and worthless.
+FAKE_RESPONSE_URL = "https://hooks.slack.com/commands/TEST/SECRET_CAPABILITY"
+CAPABILITY_SECRET = "SECRET_CAPABILITY"
+
+
 class FakeSlackClient:
     def __init__(self):
         self.opened_views = []
         self.messages = []
-        self.ephemerals = []
 
     def views_open(self, trigger_id, view):
         self.opened_views.append({"trigger_id": trigger_id, "view": view})
@@ -151,8 +159,23 @@ class FakeSlackClient:
     def chat_postMessage(self, **kwargs):
         self.messages.append(kwargs)
 
-    def chat_postEphemeral(self, **kwargs):
-        self.ephemerals.append(kwargs)
+
+class ResponseRecorder:
+    """Captures what the slash flow sends, in place of the response_url boundary.
+
+    Patched over ``slack_interface.post_slack_response_url`` so a test sees the URL that was spent
+    and the message that went with it, without any HTTP.
+    """
+
+    def __init__(self):
+        self.sent = []
+
+    def __call__(self, response_url, message):
+        self.sent.append({"url": response_url, **message})
+
+    @property
+    def texts(self):
+        return [m.get("text") for m in self.sent]
 
 
 def _capturing_app_factory(container):
@@ -275,6 +298,7 @@ def _action_body(
             "is_ephemeral": False,
         },
         "channel": {"id": channel_id},
+        "response_url": "https://hooks.slack.com/actions/TEST/SECRET_CAPABILITY",
         "actions": [{
             "type": "button",
             "action_id": OPEN_SEARCH_MODAL_ACTION_ID,
@@ -1366,7 +1390,8 @@ def _slash_app(tmp_path, **kwargs):
     return _run_bot_and_get_app(tmp_path, entry_mode=SLASH_MODE, **kwargs)[0]
 
 
-def _command_body(*, user_id="U1", channel_id="C123", text="", trigger_id="TRIG1"):
+def _command_body(*, user_id="U1", channel_id="C123", text="", trigger_id="TRIG1",
+                  response_url=FAKE_RESPONSE_URL):
     """A slash-command payload in the flat shape Slack actually sends one."""
     return {
         "token": "verification",
@@ -1380,14 +1405,30 @@ def _command_body(*, user_id="U1", channel_id="C123", text="", trigger_id="TRIG1
         "text": text,
         "api_app_id": "A1",
         "is_enterprise_install": "false",
-        "response_url": "https://hooks.slack.com/commands/T1/1/x",
+        "response_url": response_url,
         "trigger_id": trigger_id,
     }
 
 
+@contextmanager
+def _capture_responses():
+    """Record what the slash flow sends, in place of the response_url boundary."""
+    import marketing_knowledge_agent.slack_interface as _si
+
+    recorder = ResponseRecorder()
+    original = _si.post_slack_response_url
+    _si.post_slack_response_url = recorder
+    try:
+        yield recorder
+    finally:
+        _si.post_slack_response_url = original
+
+
 def _run_command(app, **kwargs):
     ack, client = FakeAck(), FakeSlackClient()
-    app.commands[SLASH_COMMAND_NAME](ack=ack, body=_command_body(**kwargs), client=client)
+    with _capture_responses() as recorder:
+        app.commands[SLASH_COMMAND_NAME](ack=ack, body=_command_body(**kwargs), client=client)
+    client.responses = recorder
     return ack, client
 
 
@@ -1408,6 +1449,9 @@ def _ephemeral_action_body(*, user_id="U1", channel_id="C123", value=None, trigg
             "is_ephemeral": True,
         },
         "channel": {"id": channel_id},
+        # A real interaction payload carries its own response_url, separately budgeted from the
+        # command that started the session.
+        "response_url": "https://hooks.slack.com/actions/TEST/SECRET_CAPABILITY",
         "actions": [{"type": "button", "value": value if value is not None else json.dumps({})}],
     }
 
@@ -1419,17 +1463,16 @@ def _slash_private_metadata(app, *, user_id="U1", channel_id="C123"):
 
 
 def _slash_submit(app, *, state_values, user_id="U1", channel_id="C123", metadata=None):
+    resolved = metadata or _slash_private_metadata(app, user_id=user_id, channel_id=channel_id)
     ack, client = FakeAck(), FakeSlackClient()
-    app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
-        ack=ack,
-        body={"user": {"id": user_id}},
-        client=client,
-        view={
-            "private_metadata": metadata
-            or _slash_private_metadata(app, user_id=user_id, channel_id=channel_id),
-            "state": {"values": state_values},
-        },
-    )
+    with _capture_responses() as recorder:
+        app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
+            ack=ack,
+            body={"user": {"id": user_id}},
+            client=client,
+            view={"private_metadata": resolved, "state": {"values": state_values}},
+        )
+    client.responses = recorder
     return ack, client
 
 
@@ -1524,7 +1567,7 @@ def test_the_command_acks_and_opens_the_modal_without_an_intermediate_button(tmp
     assert client.opened_views[0]["trigger_id"] == "TRIG1"
     assert client.opened_views[0]["view"]["callback_id"] == FACETED_SEARCH_MODAL_CALLBACK_ID
     # No "點擊下方按鈕" hop, and nothing posted at all.
-    assert client.messages == [] and client.ephemerals == []
+    assert client.messages == [] and client.responses.sent == []
 
 
 def test_the_command_runs_no_search(tmp_path):
@@ -1580,7 +1623,7 @@ def test_a_restricted_name_typed_after_the_command_is_never_retained(tmp_path):
     assert len(store) == 0
     assert not audit.exists()
     assert SECRET_CUSTOMER not in json.dumps(client.opened_views, ensure_ascii=False)
-    assert client.messages == [] and client.ephemerals == []
+    assert client.messages == [] and client.responses.sent == []
 
 
 def test_the_command_works_from_a_dm_conversation_id(tmp_path):
@@ -1611,8 +1654,10 @@ def test_a_conversation_outside_an_explicit_slash_allowlist_is_refused_ephemeral
     _ack, client = _run_command(app, channel_id="C_OTHER")
 
     assert client.opened_views == []
-    assert client.ephemerals[-1]["user"] == "U1"
-    assert client.ephemerals[-1]["text"] == DENIED_CHANNEL_MESSAGE
+    # Answered through the command's own response_url, which is what makes the denial reachable in
+    # a conversation the bot is not a member of -- the case that went unanswered in Human UAT.
+    assert client.responses.texts == [DENIED_CHANNEL_MESSAGE]
+    assert client.responses.sent[-1]["url"] == FAKE_RESPONSE_URL
     assert client.messages == []
 
 
@@ -1725,13 +1770,13 @@ def test_a_slash_search_result_is_ephemeral_to_the_invoker(tmp_path):
 
     # Nothing at all goes to the channel.
     assert client.messages == []
-    assert client.ephemerals
-    result = client.ephemerals[0]
-    assert result["channel"] == "C123"
-    assert result["user"] == "U1"
+    assert client.responses.sent
+    result = client.responses.sent[0]
+    # Delivery is the invoker's own response_url. There is no channel or user field to get wrong,
+    # and no thread to attach to -- the capability already addresses the interaction it came from.
+    assert result["url"] == FAKE_RESPONSE_URL
     assert "大春煉皂" in result["text"]
-    # An ephemeral message has no thread to answer in, and inventing one would attach it elsewhere.
-    assert "thread_ts" not in result
+    assert "channel" not in result and "user" not in result and "thread_ts" not in result
 
 
 @pytest.mark.parametrize("channel_id", ["C0PUBLIC", "G0PRIVATE", "D0DIRECT"])
@@ -1743,8 +1788,10 @@ def test_ephemeral_routing_works_for_every_conversation_shape(tmp_path, channel_
     )
 
     assert client.messages == []
-    assert client.ephemerals[0]["channel"] == channel_id
-    assert client.ephemerals[0]["user"] == "U1"
+    # The conversation shape is irrelevant to delivery now: the response_url does the addressing,
+    # so a channel the bot was never added to is answered exactly like one it lives in.
+    assert client.responses.sent[0]["url"] == FAKE_RESPONSE_URL
+    assert client.responses.sent[0]["text"]
 
 
 def test_a_slash_submission_from_an_unauthorized_conversation_posts_nothing(tmp_path):
@@ -1758,7 +1805,7 @@ def test_a_slash_submission_from_an_unauthorized_conversation_posts_nothing(tmp_
     )
 
     assert ack.calls == [{}]
-    assert client.messages == [] and client.ephemerals == []
+    assert client.messages == [] and client.responses.sent == []
 
 
 def test_a_slash_submission_without_a_session_fails_closed(tmp_path):
@@ -1772,7 +1819,7 @@ def test_a_slash_submission_without_a_session_fails_closed(tmp_path):
     )
 
     assert ack.calls == [{}]
-    assert client.messages == [] and client.ephemerals == []
+    assert client.messages == [] and client.responses.sent == []
 
 
 def test_free_text_only_submission_is_refused_in_the_modal(tmp_path):
@@ -1782,7 +1829,7 @@ def test_free_text_only_submission_is_refused_in_the_modal(tmp_path):
 
     assert ack.calls[0]["response_action"] == "errors"
     assert "搜尋範圍" in ack.calls[0]["errors"][FREE_TEXT_BLOCK_ID]
-    assert client.messages == [] and client.ephemerals == []
+    assert client.messages == [] and client.responses.sent == []
 
 
 def test_all_years_is_never_recorded_as_a_year_in_the_audit_row(tmp_path):
@@ -1828,7 +1875,7 @@ def _multi_page_slash_app(tmp_path, **kwargs):
 
 
 def _show_more_button(client):
-    for message in reversed(client.ephemerals):
+    for message in reversed(client.responses.sent):
         for block in message.get("blocks") or []:
             for element in block.get("elements", []):
                 if element.get("action_id") == SHOW_MORE_ACTION_ID:
@@ -1838,11 +1885,13 @@ def _show_more_button(client):
 
 def _click_show_more(app, value, *, user_id="U1", channel_id="C123"):
     ack, client = FakeAck(), FakeSlackClient()
-    app.actions[SHOW_MORE_ACTION_ID](
-        ack=ack,
-        body=_ephemeral_action_body(user_id=user_id, channel_id=channel_id, value=value),
-        client=client,
-    )
+    with _capture_responses() as recorder:
+        app.actions[SHOW_MORE_ACTION_ID](
+            ack=ack,
+            body=_ephemeral_action_body(user_id=user_id, channel_id=channel_id, value=value),
+            client=client,
+        )
+    client.responses = recorder
     return ack, client
 
 
@@ -1852,8 +1901,7 @@ def test_page_one_is_ephemeral_and_offers_a_show_more_button(tmp_path):
     _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
 
     assert client.messages == []
-    first_page = client.ephemerals[0]
-    assert first_page["user"] == "U1"
+    first_page = client.responses.sent[0]
     # The page must invite the button, not a thread reply that could never reach this bot.
     assert "顯示更多" in first_page["text"]
     assert "@Marketing Knowledge Agent" not in first_page["text"]
@@ -1870,8 +1918,9 @@ def test_the_show_more_button_serves_the_next_page_without_re_searching(tmp_path
 
     _ack2, next_client = _click_show_more(app, button["value"])
 
-    page_two = next_client.ephemerals[-1]
-    assert page_two["user"] == "U1"
+    page_two = next_client.responses.sent[-1]
+    # Served through the button's own fresh capability, not the ageing command one.
+    assert page_two["url"] == "https://hooks.slack.com/actions/TEST/SECRET_CAPABILITY"
     assert next_client.messages == []
     assert "繼續顯示搜尋結果" in page_two["text"]
     # A continuation replays rendered text: no new search, so no new audit row.
@@ -1897,12 +1946,11 @@ def test_another_user_cannot_advance_someone_elses_pagination(tmp_path):
 
     _ack2, other = _click_show_more(app, button_value, user_id="U2")
 
-    assert other.ephemerals[-1]["text"] == PAGINATION_EXPIRED_MESSAGE
-    assert other.ephemerals[-1]["user"] == "U2"
+    assert other.responses.texts == [PAGINATION_EXPIRED_MESSAGE]
     assert other.messages == []
     # And the owner's own continuation was not consumed by the other user's click.
     _ack3, owner = _click_show_more(app, button_value, user_id="U1")
-    assert "繼續顯示搜尋結果" in owner.ephemerals[-1]["text"]
+    assert "繼續顯示搜尋結果" in owner.responses.sent[-1]["text"]
 
 
 def test_an_expired_continuation_answers_safely(tmp_path):
@@ -1913,7 +1961,7 @@ def test_an_expired_continuation_answers_safely(tmp_path):
 
     _ack2, expired = _click_show_more(app, button_value)
 
-    assert expired.ephemerals[-1]["text"] == PAGINATION_EXPIRED_MESSAGE
+    assert expired.responses.sent[-1]["text"] == PAGINATION_EXPIRED_MESSAGE
     assert expired.messages == []
 
 
@@ -1933,7 +1981,7 @@ def test_a_show_more_click_without_a_valid_request_token_serves_nothing(tmp_path
 
     _ack2, forged = _click_show_more(app, json.dumps(value))
 
-    assert forged.ephemerals[-1]["text"] == PAGINATION_EXPIRED_MESSAGE
+    assert forged.responses.sent[-1]["text"] == PAGINATION_EXPIRED_MESSAGE
     assert forged.messages == []
 
 
@@ -1950,7 +1998,7 @@ def test_a_show_more_click_without_a_session_does_nothing(tmp_path):
 
     _ack, client = _click_show_more(app, json.dumps({"request_token": "x" * 32}))
 
-    assert client.ephemerals == [] and client.messages == []
+    assert client.responses.sent == [] and client.messages == []
 
 
 # --------------------------------------------------------------------------------------
@@ -1959,7 +2007,7 @@ def test_a_show_more_click_without_a_session_does_nothing(tmp_path):
 
 
 def _adjust_button(client):
-    for message in reversed(client.ephemerals):
+    for message in reversed(client.responses.sent):
         for block in message.get("blocks") or []:
             for element in block.get("elements", []):
                 if element.get("action_id") == OPEN_SEARCH_MODAL_ACTION_ID:
@@ -1969,11 +2017,13 @@ def _adjust_button(client):
 
 def _reopen_slash(app, value, *, user_id="U1", channel_id="C123"):
     client = FakeSlackClient()
-    app.actions[OPEN_SEARCH_MODAL_ACTION_ID](
-        ack=FakeAck(),
-        body=_ephemeral_action_body(user_id=user_id, channel_id=channel_id, value=value),
-        client=client,
-    )
+    with _capture_responses() as recorder:
+        app.actions[OPEN_SEARCH_MODAL_ACTION_ID](
+            ack=FakeAck(),
+            body=_ephemeral_action_body(user_id=user_id, channel_id=channel_id, value=value),
+            client=client,
+        )
+    client.responses = recorder
     return client
 
 
@@ -2035,7 +2085,7 @@ def test_a_refused_slash_search_offers_a_blank_restart_and_stores_nothing(tmp_pa
 
     assert len(store) == 0
     assert client.messages == []
-    follow_up = client.ephemerals[-1]
+    follow_up = client.responses.sent[-1]
     assert SECRET_CUSTOMER not in json.dumps(follow_up, ensure_ascii=False)
     button = follow_up["blocks"][-1]["elements"][0]
     value = json.loads(button["value"])
@@ -2060,20 +2110,29 @@ def test_a_slash_result_keeps_its_clickable_approved_asset_title(tmp_path):
 
     _ack, client = _slash_submit(app, state_values=_state_values(year="2024"))
 
-    assert "大春煉皂" in client.ephemerals[0]["text"]
+    assert "大春煉皂" in client.responses.sent[0]["text"]
 
 
-def test_every_slash_message_is_posted_with_unfurling_disabled(tmp_path):
+def test_every_slash_message_goes_through_the_response_url_boundary(tmp_path):
+    """Unfurl suppression is now a property of the boundary, so this proves nothing bypasses it.
+
+    ``post_slack_response_url`` forces ``unfurl_links``/``unfurl_media`` false along with
+    ``response_type`` and ``replace_original``; that forcing is asserted directly in
+    ``test_slack_interface.py``. What matters here is that every message a search produces --
+    result page, action message, continuation -- actually leaves through that one function, and
+    that none of them reaches the channel.
+    """
     app = _multi_page_slash_app(tmp_path)
 
     _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
     _ack2, next_client = _click_show_more(app, _show_more_button(client)["value"])
 
-    posted = client.ephemerals + next_client.ephemerals
-    assert len(posted) >= 3
-    for message in posted:
-        assert message["unfurl_links"] is False
-        assert message["unfurl_media"] is False
+    sent = client.responses.sent + next_client.responses.sent
+    assert len(sent) >= 3
+    for message in sent:
+        assert message["url"].startswith("https://hooks.slack.com/")
+        assert "channel" not in message
+    assert client.messages == [] and next_client.messages == []
 
 
 # ======================================================================================
@@ -2214,9 +2273,11 @@ def _legacy_private_metadata(catalog_version, channel_id="C123", thread_ts="1"):
 
 def _click_open_modal(app, value, body=None):
     client = FakeSlackClient()
-    app.actions[OPEN_SEARCH_MODAL_ACTION_ID](
-        ack=FakeAck(), body=body or _action_body(value=value), client=client
-    )
+    with _capture_responses() as recorder:
+        app.actions[OPEN_SEARCH_MODAL_ACTION_ID](
+            ack=FakeAck(), body=body or _action_body(value=value), client=client
+        )
+    client.responses = recorder
     return client
 
 
@@ -2242,9 +2303,11 @@ def test_a_legacy_mention_button_cannot_open_a_modal_in_slash_mode(tmp_path, val
     assert client.messages == []
     # A courtesy pointer to the entry that exists now, visible only to the clicker and carrying
     # nothing else.
-    assert [m["text"] for m in client.ephemerals] == [STALE_ENTRY_MODE_MESSAGE_SLASH]
-    assert "/mka" in client.ephemerals[0]["text"]
-    assert client.ephemerals[0]["user"] == "U1"
+    assert [m["text"] for m in client.responses.sent] == [STALE_ENTRY_MODE_MESSAGE_SLASH]
+    assert "/mka" in client.responses.sent[0]["text"]
+    # Delivered through this click's own response_url, so it reaches the clicker wherever
+    # they are -- including a conversation the bot is not a member of.
+    assert client.responses.sent[0]["url"].startswith("https://hooks.slack.com/")
 
 
 def test_a_legacy_adjust_button_discloses_nothing_of_the_prior_request(tmp_path):
@@ -2262,7 +2325,7 @@ def test_a_legacy_adjust_button_discloses_nothing_of_the_prior_request(tmp_path)
 
     assert client.opened_views == []
     assert SLASH_SECRET_GOAL not in json.dumps(
-        client.ephemerals + client.messages, ensure_ascii=False
+        client.responses.sent + client.messages, ensure_ascii=False
     )
 
 
@@ -2278,18 +2341,19 @@ def test_a_legacy_modal_submitted_after_the_mode_switch_executes_nothing(tmp_pat
     audit_before = _audit_text(tmp_path / "audit.csv")
 
     ack, client = FakeAck(), FakeSlackClient()
-    app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
-        ack=ack,
-        body={"user": {"id": "U1"}},
-        client=client,
-        view={
-            "private_metadata": _legacy_private_metadata(catalog_version),
-            "state": {"values": _state_values(year="2024")},
-        },
-    )
+    with _capture_responses() as recorder:
+        app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
+            ack=ack,
+            body={"user": {"id": "U1"}},
+            client=client,
+            view={
+                "private_metadata": _legacy_private_metadata(catalog_version),
+                "state": {"values": _state_values(year="2024")},
+            },
+        )
 
     assert client.messages == []
-    assert client.ephemerals == []
+    assert recorder.sent == []
     # No search ran, so no search audit row was added.
     assert _audit_text(tmp_path / "audit.csv") == audit_before
     assert "slack_faceted_search" not in _audit_text(tmp_path / "audit.csv")
@@ -2336,8 +2400,8 @@ def test_a_valid_slash_submission_still_works_after_the_gate(tmp_path):
     _ack, client = _slash_submit(app, state_values=_state_values(year="2024"))
 
     assert client.messages == []
-    assert client.ephemerals
-    assert "大春煉皂" in client.ephemerals[0]["text"]
+    assert client.responses.sent
+    assert "大春煉皂" in client.responses.sent[0]["text"]
 
 
 def test_mention_mixed_interactions_are_unaffected_by_the_gate(tmp_path):
@@ -2348,19 +2412,20 @@ def test_mention_mixed_interactions_are_unaffected_by_the_gate(tmp_path):
     assert len(opened.opened_views) == 1
 
     ack, submitted = FakeAck(), FakeSlackClient()
-    app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
-        ack=ack,
-        body={"user": {"id": "U1"}},
-        client=submitted,
-        view={
-            "private_metadata": opened.opened_views[0]["view"]["private_metadata"],
-            "state": {"values": _state_values(year="2024")},
-        },
-    )
+    with _capture_responses() as recorder:
+        app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
+            ack=ack,
+            body={"user": {"id": "U1"}},
+            client=submitted,
+            view={
+                "private_metadata": opened.opened_views[0]["view"]["private_metadata"],
+                "state": {"values": _state_values(year="2024")},
+            },
+        )
 
-    # The legacy flow answers in-channel, as it always has.
+    # The legacy flow answers in-channel, as it always has -- and never through a response_url.
     assert len(submitted.messages) == 2
-    assert submitted.ephemerals == []
+    assert recorder.sent == []
 
 
 def test_a_slash_artifact_is_refused_in_mention_mixed_too(tmp_path):
@@ -2378,10 +2443,12 @@ def test_a_slash_artifact_is_refused_in_mention_mixed_too(tmp_path):
     # Codex R2 P3-1: the guidance has to name the entry this mode actually has. Telling the user
     # to type ``/mka`` here would send them to a command ``mention_mixed`` never registers, leaving
     # the advice as stale as the button that produced it.
-    assert [m["text"] for m in client.ephemerals] == [STALE_ENTRY_MODE_MESSAGE_MENTION]
-    assert "/mka" not in client.ephemerals[0]["text"]
-    assert "@Marketing Knowledge Agent" in client.ephemerals[0]["text"]
-    assert client.ephemerals[0]["user"] == "U1"
+    assert [m["text"] for m in client.responses.sent] == [STALE_ENTRY_MODE_MESSAGE_MENTION]
+    assert "/mka" not in client.responses.sent[0]["text"]
+    assert "@Marketing Knowledge Agent" in client.responses.sent[0]["text"]
+    # Delivered through this click's own response_url, so it reaches the clicker wherever
+    # they are -- including a conversation the bot is not a member of.
+    assert client.responses.sent[0]["url"].startswith("https://hooks.slack.com/")
 
 
 def test_a_stale_slash_modal_submitted_in_mention_mixed_is_refused_with_mode_correct_guidance(
@@ -2409,18 +2476,19 @@ def test_a_stale_slash_modal_submitted_in_mention_mixed_is_refused_with_mode_cor
     audit_before = _audit_text(tmp_path / "audit.csv")
 
     ack, client = FakeAck(), FakeSlackClient()
-    app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
-        ack=ack,
-        body={"user": {"id": "U1"}},
-        client=client,
-        view={
-            "private_metadata": stale_slash_metadata,
-            "state": {"values": _state_values(year="2024")},
-        },
-    )
+    with _capture_responses() as recorder:
+        app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
+            ack=ack,
+            body={"user": {"id": "U1"}},
+            client=client,
+            view={
+                "private_metadata": stale_slash_metadata,
+                "state": {"values": _state_values(year="2024")},
+            },
+        )
 
     # Refused, and nothing executed -- the security half is unchanged by this cleanup.
-    assert client.messages == [] and client.ephemerals == []
+    assert client.messages == [] and recorder.sent == []
     assert _audit_text(tmp_path / "audit.csv") == audit_before
     assert ack.calls == [
         {
@@ -2468,3 +2536,302 @@ def test_a_stale_show_more_button_is_refused_in_mention_mixed(tmp_path):
 
     mention, _tmp = _run_bot_and_get_app(tmp_path / "mention")
     assert SHOW_MORE_ACTION_ID not in mention.actions
+
+
+# ======================================================================================
+# Human UAT R1 -- slash delivery must not depend on bot membership
+# ======================================================================================
+
+
+def _capability_store(app_tmp_path=None):
+    from marketing_knowledge_agent.slack_response_urls import SlackResponseUrlStore
+
+    return SlackResponseUrlStore()
+
+
+def test_the_command_captures_its_capability_and_never_writes_it_into_the_modal(tmp_path):
+    """Routing test A. The capability is server-side; the modal carries only the lane id."""
+    app = _slash_app(tmp_path)
+
+    _ack, client = _run_command(app)
+
+    view = client.opened_views[0]["view"]
+    serialized = json.dumps(view, ensure_ascii=False)
+    assert CAPABILITY_SECRET not in serialized
+    assert "response_url" not in json.loads(view["private_metadata"])
+    assert "hooks.slack.com" not in serialized
+
+
+def test_a_command_without_a_usable_capability_opens_no_session(tmp_path):
+    """No reply path means no search. Opening the modal would let a user do real work for nothing.
+
+    Human UAT is the reason this is a refusal rather than a hope: the failure mode being prevented
+    is retrieval succeeding and the result having nowhere to go.
+    """
+    app = _slash_app(tmp_path)
+
+    for bad in ("", "https://evil.test/commands/T/1/x", "http://hooks.slack.com/x"):
+        _ack, client = _run_command(app, response_url=bad)
+        assert client.opened_views == [], bad
+        assert client.responses.sent == [], bad
+        assert client.messages == [], bad
+
+
+def test_command_trailing_secret_text_is_never_stored_or_sent(tmp_path):
+    """Routing test A, second half: the capability is captured, the text still is not."""
+    app = _slash_app(tmp_path)
+    audit = tmp_path / "audit.csv"
+
+    _ack, client = _run_command(app, text=SECRET_CUSTOMER)
+
+    assert SECRET_CUSTOMER not in json.dumps(client.opened_views, ensure_ascii=False)
+    assert SECRET_CUSTOMER not in json.dumps(client.responses.sent, ensure_ascii=False)
+    assert not audit.exists()
+
+
+def test_an_unrestricted_conversation_is_answered_without_chat_post_ephemeral(tmp_path):
+    """Routing test B -- the blocking Human UAT finding, stated as the fix.
+
+    ``slash_command_allowed_channel_ids`` is absent, so ``/mka`` is usable from any conversation.
+    The fake Slack client has no ``chat_postEphemeral`` at all any more, so a handler that reached
+    for it would raise rather than quietly regress.
+    """
+    app = _slash_app(tmp_path)
+
+    _ack, client = _slash_submit(
+        app, state_values=_state_values(year="2024"), channel_id="C_BOT_IS_NOT_A_MEMBER"
+    )
+
+    assert client.messages == []
+    assert client.responses.sent
+    assert all(m["url"] == FAKE_RESPONSE_URL for m in client.responses.sent)
+    assert not hasattr(client, "chat_postEphemeral")
+
+
+def test_a_denied_conversation_is_told_so_through_its_own_capability(tmp_path):
+    """Routing test C. This is precisely the path that went unanswered in live UAT."""
+    app = _slash_app(tmp_path, slash_allowed_channel_ids=["C123"])
+    audit = tmp_path / "audit.csv"
+
+    _ack, client = _run_command(app, channel_id="C_OUTSIDE")
+
+    assert client.responses.texts == [DENIED_CHANNEL_MESSAGE]
+    assert client.responses.sent[0]["url"] == FAKE_RESPONSE_URL
+    assert client.opened_views == []
+    assert client.messages == []
+    assert not audit.exists()
+
+
+def test_a_submission_whose_capability_is_gone_runs_no_search(tmp_path):
+    """Routing test D/E. The check happens before retrieval, not after it."""
+    app = _slash_app(tmp_path)
+    metadata = _slash_private_metadata(app)
+    session_id = json.loads(metadata)["session_id"]
+    audit_before = _audit_text(tmp_path / "audit.csv")
+
+    # Spend the capability down to nothing, the way five replies would.
+    store = _slash_response_url_store(app)
+    for _ in range(10):
+        store.take(user_id="U1", channel_id="C123", session_key=f"U1:{session_id}")
+
+    ack, client = _slash_submit(app, state_values=_state_values(year="2024"), metadata=metadata)
+
+    assert client.messages == [] and client.responses.sent == []
+    assert _audit_text(tmp_path / "audit.csv") == audit_before
+    assert ack.calls == [
+        {
+            "response_action": "errors",
+            "errors": {FREE_TEXT_BLOCK_ID: SLASH_SESSION_EXPIRED_MESSAGE},
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        {"user_id": "U2"},
+        {"channel_id": "C_OTHER"},
+    ],
+    ids=["wrong_user", "wrong_channel"],
+)
+def test_a_submission_from_the_wrong_context_cannot_borrow_the_capability(tmp_path, wrong):
+    """Routing test D. The capability is bound to who and where, not just to the session id."""
+    app = _slash_app(tmp_path)
+    metadata = json.loads(_slash_private_metadata(app))
+    channel_id = wrong.get("channel_id", "C123")
+    metadata["channel_id"] = channel_id
+    audit_before = _audit_text(tmp_path / "audit.csv")
+
+    ack, client = _slash_submit(
+        app,
+        state_values=_state_values(year="2024"),
+        user_id=wrong.get("user_id", "U1"),
+        metadata=json.dumps(metadata),
+    )
+
+    assert client.messages == [] and client.responses.sent == []
+    assert _audit_text(tmp_path / "audit.csv") == audit_before
+
+
+def test_a_search_spends_exactly_two_of_its_five_sends(tmp_path):
+    """Routing test E. Result page plus action message, inside Slack's documented budget."""
+    from marketing_knowledge_agent.slack_response_urls import MAX_USES
+
+    app = _slash_app(tmp_path)
+    metadata = _slash_private_metadata(app)
+    session_id = json.loads(metadata)["session_id"]
+    store = _slash_response_url_store(app)
+
+    _ack, client = _slash_submit(app, state_values=_state_values(year="2024"), metadata=metadata)
+
+    assert len(client.responses.sent) == 2
+    assert store.remaining_uses(
+        user_id="U1", channel_id="C123", session_key=f"U1:{session_id}"
+    ) == MAX_USES - 2
+
+
+def test_adjust_refreshes_the_capability_from_the_click(tmp_path):
+    """Routing test G. The next submission must not depend on the ageing command capability."""
+    app = _slash_app(tmp_path)
+    _ack, client = _slash_submit(app, state_values=_state_values(year="2024"))
+    button = _adjust_button(client)
+    session_id = json.loads(button["value"])["session_id"]
+    store = _slash_response_url_store(app)
+    assert store.remaining_uses(
+        user_id="U1", channel_id="C123", session_key=f"U1:{session_id}"
+    ) == 3
+
+    _reopen_slash(app, button["value"])
+
+    # Refreshed from the action payload: a full budget again, and the newer URL.
+    assert store.remaining_uses(
+        user_id="U1", channel_id="C123", session_key=f"U1:{session_id}"
+    ) == 5
+    assert store.take(
+        user_id="U1", channel_id="C123", session_key=f"U1:{session_id}"
+    ) == "https://hooks.slack.com/actions/TEST/SECRET_CAPABILITY"
+
+
+def test_restart_after_a_refusal_also_refreshes_the_capability(tmp_path):
+    """Routing test H, and the refused text still is not retained anywhere."""
+    store_tokens = SlackRequestTokenStore()
+    app = _slash_app(tmp_path, denylist_brands=[SECRET_CUSTOMER], request_token_store=store_tokens)
+    _ack, client = _slash_submit(
+        app, state_values=_state_values(year="2024", free_text=f"{SECRET_CUSTOMER} 案例")
+    )
+    button = client.responses.sent[-1]["blocks"][-1]["elements"][0]
+    session_id = json.loads(button["value"])["session_id"]
+    store = _slash_response_url_store(app)
+
+    reopened = _reopen_slash(app, button["value"])
+
+    assert store.remaining_uses(
+        user_id="U1", channel_id="C123", session_key=f"U1:{session_id}"
+    ) == 5
+    assert len(store_tokens) == 0
+    assert SECRET_CUSTOMER not in json.dumps(reopened.opened_views, ensure_ascii=False)
+
+
+def test_no_capability_ever_reaches_a_button_an_audit_row_or_the_user(tmp_path):
+    """Routing test J. The one thing a bearer capability must never do is travel."""
+    app = _multi_page_slash_app(tmp_path)
+
+    _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+    _ack2, more = _click_show_more(app, _show_more_button(client)["value"])
+    reopened = _reopen_slash(app, _adjust_button(client)["value"])
+
+    audit = _audit_text(tmp_path / "audit.csv")
+    assert CAPABILITY_SECRET not in audit
+    assert "hooks.slack.com" not in audit
+    for surface in (
+        [m.get("text", "") for m in client.responses.sent + more.responses.sent],
+        [m.get("blocks") for m in client.responses.sent + more.responses.sent],
+        reopened.opened_views,
+    ):
+        assert CAPABILITY_SECRET not in json.dumps(surface, ensure_ascii=False)
+
+
+def _slash_response_url_store(app):
+    """The store the registered handlers closed over."""
+    from marketing_knowledge_agent.slack_response_urls import default_response_url_store
+
+    return default_response_url_store()
+
+
+# ======================================================================================
+# Human UAT R1 -- result presentation
+# ======================================================================================
+
+
+def test_a_result_card_shows_the_brand_and_its_assets_and_nothing_else(tmp_path):
+    """Presentation matrix. Handle and the two category lines are gone from the card.
+
+    They were three lines of data-model detail between the brand name and the content the user
+    came for. What replaces them is nothing -- the assets simply start immediately.
+    """
+    app = _slash_app(tmp_path)
+
+    _ack, client = _slash_submit(app, state_values=_state_values(year="2024"))
+
+    result = client.responses.sent[0]["text"]
+    assert "Handle：" not in result
+    assert "Sales Category LV1：" not in result
+    assert "Sales Category LV2：" not in result
+    # Still a result: the brand, its asset type, and a clickable approved title.
+    assert "大春煉皂" in result
+    assert "文章" in result or "影片" in result or "Podcast" in result
+
+
+def test_the_applied_conditions_echo_the_new_wording(tmp_path):
+    """The surface answers in the words it asked the question in."""
+    app = _slash_app(tmp_path)
+
+    _ack, client = _slash_submit(
+        app, state_values=_state_values(lv2=["食品/飲料"], tags=["會員經營"])
+    )
+
+    conditions = client.responses.sent[0]["text"].splitlines()[0]
+    assert "已套用搜尋條件" in conditions
+    assert "品牌產業別" in conditions
+    assert "功能" in conditions
+    assert "Sales Category LV2" not in conditions
+    assert "內容相關標籤" not in conditions
+
+
+def test_the_slack_label_change_did_not_reach_the_field_registry():
+    """The CLI, ``explain-query`` and every non-Slack caller keep their own labels.
+
+    Renaming in ``FIELD_REGISTRY`` would have changed output this work package has no business
+    touching, so the Slack mapping is scoped to the Slack renderer.
+    """
+    from marketing_knowledge_agent.query_planning import FIELD_REGISTRY
+
+    assert FIELD_REGISTRY["sales_category_lv2"].output_label != "品牌產業別"
+    assert FIELD_REGISTRY["content_tags"].output_label != "功能"
+
+
+def test_hiding_the_handle_did_not_disable_conflicting_handle_protection(tmp_path):
+    """§18's actual risk, guarded directly.
+
+    Grouping drops a brand group outright when its records disagree on the handle -- that is what
+    stops two different merchants being merged under one name. Removing the three lines from the
+    card must not remove the data those rules read.
+    """
+    from marketing_knowledge_agent.slack_presentation import _presentation_entities
+
+    records = [
+        _metadata("同名品牌", "handle-a", "食品/飲料", ["會員經營"], 2024, source_row=1),
+        _metadata("同名品牌", "handle-b", "食品/飲料", ["會員經營"], 2024, source_row=2),
+    ]
+    documents = [
+        Document(id=f"doc-{i}", metadata=m, content=c)
+        for i, (m, c) in enumerate(records, start=1)
+    ]
+    db_path = tmp_path / "conflict_index.sqlite"
+    SQLiteIndex(db_path).rebuild(documents, chunk_documents(documents))
+    app = _slash_app(tmp_path, db_path=db_path)
+
+    _ack, client = _slash_submit(app, state_values=_state_values(year="2024"))
+
+    # The conflicting group is withheld rather than merged under one of the two handles.
+    assert "同名品牌" not in client.responses.sent[0]["text"]

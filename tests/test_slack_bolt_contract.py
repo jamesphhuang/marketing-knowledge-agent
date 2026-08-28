@@ -52,6 +52,7 @@ from marketing_knowledge_agent.slack_faceted_search import (
     SALES_CATEGORY_LV2_ACTION_ID,
     SALES_CATEGORY_LV2_BLOCK_ID,
 )
+import marketing_knowledge_agent.slack_interface as slack_interface_module
 from marketing_knowledge_agent.slack_interface import (
     ENTRY_MODE_SLASH_FACETED_ONLY,
     SlackConfig,
@@ -72,6 +73,9 @@ CONTENT_TAG_ROWS = [
     ["內容相關標籤", "內容相關標籤 擴充詞", None],
     ["會員經營", "會員回購", None],
 ]
+
+# A reserved fake capability. Never a real response_url.
+FAKE_RESPONSE_URL = "https://hooks.slack.com/commands/TEST/SECRET_CAPABILITY"
 
 
 def _metadata(brand, lv2, tags, year, row):
@@ -100,7 +104,9 @@ class _Recorder:
     def __init__(self):
         self.views_open = []
         self.post_message = []
-        self.post_ephemeral = []
+        # Slash-flow replies leave through the response_url webhook, not the Web API, so they are
+        # captured by patching the boundary rather than by the WebClient stub.
+        self.response_url_sends = []
 
 
 @pytest.fixture
@@ -133,14 +139,19 @@ def slack_api(monkeypatch):
             recorder.views_open.append(payload)
         elif api_method == "chat.postMessage":
             recorder.post_message.append(payload)
-        elif api_method == "chat.postEphemeral":
-            recorder.post_ephemeral.append(payload)
         else:
             # An unexpected call is a contract change, not something to swallow.
             raise AssertionError(f"unexpected Slack API call: {api_method}")
         return _response(self, api_method, {"ok": True})
 
     monkeypatch.setattr(WebClient, "api_call", _stub)
+
+    def _capture_response_url(response_url, message):
+        recorder.response_url_sends.append({"url": response_url, **message})
+
+    monkeypatch.setattr(
+        slack_interface_module, "post_slack_response_url", _capture_response_url
+    )
     return recorder
 
 
@@ -269,7 +280,7 @@ def _command_payload(*, user_id="U1", channel_id="D0DIRECT", text=""):
         "text": text,
         "api_app_id": "A1",
         "is_enterprise_install": "false",
-        "response_url": "https://hooks.slack.com/commands/T1/1/x",
+        "response_url": FAKE_RESPONSE_URL,
         "trigger_id": "TRIG-1",
     }
 
@@ -315,10 +326,10 @@ def test_real_bolt_gives_a_legacy_artifact_no_route_to_a_public_message(slash_bo
     assert response.status == 200
     assert slack_api.views_open == []
     assert slack_api.post_message == []
-    # Only a fixed pointer to the new entry, ephemeral to the clicker.
-    assert [m["user"] for m in slack_api.post_ephemeral] == ["U1"]
-    assert "/mka" in slack_api.post_ephemeral[-1]["text"]
-    slack_api.post_ephemeral.clear()
+    # Only a fixed pointer to the new entry, delivered through this click's own response_url.
+    assert "/mka" in slack_api.response_url_sends[-1]["text"]
+    assert slack_api.response_url_sends[-1]["url"].startswith("https://hooks.slack.com/")
+    slack_api.response_url_sends.clear()
 
     # And a modal that was already open when the mode changed, submitted afterwards.
     _dispatch(slash_bolt_app, _command_payload())
@@ -354,7 +365,7 @@ def test_real_bolt_gives_a_legacy_artifact_no_route_to_a_public_message(slash_bo
     )
 
     assert slack_api.post_message == []
-    assert slack_api.post_ephemeral == []
+    assert slack_api.response_url_sends == []
     body = json.loads(response.body)
     assert body["response_action"] == "errors"
     assert FREE_TEXT_BLOCK_ID in body["errors"]
@@ -392,6 +403,7 @@ def _action_payload(*, user_id="U1", channel_id="C123", thread_ts="100.1", value
             "is_ephemeral": False,
         },
         "channel": {"id": channel_id},
+        "response_url": "https://hooks.slack.com/actions/TEST/SECRET_CAPABILITY",
         "actions": [{
             "type": "button",
             "action_id": OPEN_SEARCH_MODAL_ACTION_ID,

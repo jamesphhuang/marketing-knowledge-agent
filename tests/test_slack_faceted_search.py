@@ -18,8 +18,12 @@ from marketing_knowledge_agent.slack_faceted_search import (
     FREE_TEXT_BLOCK_ID,
     INTERVIEW_YEARS_ACTION_ID,
     INTERVIEW_YEARS_BLOCK_ID,
+    ALL_YEARS_HINT,
     ALL_YEARS_OPTION_LABEL,
     ALL_YEARS_OPTION_VALUE,
+    CONTENT_TAGS_LABEL,
+    FREE_TEXT_LABEL,
+    SALES_CATEGORY_LV2_LABEL,
     MAX_BUTTON_VALUE_CHARS,
     MAX_STATIC_SELECT_OPTIONS,
     OPEN_SEARCH_MODAL_ACTION_ID,
@@ -385,7 +389,7 @@ def test_a_facet_over_the_100_option_limit_fails_closed_with_an_operator_error()
         build_facet_modal_view(over_limit, "C1", "1")
 
     message = str(exc_info.value)
-    assert "內容相關標籤" in message  # names the offending facet
+    assert CONTENT_TAGS_LABEL in message  # names the offending facet, in the wording users see
     assert str(MAX_STATIC_SELECT_OPTIONS) in message  # and the limit it crossed
     assert "external_select" in message  # and what to do about it
 
@@ -574,3 +578,86 @@ def test_parse_structured_search_request_refuses_a_malformed_year_value():
     """
     with pytest.raises(StructuredSearchValidationError, match="not-a-year"):
         parse_structured_search_request(_state_values(year="not-a-year"), "v1")
+
+
+# --------------------------------------------------------------------------------------
+# Human UAT R1 -- modal wording
+# --------------------------------------------------------------------------------------
+
+
+def _labels(view):
+    return {
+        block["block_id"]: block["label"]["text"]
+        for block in view["blocks"]
+        if block.get("type") == "input"
+    }
+
+
+def test_the_modal_uses_the_wording_human_uat_asked_for():
+    """Display strings only. The block ids beneath them are deliberately unchanged.
+
+    A marketer reading 「Sales Category LV2」 has to translate from the data model to answer it;
+    「品牌產業別」 is the question they were already asking.
+    """
+    labels = _labels(build_facet_modal_view(_catalog(), "C1", "1"))
+
+    assert labels[SALES_CATEGORY_LV2_BLOCK_ID] == "品牌產業別"
+    assert labels[CONTENT_TAGS_BLOCK_ID] == "你在找什麼功能？"
+    assert labels[FREE_TEXT_BLOCK_ID] == "你想找什麼內容或成果，請輸入關鍵字"
+    assert labels[INTERVIEW_YEARS_BLOCK_ID] == "採訪年份"
+
+
+def test_renaming_the_labels_did_not_rename_anything_underneath():
+    """The rename must not reach the payload keys, the request, or the index."""
+    view = build_facet_modal_view(_catalog(), "C1", "1")
+    block_ids = {b.get("block_id") for b in view["blocks"]}
+
+    assert block_ids == {
+        INTERVIEW_YEARS_BLOCK_ID,
+        SALES_CATEGORY_LV2_BLOCK_ID,
+        CONTENT_TAGS_BLOCK_ID,
+        FREE_TEXT_BLOCK_ID,
+    }
+    action_ids = {b["element"]["action_id"] for b in view["blocks"] if b.get("type") == "input"}
+    assert action_ids == {
+        INTERVIEW_YEARS_ACTION_ID,
+        SALES_CATEGORY_LV2_ACTION_ID,
+        CONTENT_TAGS_ACTION_ID,
+        FREE_TEXT_ACTION_ID,
+    }
+    # And a submission still decodes into the same typed fields.
+    request = parse_structured_search_request(
+        _state_values(year="2024", lv2=["食品/飲料"], tags=["會員經營"]), "v1"
+    )
+    assert request.sales_category_lv2 == ("食品/飲料",)
+    assert request.content_tags == ("會員經營",)
+
+
+def test_the_year_field_warns_before_submission_that_all_years_narrows_nothing():
+    """UAT found the rule right but the feedback late.
+
+    A user who reopened 調整條件, set the year back to 「全部年份」 and cleared the other fields
+    only learned the search was invalid after submitting it. The rule is unchanged; this puts the
+    condition on the field itself, through Block Kit's own hint surface.
+    """
+    year_block = _year_block(build_facet_modal_view(_catalog(), "C1", "1"))
+
+    assert year_block["hint"]["type"] == "plain_text"
+    hint = year_block["hint"]["text"]
+    assert hint == ALL_YEARS_HINT
+    assert ALL_YEARS_OPTION_LABEL in hint
+    assert "品牌產業別" in hint
+
+
+def test_only_the_year_field_carries_a_hint():
+    """The other fields are unconditional, so a hint there would be noise."""
+    view = build_facet_modal_view(_catalog(), "C1", "1")
+    hinted = [b["block_id"] for b in view["blocks"] if "hint" in b]
+
+    assert hinted == [INTERVIEW_YEARS_BLOCK_ID]
+
+
+def test_the_modal_still_validates_against_slacks_own_view_model_with_the_hint():
+    from slack_sdk.models.views import View
+
+    View(**build_facet_modal_view(_catalog(), "C1", "1")).validate_json()

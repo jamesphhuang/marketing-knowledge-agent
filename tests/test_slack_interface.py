@@ -44,8 +44,8 @@ from marketing_knowledge_agent.slack_interface import (
     format_slack_reply,
     handle_slack_event,
     load_slack_config,
-    post_slack_ephemeral,
     post_slack_reply,
+    post_slack_response_url,
     run_slack_bot,
 )
 
@@ -621,13 +621,9 @@ def _audit_rows(path):
 class FakeSlackClient:
     def __init__(self):
         self.messages = []
-        self.ephemerals = []
 
     def chat_postMessage(self, **reply):
         self.messages.append(reply)
-
-    def chat_postEphemeral(self, **reply):
-        self.ephemerals.append(reply)
 
 
 def _agentic_answer(
@@ -795,24 +791,40 @@ def test_pagination_continuation_is_posted_with_unfurling_disabled(tmp_path):
     assert sent["unfurl_links"] is False and sent["unfurl_media"] is False
 
 
-# Every Slack Web API method that puts a message in front of a user. Each one must go through a
-# boundary that forces unfurling off, or it reopens the finding for its own class of message.
+# Every outbound mechanism that puts a message in front of a Slack user. Each must go through a
+# boundary that forces the message's properties, or it reopens the finding for its own class of
+# message.
 POSTING_APIS = {
+    # The constructor call, not the bare name: the name also appears in the import and in the
+    # boundary's own docstring, and neither of those sends anything.
     "chat_postMessage": "def post_slack_reply(",
-    "chat_postEphemeral": "def post_slack_ephemeral(",
+    "WebhookClient(": "def post_slack_response_url(",
 }
-# Posting methods this surface does not use at all. Listed by name so that adding one is a
-# deliberate act that fails this test until it is given a boundary, rather than a quiet new leak.
-FORBIDDEN_POSTING_APIS = ("chat_update", "chat_postMessage_scheduled", "files_upload")
+# Mechanisms this surface does not use at all.
+#
+# ``chat_postEphemeral`` is on this list rather than in POSTING_APIS because Human UAT proved it
+# cannot do the job: Slack answers it with ``channel_not_found`` unless the app is a member of the
+# target conversation, so a ``/mka`` from anywhere else went unanswered. It was removed rather than
+# left unused, because an unused posting helper is exactly what a future handler reaches for.
+FORBIDDEN_POSTING_APIS = (
+    "chat_postEphemeral",
+    "chat_update",
+    "chat_postMessage_scheduled",
+    "files_upload",
+)
+# Raw HTTP would reach a response_url without passing the boundary that forces ephemeral,
+# non-replacing, non-unfurling delivery. Checked across the Slack modules only -- ``llm.py``
+# legitimately makes its own provider calls and is not part of this surface.
+FORBIDDEN_RAW_HTTP = ("requests.post", "urlopen", "http.client")
 
 
 def test_no_slack_message_is_posted_outside_a_boundary():
-    """The guarantee is centralization: one call site per posting API, inside its own boundary.
+    """The guarantee is centralization: one call site per mechanism, inside its own boundary.
 
-    A second call site anywhere would post with Slack's default unfurling and reopen the finding,
-    so this is asserted over the source rather than left to each new handler to remember. Both
-    posting APIs this surface uses are covered: ``chat.postMessage`` for channel-visible messages
-    and ``chat.postEphemeral`` for the invoker-only slash flow.
+    A second call site anywhere would send with Slack's defaults and reopen the finding, so this is
+    asserted over the source rather than left to each new handler to remember. Both mechanisms this
+    surface uses are covered: ``chat.postMessage`` for channel-visible messages, and the
+    ``response_url`` webhook for everything the slash flow says.
     """
     source = Path("src/marketing_knowledge_agent/slack_interface.py").read_text(encoding="utf-8")
     for api, boundary_def in POSTING_APIS.items():
@@ -829,7 +841,7 @@ def test_no_slack_message_is_posted_outside_a_boundary():
 
 
 def test_no_alternative_posting_api_is_reachable_from_this_surface():
-    """``say``/``respond``/``chat_update`` would each bypass both boundaries entirely."""
+    """Anything that could answer Slack without passing a boundary, including the removed one."""
     for module in Path("src/marketing_knowledge_agent").glob("*.py"):
         text = module.read_text(encoding="utf-8")
         for api in FORBIDDEN_POSTING_APIS:
@@ -838,22 +850,44 @@ def test_no_alternative_posting_api_is_reachable_from_this_surface():
             assert f".{helper}" not in text, f"{module.name}: {helper}"
 
 
-def test_the_ephemeral_boundary_forces_unfurling_off_and_a_caller_cannot_override_it():
-    client = FakeSlackClient()
+def test_no_raw_http_can_reach_a_response_url():
+    """A hand-rolled POST would bypass the boundary that makes a slash reply ephemeral."""
+    for module in Path("src/marketing_knowledge_agent").glob("slack_*.py"):
+        text = module.read_text(encoding="utf-8")
+        for api in FORBIDDEN_RAW_HTTP:
+            assert api not in text, f"{module.name}: {api}"
 
-    post_slack_ephemeral(
-        client,
+
+def test_the_response_url_boundary_forces_its_four_properties(monkeypatch):
+    """A caller cannot make a slash reply public, destructive, or link-unfurling."""
+    sent = {}
+
+    class _FakeWebhookClient:
+        def __init__(self, url):
+            sent["url"] = url
+
+        def send(self, **kwargs):
+            sent["kwargs"] = kwargs
+
+    import slack_sdk.webhook as webhook_module
+
+    monkeypatch.setattr(webhook_module, "WebhookClient", _FakeWebhookClient)
+
+    post_slack_response_url(
+        "https://hooks.slack.com/commands/TEST/SECRET_CAPABILITY",
         {
-            "channel": "C123",
-            "user": "U1",
             "text": "https://example.invalid/article",
+            # Everything a call site might try to assert for itself:
+            "response_type": "in_channel",
+            "replace_original": True,
             "unfurl_links": True,
             "unfurl_media": True,
         },
     )
 
-    sent = client.ephemerals[-1]
-    assert sent["unfurl_links"] is False
-    assert sent["unfurl_media"] is False
-    assert sent["user"] == "U1"
-    assert sent["text"] == "https://example.invalid/article"
+    assert sent["url"] == "https://hooks.slack.com/commands/TEST/SECRET_CAPABILITY"
+    assert sent["kwargs"]["response_type"] == "ephemeral"
+    assert sent["kwargs"]["replace_original"] is False
+    assert sent["kwargs"]["unfurl_links"] is False
+    assert sent["kwargs"]["unfurl_media"] is False
+    assert sent["kwargs"]["text"] == "https://example.invalid/article"
