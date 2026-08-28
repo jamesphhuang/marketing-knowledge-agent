@@ -38,6 +38,9 @@ from marketing_knowledge_agent.models import Document, DocumentMetadata
 from marketing_knowledge_agent.search_facets import build_facet_catalog
 from marketing_knowledge_agent.search_taxonomy import load_search_taxonomy
 from marketing_knowledge_agent.slack_faceted_search import (
+    ALL_YEARS_OPTION_VALUE,
+    SHOW_MORE_ACTION_ID,
+    SLASH_COMMAND_NAME,
     CONTENT_TAGS_ACTION_ID,
     CONTENT_TAGS_BLOCK_ID,
     FACETED_SEARCH_MODAL_CALLBACK_ID,
@@ -50,6 +53,7 @@ from marketing_knowledge_agent.slack_faceted_search import (
     SALES_CATEGORY_LV2_BLOCK_ID,
 )
 from marketing_knowledge_agent.slack_interface import (
+    ENTRY_MODE_SLASH_FACETED_ONLY,
     SlackConfig,
     _register_faceted_search_handlers,
 )
@@ -182,6 +186,122 @@ def bolt_app(tmp_path, slack_api):
     return app
 
 
+@pytest.fixture
+def slash_bolt_app(tmp_path, slack_api):
+    """The same wiring as ``bolt_app``, registered in ``slash_faceted_only`` mode.
+
+    ``process_before_response=True`` is set here for a reason worth stating, because it reflects
+    real production behaviour rather than hiding it. A slash-command listener acknowledges first --
+    it must, Slack allows three seconds -- and in bolt's default mode ``dispatch`` returns the
+    moment ``ack()`` fires, leaving the rest of the handler running on a worker thread. Asserting
+    on ``views.open`` straight after dispatch would therefore be a race that passes or fails on
+    timing. This mode runs the same registered listener through the same dispatcher synchronously,
+    so what the test observes is the handler's real behaviour rather than how fast a thread ran.
+    """
+    documents = [
+        Document(id=f"doc-{i}", metadata=_metadata(b, lv2, t, y, i), content=b)
+        for i, (b, lv2, t, y) in enumerate(
+            [("莉朵花藝", "居家生活相關", ["會員經營"], 2025),
+             ("大春煉皂", "食品/飲料", ["會員經營"], 2024)],
+            start=1,
+        )
+    ]
+    db_path = tmp_path / "content_index.sqlite"
+    SQLiteIndex(db_path).rebuild(documents, chunk_documents(documents))
+
+    workbook = tmp_path / "taxonomy.xlsx"
+    sha256 = write_taxonomy_workbook(
+        workbook, sales_rows=SALES_CATEGORY_ROWS, tag_rows=CONTENT_TAG_ROWS
+    )
+    taxonomy = load_search_taxonomy(workbook_path=workbook, expected_sha256=sha256)
+
+    denylist = tmp_path / "restricted_customers.json"
+    denylist.write_text(json.dumps([]), encoding="utf-8")
+    catalog = build_facet_catalog(db_path, taxonomy, restricted_customers_path=denylist)
+
+    app = App(
+        token="xoxb-fake-not-a-real-token",
+        signing_secret="fake-signing-secret",
+        token_verification_enabled=False,
+        request_verification_enabled=False,
+        ssl_check_enabled=False,
+        url_verification_enabled=False,
+        process_before_response=True,
+    )
+    _register_faceted_search_handlers(
+        app,
+        config=SlackConfig(
+            allowed_channel_ids=["C123"],
+            enable_faceted_search=True,
+            search_entry_mode=ENTRY_MODE_SLASH_FACETED_ONLY,
+        ),
+        taxonomy=taxonomy,
+        facet_catalog=catalog,
+        db_path=db_path,
+        restricted_customers_path=denylist,
+        audit_log_path=tmp_path / "audit.csv",
+        pagination_store=SlackPaginationStore(),
+        request_token_store=SlackRequestTokenStore(),
+    )
+    return app
+
+
+def _command_payload(*, user_id="U1", channel_id="D0DIRECT", text=""):
+    """The flat, form-decoded body Slack sends for a slash command."""
+    return {
+        "token": "verification",
+        "team_id": "T1",
+        "team_domain": "acme",
+        "channel_id": channel_id,
+        "channel_name": "directmessage",
+        "user_id": user_id,
+        "user_name": "someone",
+        "command": SLASH_COMMAND_NAME,
+        "text": text,
+        "api_app_id": "A1",
+        "is_enterprise_install": "false",
+        "response_url": "https://hooks.slack.com/commands/T1/1/x",
+        "trigger_id": "TRIG-1",
+    }
+
+
+def test_real_bolt_routes_the_slash_command_straight_to_views_open(slash_bolt_app, slack_api):
+    """``/mka`` must reach ``views.open`` through bolt's own dispatcher, with nothing posted.
+
+    Also pins the ordering the 3-second deadline requires: bolt only produces a response once the
+    listener has called ``ack()``, so a 200 here means the acknowledgement happened, and the
+    ``views.open`` below means the work did too.
+    """
+    response = _dispatch(slash_bolt_app, _command_payload())
+
+    assert response.status == 200
+    assert len(slack_api.views_open) == 1
+    view = slack_api.views_open[-1]["view"]
+    assert view["callback_id"] == FACETED_SEARCH_MODAL_CALLBACK_ID
+    assert slack_api.post_message == []
+
+
+def test_the_slash_modal_is_accepted_by_slack_sdks_own_view_model(slash_bolt_app, slack_api):
+    _dispatch(slash_bolt_app, _command_payload())
+
+    view_payload = slack_api.views_open[-1]["view"]
+    View(**view_payload).validate_json()  # raises if the view is malformed
+    year_block = next(
+        b for b in view_payload["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID
+    )
+    assert year_block["element"]["type"] == "static_select"
+    assert year_block["element"]["initial_option"]["value"] == ALL_YEARS_OPTION_VALUE
+
+
+def test_real_bolt_ignores_slash_command_trailing_text(slash_bolt_app, slack_api):
+    _dispatch(slash_bolt_app, _command_payload(text="SECRET_CUSTOMER_NAME 的成長案例"))
+
+    assert slack_api.post_message == []
+    assert "SECRET_CUSTOMER_NAME" not in json.dumps(
+        slack_api.views_open[-1], ensure_ascii=False
+    )
+
+
 def _dispatch(app, body):
     # Socket Mode delivers the already-parsed interactivity payload, so the dict is the body.
     return app.dispatch(BoltRequest(body=body, mode="socket_mode"))
@@ -221,7 +341,7 @@ def _open_modal(app, slack_api, channel_id="C123", thread_ts="100.1", **kwargs):
     return response, slack_api.views_open[-1]["view"] if slack_api.views_open else None
 
 
-def _submission_body(view_payload, *, years=(), lv2=(), tags=(), free_text=None):
+def _submission_body(view_payload, *, year=ALL_YEARS_OPTION_VALUE, lv2=(), tags=(), free_text=None):
     def _options(values):
         return {"selected_options": [{"value": value} for value in values]}
 
@@ -234,7 +354,9 @@ def _submission_body(view_payload, *, years=(), lv2=(), tags=(), free_text=None)
             "callback_id": FACETED_SEARCH_MODAL_CALLBACK_ID,
             "private_metadata": view_payload["private_metadata"],
             "state": {"values": {
-                INTERVIEW_YEARS_BLOCK_ID: {INTERVIEW_YEARS_ACTION_ID: _options(years)},
+                INTERVIEW_YEARS_BLOCK_ID: {
+                    INTERVIEW_YEARS_ACTION_ID: {"selected_option": {"value": year}}
+                },
                 SALES_CATEGORY_LV2_BLOCK_ID: {SALES_CATEGORY_LV2_ACTION_ID: _options(lv2)},
                 CONTENT_TAGS_BLOCK_ID: {CONTENT_TAGS_ACTION_ID: _options(tags)},
                 FREE_TEXT_BLOCK_ID: {FREE_TEXT_ACTION_ID: {"value": free_text}},
@@ -270,9 +392,15 @@ def test_every_handler_argument_name_is_injectable_by_bolt():
         def view(self, name):
             return lambda fn: registered.setdefault(("view", name), fn) or fn
 
+        def command(self, name):
+            return lambda fn: registered.setdefault(("command", name), fn) or fn
+
+    # The slash mode registers strictly more handlers, so probing it covers both modes.
     _register_faceted_search_handlers(
         _ProbeApp(),
-        config=SlackConfig(allowed_channel_ids=["C1"]),
+        config=SlackConfig(
+            allowed_channel_ids=["C1"], search_entry_mode=ENTRY_MODE_SLASH_FACETED_ONLY
+        ),
         taxonomy=None,
         facet_catalog=None,
         db_path="unused",
@@ -282,6 +410,7 @@ def test_every_handler_argument_name_is_injectable_by_bolt():
         request_token_store=None,
     )
     assert registered, "no handlers registered"
+    assert ("command", SLASH_COMMAND_NAME) in registered, "the slash command was not registered"
     for (kind, name), handler in registered.items():
         declared = inspect.getfullargspec(handler).args
         unsupported = [arg for arg in declared if arg not in injectable]
@@ -308,7 +437,7 @@ def test_real_bolt_routes_a_view_submission_to_a_governed_search(bolt_app, slack
     _response, view_payload = _open_modal(bolt_app, slack_api)
     slack_api.post_message.clear()
 
-    response = _dispatch(bolt_app, _submission_body(view_payload, years=["2024"]))
+    response = _dispatch(bolt_app, _submission_body(view_payload, year="2024"))
 
     assert response.status == 200
     # One result message plus the "調整條件" follow-up, and never a second search.
@@ -342,7 +471,7 @@ def test_real_bolt_routes_distinct_user_contexts_to_the_right_prefill(bolt_app, 
     slack_api.post_message.clear()
 
     secret = "U1 私人搜尋 competitor-churn"
-    _dispatch(bolt_app, _submission_body(view_payload, years=["2024"], free_text=secret))
+    _dispatch(bolt_app, _submission_body(view_payload, year="2024", free_text=secret))
     adjust_button = slack_api.post_message[-1]["blocks"][-1]["elements"][0]
     assert "request_token" in json.loads(adjust_button["value"])
 
@@ -367,7 +496,9 @@ def test_real_bolt_routes_distinct_user_contexts_to_the_right_prefill(bolt_app, 
     years_block = next(
         b for b in other_view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID
     )
-    assert "initial_options" not in years_block["element"]
+    # Single-select always carries an initial option, so "nothing of U1's search" means the field
+    # is back on the 「全部年份」 default rather than on U1's chosen year.
+    assert years_block["element"]["initial_option"]["value"] == ALL_YEARS_OPTION_VALUE
 
 
 def test_real_slack_sdk_serialization_carries_the_unfurl_suppression(bolt_app, slack_api):
@@ -380,7 +511,7 @@ def test_real_slack_sdk_serialization_carries_the_unfurl_suppression(bolt_app, s
     _response, view_payload = _open_modal(bolt_app, slack_api)
     slack_api.post_message.clear()
 
-    _dispatch(bolt_app, _submission_body(view_payload, years=["2024"]))
+    _dispatch(bolt_app, _submission_body(view_payload, year="2024"))
 
     assert len(slack_api.post_message) == 2
     for payload in slack_api.post_message:

@@ -64,6 +64,25 @@ STRUCTURED_SEARCH_SOURCE = "slack_modal"
 # one is refused rather than truncated: silently shortening a user's stated goal would run a
 # different search than the one they asked for, without saying so.
 FREE_TEXT_MAX_LENGTH = 1000
+# The wire schema of a Slack modal submission, versioned independently of the facet catalog's own
+# eligibility rules because the two change for different reasons. It is folded into
+# ``FacetCatalog.catalog_version`` (see :mod:`search_facets`), so a modal opened under an older
+# schema is refused as stale rather than decoded under the newer one.
+#
+# v1: interview year was a ``multi_static_select`` carrying ``selected_options``.
+# v2: interview year is a single ``static_select`` carrying ``selected_option``, whose 「全部年份」
+#     sentinel means *no* year constraint at all. This is exactly the change that must invalidate
+#     in-flight modals: a v1 payload decoded by v2 finds no ``selected_option``, which reads as
+#     「全部年份」 -- silently widening a year-restricted search to every year, with nothing visible
+#     to say so.
+STRUCTURED_REQUEST_SCHEMA_VERSION = "2"
+# A search must be narrowed by at least one structured facet. Free text alone is a relevance goal,
+# not a scope: it cannot bound what the search may return, so it is never sufficient on its own.
+# 「全部年份」 is a UI sentinel for "no year constraint" and therefore narrows nothing either --
+# see ``interview_years`` below, which is empty in exactly that case.
+NARROWING_CONSTRAINT_REQUIRED_MESSAGE = (
+    "請至少選擇一個搜尋範圍，例如特定年份、Sales Category LV2 或內容相關標籤。"
+)
 
 
 class StructuredSearchValidationError(ValueError):
@@ -163,13 +182,11 @@ def validate_structured_search_request(
     if request.catalog_version != catalog.catalog_version:
         raise StaleFacetCatalogError("搜尋條件已過期，請重新開啟「條件搜尋」視窗。")
 
-    if not (
-        request.interview_years
-        or request.sales_category_lv2
-        or request.content_tags
-        or request.free_text.strip()
-    ):
-        raise StructuredSearchValidationError("請至少填寫一個搜尋條件。")
+    # Free text is deliberately absent from this test. A search scoped only by a relevance goal is
+    # an open-ended sweep of the whole corpus dressed as a query, and 「全部年份」 leaves
+    # ``interview_years`` empty precisely so that choosing it cannot smuggle one in.
+    if not (request.interview_years or request.sales_category_lv2 or request.content_tags):
+        raise StructuredSearchValidationError(NARROWING_CONSTRAINT_REQUIRED_MESSAGE)
 
     if len(request.free_text) > FREE_TEXT_MAX_LENGTH:
         raise StructuredSearchValidationError(

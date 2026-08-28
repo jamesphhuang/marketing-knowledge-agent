@@ -22,6 +22,11 @@ from marketing_knowledge_agent.indexing import SQLiteIndex
 from marketing_knowledge_agent.models import Document, DocumentMetadata
 from marketing_knowledge_agent.search_taxonomy import SearchTaxonomyError
 from marketing_knowledge_agent.slack_faceted_search import (
+    ALL_YEARS_OPTION_VALUE,
+    APP_MENTION_GUIDANCE_MESSAGE,
+    ENTRYPOINT_SLASH_COMMAND,
+    SHOW_MORE_ACTION_ID,
+    SLASH_COMMAND_NAME,
     CONTENT_TAGS_ACTION_ID,
     CONTENT_TAGS_BLOCK_ID,
     FACETED_SEARCH_MODAL_CALLBACK_ID,
@@ -35,10 +40,14 @@ from marketing_knowledge_agent.slack_faceted_search import (
 )
 from marketing_knowledge_agent.slack_interface import (
     APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE,
+    DENIED_CHANNEL_MESSAGE,
+    ENTRY_MODE_MENTION_MIXED,
+    ENTRY_MODE_SLASH_FACETED_ONLY,
     FACETED_SEARCH_STALE_CATALOG_MESSAGE,
     PAGINATION_EXPIRED_MESSAGE,
     SlackConfig,
     SlackInterfaceError,
+    _slash_session_key,
     handle_slack_event,
     load_slack_config,
     run_slack_bot,
@@ -72,10 +81,18 @@ class FakeApp:
         self.events = {}
         self.actions = {}
         self.views = {}
+        self.commands = {}
 
     def event(self, name):
         def register(fn):
             self.events[name] = fn
+            return fn
+
+        return register
+
+    def command(self, name):
+        def register(fn):
+            self.commands[name] = fn
             return fn
 
         return register
@@ -117,12 +134,16 @@ class FakeSlackClient:
     def __init__(self):
         self.opened_views = []
         self.messages = []
+        self.ephemerals = []
 
     def views_open(self, trigger_id, view):
         self.opened_views.append({"trigger_id": trigger_id, "view": view})
 
     def chat_postMessage(self, **kwargs):
         self.messages.append(kwargs)
+
+    def chat_postEphemeral(self, **kwargs):
+        self.ephemerals.append(kwargs)
 
 
 def _capturing_app_factory(container):
@@ -205,8 +226,14 @@ def _write_slack_config(
     sha256=None,
     enable=True,
     enable_approved_asset_urls=None,
+    entry_mode=None,
+    slash_allowed_channel_ids=None,
 ):
     config = {"allowed_channel_ids": ["C123"], "enable_faceted_search": enable}
+    if entry_mode is not None:
+        config["slack_search_entry_mode"] = entry_mode
+    if slash_allowed_channel_ids is not None:
+        config["slash_command_allowed_channel_ids"] = slash_allowed_channel_ids
     if workbook_path is not None:
         config["search_taxonomy_workbook"] = str(workbook_path)
     if sha256 is not None:
@@ -549,7 +576,7 @@ def test_flag_disabled_still_starts_without_a_denylist_file(tmp_path):
 
 def _run_bot_and_get_app(
     tmp_path, db_path=None, denylist_brands=(), enable_approved_asset_urls=None,
-    request_token_store=None,
+    request_token_store=None, entry_mode=None, slash_allowed_channel_ids=None,
 ):
     db_path = db_path or _build_index(tmp_path)
     workbook_path, sha256 = _write_taxonomy(tmp_path)
@@ -558,6 +585,8 @@ def _run_bot_and_get_app(
         workbook_path=workbook_path,
         sha256=sha256,
         enable_approved_asset_urls=enable_approved_asset_urls,
+        entry_mode=entry_mode,
+        slash_allowed_channel_ids=slash_allowed_channel_ids,
     )
     container = {}
     if request_token_store is not None:
@@ -630,7 +659,7 @@ def test_adjust_button_prefills_the_reopened_modal_via_its_request_token(tmp_pat
         client=submit_client,
         view={
             "private_metadata": _private_metadata(app),
-            "state": {"values": _state_values(years=["2024"], free_text="會員回購")},
+            "state": {"values": _state_values(year="2024", free_text="會員回購")},
         },
     )
 
@@ -647,7 +676,7 @@ def test_adjust_button_prefills_the_reopened_modal_via_its_request_token(tmp_pat
 
     view = reopen_client.opened_views[0]["view"]
     year_block = next(b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID)
-    assert {opt["value"] for opt in year_block["element"]["initial_options"]} == {"2024"}
+    assert year_block["element"]["initial_option"]["value"] == "2024"
     free_text_block = next(b for b in view["blocks"] if b["block_id"] == FREE_TEXT_BLOCK_ID)
     assert free_text_block["element"]["initial_value"] == "會員回購"
 
@@ -667,7 +696,7 @@ def test_an_expired_request_token_reopens_an_empty_modal_rather_than_guessing(tm
 
     view = client.opened_views[0]["view"]
     year_block = next(b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID)
-    assert "initial_options" not in year_block["element"]
+    assert year_block["element"]["initial_option"]["value"] == ALL_YEARS_OPTION_VALUE
     free_text_block = next(b for b in view["blocks"] if b["block_id"] == FREE_TEXT_BLOCK_ID)
     assert "initial_value" not in free_text_block["element"]
 
@@ -677,12 +706,16 @@ def test_an_expired_request_token_reopens_an_empty_modal_rather_than_guessing(tm
 # --------------------------------------------------------------------------------------
 
 
-def _state_values(years=None, lv2=None, tags=None, free_text=None):
+def _state_values(year=ALL_YEARS_OPTION_VALUE, lv2=None, tags=None, free_text=None):
+    """A submission payload in the v2 wire shape: the year field is a single ``static_select``."""
+
     def _options(values):
         return {"selected_options": [{"value": v} for v in values]} if values else {"selected_options": []}
 
     return {
-        INTERVIEW_YEARS_BLOCK_ID: {INTERVIEW_YEARS_ACTION_ID: _options(years)},
+        INTERVIEW_YEARS_BLOCK_ID: {
+            INTERVIEW_YEARS_ACTION_ID: {"selected_option": {"value": year} if year is not None else None}
+        },
         SALES_CATEGORY_LV2_BLOCK_ID: {SALES_CATEGORY_LV2_ACTION_ID: _options(lv2)},
         CONTENT_TAGS_BLOCK_ID: {CONTENT_TAGS_ACTION_ID: _options(tags)},
         FREE_TEXT_BLOCK_ID: {FREE_TEXT_ACTION_ID: {"value": free_text}},
@@ -711,7 +744,7 @@ def test_submission_from_a_disallowed_channel_is_refused(tmp_path):
         "private_metadata": json.dumps(
             {"channel_id": "C_NOT_ALLOWED", "thread_ts": "1", "catalog_version": "whatever"}
         ),
-        "state": {"values": _state_values(years=["2024"])},
+        "state": {"values": _state_values(year="2024")},
     }
 
     handler(ack=ack, body={"user": {"id": "U1"}}, client=client, view=view)
@@ -728,7 +761,7 @@ def test_submission_with_a_stale_catalog_version_is_refused(tmp_path):
         "private_metadata": json.dumps(
             {"channel_id": "C123", "thread_ts": "1", "catalog_version": "stale"}
         ),
-        "state": {"values": _state_values(years=["2024"])},
+        "state": {"values": _state_values(year="2024")},
     }
 
     handler(ack=ack, body={"user": {"id": "U1"}}, client=client, view=view)
@@ -762,7 +795,7 @@ def test_valid_submission_runs_exactly_one_search_and_posts_result_plus_adjust_b
     metadata = _private_metadata(app)
     view = {
         "private_metadata": metadata,
-        "state": {"values": _state_values(years=["2024"])},
+        "state": {"values": _state_values(year="2024")},
     }
 
     handler(ack=ack, body={"user": {"id": "U1"}}, client=client, view=view)
@@ -865,7 +898,7 @@ def test_restricted_free_text_never_reaches_the_faceted_search_audit_row(tmp_pat
     app, tmp_path_ = _run_bot_and_get_app(tmp_path, denylist_brands=[secret])
 
     _ack, client = _submit(
-        app, state_values=_state_values(years=["2024"], free_text=f"{secret} 的成長案例")
+        app, state_values=_state_values(year="2024", free_text=f"{secret} 的成長案例")
     )
 
     audit_text = (tmp_path_ / "audit.csv").read_text(encoding="utf-8")
@@ -886,7 +919,7 @@ def test_a_non_restricted_search_still_records_its_facets_in_the_audit_row(tmp_p
     """The audit row is skipped only on refusal -- an ordinary search is still attributable."""
     app, tmp_path_ = _run_bot_and_get_app(tmp_path)
 
-    _submit(app, state_values=_state_values(years=["2024"], free_text="會員回購"))
+    _submit(app, state_values=_state_values(year="2024", free_text="會員回購"))
 
     rows = list(csv.reader((tmp_path_ / "audit.csv").open(encoding="utf-8", newline="")))
     row = next(row for row in rows[1:] if row[1] == "slack_faceted_search")
@@ -904,7 +937,7 @@ def test_approved_asset_urls_are_applied_when_enabled(tmp_path, monkeypatch):
     )
     app, _tmp_path = _run_bot_and_get_app(tmp_path, enable_approved_asset_urls=True)
 
-    _submit(app, state_values=_state_values(years=["2024"]))
+    _submit(app, state_values=_state_values(year="2024"))
 
     assert len(applied) == 1
 
@@ -917,7 +950,7 @@ def test_approved_asset_urls_are_not_applied_when_disabled(tmp_path, monkeypatch
     )
     app, _tmp_path = _run_bot_and_get_app(tmp_path, enable_approved_asset_urls=False)
 
-    _submit(app, state_values=_state_values(years=["2024"]))
+    _submit(app, state_values=_state_values(year="2024"))
 
     assert applied == []
 
@@ -931,7 +964,7 @@ def test_approved_asset_url_overlay_unavailable_is_audited_without_aborting_the_
     )
     app, tmp_path_ = _run_bot_and_get_app(tmp_path, enable_approved_asset_urls=True)
 
-    _ack, client = _submit(app, state_values=_state_values(years=["2024"]))
+    _ack, client = _submit(app, state_values=_state_values(year="2024"))
 
     rows = list(csv.reader((tmp_path_ / "audit.csv").open(encoding="utf-8", newline="")))
     events = [row[1] for row in rows[1:]]
@@ -954,7 +987,7 @@ def test_approved_asset_urls_are_skipped_on_a_denylist_refusal(tmp_path, monkeyp
         tmp_path, denylist_brands=[secret], enable_approved_asset_urls=True
     )
 
-    _submit(app, state_values=_state_values(years=["2024"], free_text=f"{secret} 案例"))
+    _submit(app, state_values=_state_values(year="2024", free_text=f"{secret} 案例"))
 
     assert applied == []
 
@@ -1063,12 +1096,22 @@ def _reopen(app, button_value, *, user_id, channel_id="C123", thread_ts="1"):
 
 
 def _modal_prefill(view):
-    """Everything the reopened modal would show the clicker, as one comparable structure."""
+    """Everything the reopened modal would show the clicker, as one comparable structure.
+
+    The year field is single-select and always carries an ``initial_option``, so 「全部年份」 --
+    which is "no year chosen" -- is normalised to the same empty list the multi-selects use when
+    nothing is selected. That keeps "this clicker sees none of the owner's filters" a single
+    comparison across all three fields.
+    """
     blocks = {b.get("block_id"): b for b in view["blocks"]}
     selected = {}
-    for block_id in (INTERVIEW_YEARS_BLOCK_ID, SALES_CATEGORY_LV2_BLOCK_ID, CONTENT_TAGS_BLOCK_ID):
+    for block_id in (SALES_CATEGORY_LV2_BLOCK_ID, CONTENT_TAGS_BLOCK_ID):
         element = blocks[block_id]["element"]
         selected[block_id] = [o["value"] for o in element.get("initial_options", [])]
+    year_value = blocks[INTERVIEW_YEARS_BLOCK_ID]["element"]["initial_option"]["value"]
+    selected[INTERVIEW_YEARS_BLOCK_ID] = (
+        [] if year_value == ALL_YEARS_OPTION_VALUE else [year_value]
+    )
     selected[FREE_TEXT_BLOCK_ID] = blocks[FREE_TEXT_BLOCK_ID]["element"].get("initial_value", "")
     return selected
 
@@ -1080,7 +1123,7 @@ def test_the_owner_can_reopen_their_own_prefilled_search(tmp_path):
     """Case A. The feature must still work for the person it belongs to."""
     app, _tmp = _run_bot_and_get_app(tmp_path)
     _client, button = _submit_and_get_adjust_button(
-        app, state_values=_state_values(years=["2024"], free_text=SECRET_GOAL), user_id="U1"
+        app, state_values=_state_values(year="2024", free_text=SECRET_GOAL), user_id="U1"
     )
 
     reopened = _reopen(app, button["value"], user_id="U1")
@@ -1100,7 +1143,7 @@ def test_a_different_user_clicking_the_same_button_sees_nothing_of_the_owners_se
     """
     app, _tmp = _run_bot_and_get_app(tmp_path)
     _client, button = _submit_and_get_adjust_button(
-        app, state_values=_state_values(years=["2024"], free_text=SECRET_GOAL), user_id="U1"
+        app, state_values=_state_values(year="2024", free_text=SECRET_GOAL), user_id="U1"
     )
 
     reopened = _reopen(app, button["value"], user_id="U2")
@@ -1113,11 +1156,11 @@ def test_a_different_user_clicking_the_same_button_sees_nothing_of_the_owners_se
     assert prefill[FREE_TEXT_BLOCK_ID] == ""
     # Nothing of U1's search may appear anywhere in the payload U2 receives.
     assert SECRET_GOAL not in json.dumps(view, ensure_ascii=False)
-    assert "2024" not in json.dumps(
-        [b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID][0]
-        .get("element", {})
-        .get("initial_options", []),
-        ensure_ascii=False,
+    assert (
+        [b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID][0]["element"][
+            "initial_option"
+        ]["value"]
+        == ALL_YEARS_OPTION_VALUE
     )
 
 
@@ -1125,7 +1168,7 @@ def test_the_owner_in_a_different_channel_cannot_retrieve_the_request(tmp_path):
     """Case C. Same person, different conversation, different audience."""
     app, _tmp = _run_bot_and_get_app(tmp_path)
     _client, button = _submit_and_get_adjust_button(
-        app, state_values=_state_values(years=["2024"], free_text=SECRET_GOAL), user_id="U1"
+        app, state_values=_state_values(year="2024", free_text=SECRET_GOAL), user_id="U1"
     )
 
     # C_OTHER is not allowlisted, so nothing opens at all -- the stronger of the two failures.
@@ -1137,7 +1180,7 @@ def test_the_owner_in_a_different_thread_cannot_retrieve_the_request(tmp_path):
     """Case D. Same person, same channel, a thread the search was never run in."""
     app, _tmp = _run_bot_and_get_app(tmp_path)
     _client, button = _submit_and_get_adjust_button(
-        app, state_values=_state_values(years=["2024"], free_text=SECRET_GOAL), user_id="U1"
+        app, state_values=_state_values(year="2024", free_text=SECRET_GOAL), user_id="U1"
     )
 
     reopened = _reopen(app, button["value"], user_id="U1", thread_ts="999.9")
@@ -1175,7 +1218,7 @@ def test_a_denylist_refusal_stores_no_request_and_offers_no_prefill_button(tmp_p
     )
 
     client, button = _submit_and_get_adjust_button(
-        app, state_values=_state_values(years=["2024"], free_text=f"{secret} 的成長案例")
+        app, state_values=_state_values(year="2024", free_text=f"{secret} 的成長案例")
     )
 
     # Nothing retained, and no token to reopen with.
@@ -1217,7 +1260,7 @@ def test_faceted_result_and_adjust_button_are_posted_without_unfurling(tmp_path)
     """B and D: the structured result page, and the "調整條件" follow-up that accompanies it."""
     app, _tmp_path = _run_bot_and_get_app(tmp_path)
 
-    _ack, client = _submit(app, state_values=_state_values(years=["2024"]))
+    _ack, client = _submit(app, state_values=_state_values(year="2024"))
 
     assert len(client.messages) == 2
     for message in client.messages:
@@ -1242,7 +1285,7 @@ def test_faceted_result_still_carries_its_clickable_asset_titles(tmp_path, monke
     )
     app, _tmp_path = _run_bot_and_get_app(tmp_path, enable_approved_asset_urls=True)
 
-    _ack, client = _submit(app, state_values=_state_values(years=["2024"]))
+    _ack, client = _submit(app, state_values=_state_values(year="2024"))
 
     result = client.messages[0]
     _assert_no_unfurl(result)
@@ -1256,7 +1299,7 @@ def test_restart_search_message_after_a_refusal_is_posted_without_unfurling(tmp_
     app, _tmp_path = _run_bot_and_get_app(tmp_path, denylist_brands=[secret])
 
     _ack, client = _submit(
-        app, state_values=_state_values(years=["2024"], free_text=f"{secret} 案例")
+        app, state_values=_state_values(year="2024", free_text=f"{secret} 案例")
     )
 
     assert len(client.messages) == 2
@@ -1279,7 +1322,7 @@ def test_stale_catalog_message_is_posted_without_unfurling(tmp_path):
             "private_metadata": json.dumps(
                 {"channel_id": "C123", "thread_ts": "1", "catalog_version": "stale"}
             ),
-            "state": {"values": _state_values(years=["2024"])},
+            "state": {"values": _state_values(year="2024")},
         },
     )
 
@@ -1300,3 +1343,725 @@ def test_the_faceted_trigger_reply_is_posted_without_unfurling(tmp_path):
     assert client.messages
     _assert_no_unfurl(client.messages[0])
     assert client.messages[0]["blocks"][-1]["block_id"] == "open_faceted_search_actions"
+
+
+# ======================================================================================
+# /mka slash-command entry mode
+# ======================================================================================
+
+SLASH_MODE = "slash_faceted_only"
+SECRET_CUSTOMER = "SECRET_CUSTOMER_NAME"
+
+
+def _slash_app(tmp_path, **kwargs):
+    return _run_bot_and_get_app(tmp_path, entry_mode=SLASH_MODE, **kwargs)[0]
+
+
+def _command_body(*, user_id="U1", channel_id="C123", text="", trigger_id="TRIG1"):
+    """A slash-command payload in the flat shape Slack actually sends one."""
+    return {
+        "token": "verification",
+        "team_id": "T1",
+        "team_domain": "acme",
+        "channel_id": channel_id,
+        "channel_name": "general",
+        "user_id": user_id,
+        "user_name": "someone",
+        "command": SLASH_COMMAND_NAME,
+        "text": text,
+        "api_app_id": "A1",
+        "is_enterprise_install": "false",
+        "response_url": "https://hooks.slack.com/commands/T1/1/x",
+        "trigger_id": trigger_id,
+    }
+
+
+def _run_command(app, **kwargs):
+    ack, client = FakeAck(), FakeSlackClient()
+    app.commands[SLASH_COMMAND_NAME](ack=ack, body=_command_body(**kwargs), client=client)
+    return ack, client
+
+
+def _ephemeral_action_body(*, user_id="U1", channel_id="C123", value=None, trigger_id="T2"):
+    """A block_actions payload for a button inside an *ephemeral* message.
+
+    Slack sends no ``thread_ts`` for one -- an ephemeral message is not a threaded reply -- which
+    is exactly why the slash flow cannot reuse the mention flow's context derivation.
+    """
+    return {
+        "type": "block_actions",
+        "trigger_id": trigger_id,
+        "user": {"id": user_id},
+        "container": {
+            "type": "message",
+            "channel_id": channel_id,
+            "message_ts": "999.1",
+            "is_ephemeral": True,
+        },
+        "channel": {"id": channel_id},
+        "actions": [{"type": "button", "value": value if value is not None else json.dumps({})}],
+    }
+
+
+def _slash_private_metadata(app, *, user_id="U1", channel_id="C123"):
+    """Open a real modal through the command handler and take its metadata verbatim."""
+    _ack, client = _run_command(app, user_id=user_id, channel_id=channel_id)
+    return client.opened_views[-1]["view"]["private_metadata"]
+
+
+def _slash_submit(app, *, state_values, user_id="U1", channel_id="C123", metadata=None):
+    ack, client = FakeAck(), FakeSlackClient()
+    app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
+        ack=ack,
+        body={"user": {"id": user_id}},
+        client=client,
+        view={
+            "private_metadata": metadata
+            or _slash_private_metadata(app, user_id=user_id, channel_id=channel_id),
+            "state": {"values": state_values},
+        },
+    )
+    return ack, client
+
+
+# --------------------------------------------------------------------------------------
+# A. entry mode configuration
+# --------------------------------------------------------------------------------------
+
+
+def test_config_without_an_entry_mode_defaults_to_todays_behaviour(tmp_path):
+    """Merging this code cannot activate anything: the new mode has to be asked for by name."""
+    path = tmp_path / "slack_config.json"
+    path.write_text(json.dumps({"allowed_channel_ids": ["C1"]}), encoding="utf-8")
+
+    config = load_slack_config(path)
+
+    assert config.search_entry_mode == ENTRY_MODE_MENTION_MIXED
+    assert config.slash_command_allowed_channel_ids is None
+
+
+def test_an_unrecognised_entry_mode_is_refused_rather_than_defaulted(tmp_path):
+    """A typo must not silently leave app-mention search alive on a deployment that switched it off."""
+    path = tmp_path / "slack_config.json"
+    path.write_text(
+        json.dumps({"allowed_channel_ids": ["C1"], "slack_search_entry_mode": "slash_only"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(SlackInterfaceError, match="slack_search_entry_mode"):
+        load_slack_config(path)
+
+
+def test_slash_mode_without_faceted_search_enabled_is_refused(tmp_path):
+    """The modal is the only search entry in this mode, so disabling it means no search at all."""
+    path = tmp_path / "slack_config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "allowed_channel_ids": ["C1"],
+                "slack_search_entry_mode": ENTRY_MODE_SLASH_FACETED_ONLY,
+                "enable_faceted_search": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SlackInterfaceError, match="enable_faceted_search"):
+        load_slack_config(path)
+
+
+def test_an_explicitly_empty_slash_allowlist_is_refused(tmp_path):
+    """``[]`` reads as both "everywhere" and "nowhere"; neither may be chosen silently."""
+    path = tmp_path / "slack_config.json"
+    path.write_text(
+        json.dumps({"allowed_channel_ids": ["C1"], "slash_command_allowed_channel_ids": []}),
+        encoding="utf-8",
+    )
+    with pytest.raises(SlackInterfaceError, match="slash_command_allowed_channel_ids"):
+        load_slack_config(path)
+
+
+def test_a_populated_slash_allowlist_is_kept(tmp_path):
+    path = tmp_path / "slack_config.json"
+    path.write_text(
+        json.dumps(
+            {"allowed_channel_ids": ["C1"], "slash_command_allowed_channel_ids": [" D9 ", "C2"]}
+        ),
+        encoding="utf-8",
+    )
+    assert load_slack_config(path).slash_command_allowed_channel_ids == ["D9", "C2"]
+
+
+def test_the_slash_command_is_registered_only_in_slash_mode(tmp_path):
+    default_app, _tmp = _run_bot_and_get_app(tmp_path)
+    assert SLASH_COMMAND_NAME not in default_app.commands
+    assert SHOW_MORE_ACTION_ID not in default_app.actions
+
+    slash_app = _slash_app(tmp_path / "slash")
+    assert SLASH_COMMAND_NAME in slash_app.commands
+    assert SHOW_MORE_ACTION_ID in slash_app.actions
+
+
+# --------------------------------------------------------------------------------------
+# B. /mka opens the modal directly, and its trailing text is not input
+# --------------------------------------------------------------------------------------
+
+
+def test_the_command_acks_and_opens_the_modal_without_an_intermediate_button(tmp_path):
+    app = _slash_app(tmp_path)
+
+    ack, client = _run_command(app)
+
+    assert ack.calls == [{}]
+    assert len(client.opened_views) == 1
+    assert client.opened_views[0]["trigger_id"] == "TRIG1"
+    assert client.opened_views[0]["view"]["callback_id"] == FACETED_SEARCH_MODAL_CALLBACK_ID
+    # No "點擊下方按鈕" hop, and nothing posted at all.
+    assert client.messages == [] and client.ephemerals == []
+
+
+def test_the_command_runs_no_search(tmp_path):
+    """Opening a modal is not a query: no retrieval, and no audit row of any kind."""
+    app = _slash_app(tmp_path)
+    audit = tmp_path / "audit.csv"
+
+    _run_command(app, text="幫我找寵物案例")
+
+    assert not audit.exists()
+
+
+@pytest.mark.parametrize(
+    "text", ["", "搜尋", "SHOPLINE", "幫我找寵物案例", SECRET_CUSTOMER, "   "]
+)
+def test_command_trailing_text_is_ignored_entirely(tmp_path, text):
+    """Every one of these must produce the *same* blank, default modal.
+
+    Stated as an equality against the no-text modal rather than as "the text is absent": the
+    modal's own chrome legitimately contains words like 「搜尋」, so a substring check would either
+    miss a real prefill or fail on the submit button. Two views that are identical apart from their
+    session id cannot differ in what they carry over from the command.
+    """
+    app = _slash_app(tmp_path)
+
+    _ack, baseline_client = _run_command(app, text="")
+    _ack2, client = _run_command(app, text=text)
+
+    def _normalised(view):
+        view = json.loads(json.dumps(view, ensure_ascii=False))
+        metadata = json.loads(view["private_metadata"])
+        assert metadata["session_id"]  # present, and the only thing allowed to differ
+        metadata["session_id"] = "<session>"
+        view["private_metadata"] = json.dumps(metadata, ensure_ascii=False)
+        return view
+
+    view = client.opened_views[0]["view"]
+    assert _normalised(view) == _normalised(baseline_client.opened_views[0]["view"])
+    year_block = next(b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID)
+    assert year_block["element"]["initial_option"]["value"] == ALL_YEARS_OPTION_VALUE
+    free_text_block = next(b for b in view["blocks"] if b["block_id"] == FREE_TEXT_BLOCK_ID)
+    assert "initial_value" not in free_text_block["element"]
+
+
+def test_a_restricted_name_typed_after_the_command_is_never_retained(tmp_path):
+    """Nothing retrieves on it, nothing stores it, nothing echoes it back."""
+    store = SlackRequestTokenStore()
+    app = _slash_app(tmp_path, request_token_store=store, denylist_brands=[SECRET_CUSTOMER])
+    audit = tmp_path / "audit.csv"
+
+    _ack, client = _run_command(app, text=SECRET_CUSTOMER)
+
+    assert len(store) == 0
+    assert not audit.exists()
+    assert SECRET_CUSTOMER not in json.dumps(client.opened_views, ensure_ascii=False)
+    assert client.messages == [] and client.ephemerals == []
+
+
+def test_the_command_works_from_a_dm_conversation_id(tmp_path):
+    """The product goal: a workspace member can run /mka anywhere, including a DM."""
+    app = _slash_app(tmp_path)
+
+    _ack, client = _run_command(app, channel_id="D0PRIVATE")
+
+    metadata = json.loads(client.opened_views[0]["view"]["private_metadata"])
+    assert metadata["channel_id"] == "D0PRIVATE"
+    assert metadata["entrypoint"] == ENTRYPOINT_SLASH_COMMAND
+    assert metadata["session_id"]
+
+
+def test_each_invocation_gets_its_own_session(tmp_path):
+    """Two searches by the same person must not share a continuation lane."""
+    app = _slash_app(tmp_path)
+
+    first = json.loads(_slash_private_metadata(app))["session_id"]
+    second = json.loads(_slash_private_metadata(app))["session_id"]
+
+    assert first and second and first != second
+
+
+def test_a_conversation_outside_an_explicit_slash_allowlist_is_refused_ephemerally(tmp_path):
+    app = _slash_app(tmp_path, slash_allowed_channel_ids=["C123"])
+
+    _ack, client = _run_command(app, channel_id="C_OTHER")
+
+    assert client.opened_views == []
+    assert client.ephemerals[-1]["user"] == "U1"
+    assert client.ephemerals[-1]["text"] == DENIED_CHANNEL_MESSAGE
+    assert client.messages == []
+
+
+def test_an_incomplete_command_payload_fails_closed(tmp_path):
+    app = _slash_app(tmp_path)
+    for missing in ("user_id", "channel_id", "trigger_id"):
+        body = _command_body()
+        body[missing] = ""
+        ack, client = FakeAck(), FakeSlackClient()
+        app.commands[SLASH_COMMAND_NAME](ack=ack, body=body, client=client)
+        assert ack.calls == [{}], missing
+        assert client.opened_views == [], missing
+
+
+# --------------------------------------------------------------------------------------
+# C. app-mention migration
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "搜尋", "條件搜尋", "顯示更多", "大春煉皂的成長案例", SECRET_CUSTOMER],
+)
+def test_every_app_mention_gets_guidance_and_never_a_search(tmp_path, text):
+    def fake_ask(question, **kwargs):
+        raise AssertionError("app_mention must not retrieve in slash_faceted_only mode")
+
+    audit = tmp_path / "audit.csv"
+    reply = handle_slack_event(
+        {"text": f"<@BOT> {text}", "channel": "C123", "user": "U1", "ts": "100.1"},
+        config=SlackConfig(
+            allowed_channel_ids=["C123"], search_entry_mode=ENTRY_MODE_SLASH_FACETED_ONLY
+        ),
+        ask_fn=fake_ask,
+        audit_log_path=audit,
+        faceted_search_enabled=True,
+    )
+
+    assert reply["text"] == APP_MENTION_GUIDANCE_MESSAGE
+    assert SLASH_COMMAND_NAME in reply["text"]
+    # Guidance, not a search: no button to open, and nothing written down.
+    assert "blocks" not in reply
+    assert not audit.exists()
+
+
+def test_a_restricted_name_in_a_mention_is_not_retrieved_audited_stored_or_echoed(tmp_path):
+    """The migration regression, stated as the disclosure it prevents."""
+    store = SlackRequestTokenStore()
+    audit = tmp_path / "audit.csv"
+
+    reply = handle_slack_event(
+        {"text": f"<@BOT> {SECRET_CUSTOMER}", "channel": "C123", "user": "U1", "ts": "100.1"},
+        config=SlackConfig(
+            allowed_channel_ids=["C123"], search_entry_mode=ENTRY_MODE_SLASH_FACETED_ONLY
+        ),
+        ask_fn=lambda *a, **k: pytest.fail("no retrieval may happen"),
+        audit_log_path=audit,
+        faceted_search_enabled=True,
+    )
+
+    assert SECRET_CUSTOMER not in json.dumps(reply, ensure_ascii=False)
+    assert not audit.exists()
+    assert len(store) == 0
+
+
+def test_mention_pagination_is_retired_in_slash_mode(tmp_path):
+    """「顯示更多」 as a thread reply must no longer resume anything."""
+    store = SlackPaginationStore()
+    store.start(("C123", "100.1"), ["page one", "page two"])
+
+    reply = handle_slack_event(
+        {"text": "<@BOT> 顯示更多", "channel": "C123", "user": "U1", "ts": "100.1"},
+        config=SlackConfig(
+            allowed_channel_ids=["C123"], search_entry_mode=ENTRY_MODE_SLASH_FACETED_ONLY
+        ),
+        audit_log_path=tmp_path / "audit.csv",
+        pagination_store=store,
+        faceted_search_enabled=True,
+    )
+
+    assert reply["text"] == APP_MENTION_GUIDANCE_MESSAGE
+    assert "page two" not in reply["text"]
+    # The stored continuation is left untouched rather than consumed by a mention.
+    assert store.next_page(("C123", "100.1")) == "page two"
+
+
+def test_the_default_mode_still_searches_on_a_mention(tmp_path):
+    """The other half of the contract: nothing changes unless the mode is selected."""
+    calls = []
+    reply = handle_slack_event(
+        {"text": "<@BOT> 大春煉皂", "channel": "C123", "user": "U1", "ts": "1"},
+        config=SlackConfig(allowed_channel_ids=["C123"]),
+        ask_fn=lambda question, **kwargs: calls.append(question) or _minimal_answer(),
+        audit_log_path=tmp_path / "audit.csv",
+    )
+
+    assert calls == ["大春煉皂"]
+    assert reply["text"] != APP_MENTION_GUIDANCE_MESSAGE
+
+
+# --------------------------------------------------------------------------------------
+# F. result visibility: invoker only
+# --------------------------------------------------------------------------------------
+
+
+def test_a_slash_search_result_is_ephemeral_to_the_invoker(tmp_path):
+    app = _slash_app(tmp_path)
+
+    _ack, client = _slash_submit(app, state_values=_state_values(year="2024"))
+
+    # Nothing at all goes to the channel.
+    assert client.messages == []
+    assert client.ephemerals
+    result = client.ephemerals[0]
+    assert result["channel"] == "C123"
+    assert result["user"] == "U1"
+    assert "大春煉皂" in result["text"]
+    # An ephemeral message has no thread to answer in, and inventing one would attach it elsewhere.
+    assert "thread_ts" not in result
+
+
+@pytest.mark.parametrize("channel_id", ["C0PUBLIC", "G0PRIVATE", "D0DIRECT"])
+def test_ephemeral_routing_works_for_every_conversation_shape(tmp_path, channel_id):
+    app = _slash_app(tmp_path / channel_id)
+
+    _ack, client = _slash_submit(
+        app, state_values=_state_values(year="2024"), channel_id=channel_id
+    )
+
+    assert client.messages == []
+    assert client.ephemerals[0]["channel"] == channel_id
+    assert client.ephemerals[0]["user"] == "U1"
+
+
+def test_a_slash_submission_from_an_unauthorized_conversation_posts_nothing(tmp_path):
+    app = _slash_app(tmp_path, slash_allowed_channel_ids=["C123"])
+    metadata = _slash_private_metadata(app)
+    tampered = json.loads(metadata)
+    tampered["channel_id"] = "C_OTHER"
+
+    ack, client = _slash_submit(
+        app, state_values=_state_values(year="2024"), metadata=json.dumps(tampered)
+    )
+
+    assert ack.calls == [{}]
+    assert client.messages == [] and client.ephemerals == []
+
+
+def test_a_slash_submission_without_a_session_fails_closed(tmp_path):
+    """An empty session key would compare equal to every other empty one."""
+    app = _slash_app(tmp_path)
+    metadata = json.loads(_slash_private_metadata(app))
+    metadata["session_id"] = ""
+
+    ack, client = _slash_submit(
+        app, state_values=_state_values(year="2024"), metadata=json.dumps(metadata)
+    )
+
+    assert ack.calls == [{}]
+    assert client.messages == [] and client.ephemerals == []
+
+
+def test_free_text_only_submission_is_refused_in_the_modal(tmp_path):
+    app = _slash_app(tmp_path)
+
+    ack, client = _slash_submit(app, state_values=_state_values(free_text="會員經營"))
+
+    assert ack.calls[0]["response_action"] == "errors"
+    assert "搜尋範圍" in ack.calls[0]["errors"][FREE_TEXT_BLOCK_ID]
+    assert client.messages == [] and client.ephemerals == []
+
+
+def test_all_years_is_never_recorded_as_a_year_in_the_audit_row(tmp_path):
+    app = _slash_app(tmp_path)
+
+    _slash_submit(app, state_values=_state_values(lv2=["食品/飲料"]))
+
+    rows = list(csv.DictReader((tmp_path / "audit.csv").open(encoding="utf-8")))
+    search_rows = [r for r in rows if r["event"] == "slack_faceted_search"]
+    assert len(search_rows) == 1
+    query = search_rows[0]["query"]
+    assert "lv2=食品/飲料" in query
+    assert "years=" not in query
+    assert ALL_YEARS_OPTION_VALUE not in query
+    assert "全部年份" not in query
+
+
+def test_a_specific_year_is_recorded_in_the_audit_row(tmp_path):
+    app = _slash_app(tmp_path)
+
+    _slash_submit(app, state_values=_state_values(year="2024", lv2=["食品/飲料"]))
+
+    rows = list(csv.DictReader((tmp_path / "audit.csv").open(encoding="utf-8")))
+    query = [r for r in rows if r["event"] == "slack_faceted_search"][0]["query"]
+    assert "years=2024" in query
+    assert "lv2=食品/飲料" in query
+
+
+# --------------------------------------------------------------------------------------
+# G. pagination button
+# --------------------------------------------------------------------------------------
+
+
+def _multi_page_slash_app(tmp_path, **kwargs):
+    records = _multi_page_records()
+    documents = [
+        Document(id=f"doc-{index}", metadata=metadata, content=content)
+        for index, (metadata, content) in enumerate(records, start=1)
+    ]
+    db_path = tmp_path / "content_index_bulk.sqlite"
+    SQLiteIndex(db_path).rebuild(documents, chunk_documents(documents))
+    return _slash_app(tmp_path, db_path=db_path, **kwargs)
+
+
+def _show_more_button(client):
+    for message in reversed(client.ephemerals):
+        for block in message.get("blocks") or []:
+            for element in block.get("elements", []):
+                if element.get("action_id") == SHOW_MORE_ACTION_ID:
+                    return element
+    return None
+
+
+def _click_show_more(app, value, *, user_id="U1", channel_id="C123"):
+    ack, client = FakeAck(), FakeSlackClient()
+    app.actions[SHOW_MORE_ACTION_ID](
+        ack=ack,
+        body=_ephemeral_action_body(user_id=user_id, channel_id=channel_id, value=value),
+        client=client,
+    )
+    return ack, client
+
+
+def test_page_one_is_ephemeral_and_offers_a_show_more_button(tmp_path):
+    app = _multi_page_slash_app(tmp_path)
+
+    _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+
+    assert client.messages == []
+    first_page = client.ephemerals[0]
+    assert first_page["user"] == "U1"
+    # The page must invite the button, not a thread reply that could never reach this bot.
+    assert "顯示更多" in first_page["text"]
+    assert "@Marketing Knowledge Agent" not in first_page["text"]
+    assert _show_more_button(client) is not None
+
+
+def test_the_show_more_button_serves_the_next_page_without_re_searching(tmp_path):
+    app = _multi_page_slash_app(tmp_path)
+    _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+    audit_rows_before = len(
+        list(csv.DictReader((tmp_path / "audit.csv").open(encoding="utf-8")))
+    )
+    button = _show_more_button(client)
+
+    _ack2, next_client = _click_show_more(app, button["value"])
+
+    page_two = next_client.ephemerals[-1]
+    assert page_two["user"] == "U1"
+    assert next_client.messages == []
+    assert "繼續顯示搜尋結果" in page_two["text"]
+    # A continuation replays rendered text: no new search, so no new audit row.
+    audit_rows_after = list(csv.DictReader((tmp_path / "audit.csv").open(encoding="utf-8")))
+    assert len(audit_rows_after) == audit_rows_before
+
+
+def test_the_last_page_carries_no_further_show_more_button(tmp_path):
+    """Offering a button that answers 「已失效」 would be worse than offering none."""
+    app = _multi_page_slash_app(tmp_path)
+    _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+
+    _ack2, last = _click_show_more(app, _show_more_button(client)["value"])
+
+    assert _show_more_button(last) is None
+
+
+def test_another_user_cannot_advance_someone_elses_pagination(tmp_path):
+    """Even holding the button value verbatim, which only its owner ever receives."""
+    app = _multi_page_slash_app(tmp_path)
+    _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+    button_value = _show_more_button(client)["value"]
+
+    _ack2, other = _click_show_more(app, button_value, user_id="U2")
+
+    assert other.ephemerals[-1]["text"] == PAGINATION_EXPIRED_MESSAGE
+    assert other.ephemerals[-1]["user"] == "U2"
+    assert other.messages == []
+    # And the owner's own continuation was not consumed by the other user's click.
+    _ack3, owner = _click_show_more(app, button_value, user_id="U1")
+    assert "繼續顯示搜尋結果" in owner.ephemerals[-1]["text"]
+
+
+def test_an_expired_continuation_answers_safely(tmp_path):
+    app = _multi_page_slash_app(tmp_path)
+    _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+    button_value = _show_more_button(client)["value"]
+    _click_show_more(app, button_value)  # consume the only remaining page
+
+    _ack2, expired = _click_show_more(app, button_value)
+
+    assert expired.ephemerals[-1]["text"] == PAGINATION_EXPIRED_MESSAGE
+    assert expired.messages == []
+
+
+def test_a_show_more_click_without_a_valid_request_token_serves_nothing(tmp_path):
+    """Pins the ownership gate on its own.
+
+    Two independent things stop one user reading another's continuation: the token store's owner
+    check, and the fact that a lane is keyed per user. Either alone is sufficient, which is why the
+    cross-user test still passes when one is removed -- so each is pinned separately, or a refactor
+    could delete one and leave the other silently carrying the whole guarantee. Here the lane and
+    the clicker are correct and only the token is not.
+    """
+    app = _multi_page_slash_app(tmp_path)
+    _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+    value = json.loads(_show_more_button(client)["value"])
+    value["request_token"] = "f" * 32
+
+    _ack2, forged = _click_show_more(app, json.dumps(value))
+
+    assert forged.ephemerals[-1]["text"] == PAGINATION_EXPIRED_MESSAGE
+    assert forged.messages == []
+
+
+def test_the_slash_continuation_lane_is_scoped_to_the_invoking_user(tmp_path):
+    """Pins the other guard: a lane id that two people could share is not a lane."""
+    assert _slash_session_key("U1", "sess") != _slash_session_key("U2", "sess")
+    assert _slash_session_key("U1", "a") != _slash_session_key("U1", "b")
+    assert "U1" in _slash_session_key("U1", "sess")
+
+
+def test_a_show_more_click_without_a_session_does_nothing(tmp_path):
+    app = _multi_page_slash_app(tmp_path)
+    _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+
+    _ack, client = _click_show_more(app, json.dumps({"request_token": "x" * 32}))
+
+    assert client.ephemerals == [] and client.messages == []
+
+
+# --------------------------------------------------------------------------------------
+# H/I. adjust filters and restart, in the slash flow
+# --------------------------------------------------------------------------------------
+
+
+def _adjust_button(client):
+    for message in reversed(client.ephemerals):
+        for block in message.get("blocks") or []:
+            for element in block.get("elements", []):
+                if element.get("action_id") == OPEN_SEARCH_MODAL_ACTION_ID:
+                    return element
+    return None
+
+
+def _reopen_slash(app, value, *, user_id="U1", channel_id="C123"):
+    client = FakeSlackClient()
+    app.actions[OPEN_SEARCH_MODAL_ACTION_ID](
+        ack=FakeAck(),
+        body=_ephemeral_action_body(user_id=user_id, channel_id=channel_id, value=value),
+        client=client,
+    )
+    return client
+
+
+SLASH_SECRET_GOAL = "U1 私人搜尋 competitor-churn"
+
+
+def test_the_owner_reopens_their_slash_search_prefilled(tmp_path):
+    app = _slash_app(tmp_path)
+    _ack, client = _slash_submit(
+        app, state_values=_state_values(year="2024", free_text=SLASH_SECRET_GOAL)
+    )
+
+    view = _reopen_slash(app, _adjust_button(client)["value"]).opened_views[0]["view"]
+
+    prefill = _modal_prefill(view)
+    assert prefill[INTERVIEW_YEARS_BLOCK_ID] == ["2024"]
+    assert prefill[FREE_TEXT_BLOCK_ID] == SLASH_SECRET_GOAL
+
+
+def test_a_different_user_reopening_a_slash_button_sees_nothing_of_it(tmp_path):
+    """The session id travels in the button value, so it must not be what grants access."""
+    app = _slash_app(tmp_path)
+    _ack, client = _slash_submit(
+        app, state_values=_state_values(year="2024", free_text=SLASH_SECRET_GOAL)
+    )
+
+    view = _reopen_slash(app, _adjust_button(client)["value"], user_id="U2").opened_views[0]["view"]
+
+    assert SLASH_SECRET_GOAL not in json.dumps(view, ensure_ascii=False)
+    assert _modal_prefill(view) == {
+        INTERVIEW_YEARS_BLOCK_ID: [],
+        SALES_CATEGORY_LV2_BLOCK_ID: [],
+        CONTENT_TAGS_BLOCK_ID: [],
+        FREE_TEXT_BLOCK_ID: "",
+    }
+
+
+def test_reopening_a_slash_button_from_another_conversation_discloses_nothing(tmp_path):
+    app = _slash_app(tmp_path)
+    _ack, client = _slash_submit(
+        app, state_values=_state_values(year="2024", free_text=SLASH_SECRET_GOAL)
+    )
+
+    view = _reopen_slash(
+        app, _adjust_button(client)["value"], channel_id="C_OTHER"
+    ).opened_views[0]["view"]
+
+    assert SLASH_SECRET_GOAL not in json.dumps(view, ensure_ascii=False)
+
+
+def test_a_refused_slash_search_offers_a_blank_restart_and_stores_nothing(tmp_path):
+    store = SlackRequestTokenStore()
+    app = _slash_app(tmp_path, denylist_brands=[SECRET_CUSTOMER], request_token_store=store)
+
+    _ack, client = _slash_submit(
+        app,
+        state_values=_state_values(year="2024", free_text=f"{SECRET_CUSTOMER} 的成長案例"),
+    )
+
+    assert len(store) == 0
+    assert client.messages == []
+    follow_up = client.ephemerals[-1]
+    assert SECRET_CUSTOMER not in json.dumps(follow_up, ensure_ascii=False)
+    button = follow_up["blocks"][-1]["elements"][0]
+    value = json.loads(button["value"])
+    # A lane id to return to, and nothing that could reopen the refused search.
+    assert set(value) == {"session_id"}
+    assert value["session_id"]
+
+    # Restarting opens a blank modal, defaulted to 「全部年份」.
+    view = _reopen_slash(app, button["value"]).opened_views[0]["view"]
+    assert _modal_prefill(view) == {
+        INTERVIEW_YEARS_BLOCK_ID: [],
+        SALES_CATEGORY_LV2_BLOCK_ID: [],
+        CONTENT_TAGS_BLOCK_ID: [],
+        FREE_TEXT_BLOCK_ID: "",
+    }
+    assert SECRET_CUSTOMER not in json.dumps(view, ensure_ascii=False)
+
+
+def test_a_slash_result_keeps_its_clickable_approved_asset_title(tmp_path):
+    """The ephemeral boundary must not disturb what the renderer produced."""
+    app = _slash_app(tmp_path)
+
+    _ack, client = _slash_submit(app, state_values=_state_values(year="2024"))
+
+    assert "大春煉皂" in client.ephemerals[0]["text"]
+
+
+def test_every_slash_message_is_posted_with_unfurling_disabled(tmp_path):
+    app = _multi_page_slash_app(tmp_path)
+
+    _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+    _ack2, next_client = _click_show_more(app, _show_more_button(client)["value"])
+
+    posted = client.ephemerals + next_client.ephemerals
+    assert len(posted) >= 3
+    for message in posted:
+        assert message["unfurl_links"] is False
+        assert message["unfurl_media"] is False

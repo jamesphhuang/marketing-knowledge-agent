@@ -4,10 +4,269 @@
 
 ## Lock
 
+- State: active
+- Milestone state: SLACK_MKA_COMMAND_FACETED_ONLY_ENTRY_IN_IMPLEMENTATION
+- Task: Slack `/mka` Faceted-Only Search Entry
+- Implementer: Claude Code
+- Reviewer: not yet reviewed; independent Delta Review pending
+- Branch: `claude/impl/slack-mka-command`
+- Worktree: `/private/tmp/mka-slack-mka-command` (isolated; does not touch the main checkout at
+  `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent`)
+- Baseline commit: `0669fbb325e2cf2aebb390a3a90ce7686d12c139` (= `origin/main` at start, verified
+  equal before any file was changed)
+- Product behavior changed: YES (Slack surface only, behind a new explicit entry mode whose default
+  is today's behaviour)
+- Production activation: NO
+- Slack App Console changed: NO
+- Bot started/restarted: NO
+- Main updated: NO
+- Started at: 2026-08-28
+
+```text
+ACTIVE_IMPLEMENTER=CLAUDE_CODE
+TASK_LOCK=HELD
+IMPLEMENTATION_AUTHORIZED=YES
+PRODUCTION_ACTIVATION_AUTHORIZED=NO
+SLACK_APP_CONSOLE_CHANGE_AUTHORIZED=NO
+BOT_START_AUTHORIZED=NO
+DEPLOYMENT_AUTHORIZED=NO
+MAIN_MERGE_AUTHORIZED=NO
+```
+
+### Assumptions and done definition (recorded before any code change)
+
+1. `slack_search_entry_mode` is a new `.mka/slack_config.json` key. Absent → `mention_mixed`,
+   which is today's behaviour bit-for-bit. Only an explicit `slash_faceted_only` selects the new
+   `/mka` product contract, so merging this branch cannot activate anything by itself. An
+   unrecognised value fails closed at config load.
+2. `slash_faceted_only` requires `enable_faceted_search=true` (and therefore the pinned taxonomy
+   workbook/sha pair). An inconsistent pair is refused at load rather than silently degraded.
+3. The modal changes (single-select year, 「全部年份」 sentinel, narrowing requirement) apply to the
+   faceted modal in **both** modes. The faceted modal has never been production-activated
+   (`PRODUCTION_ACTIVATED=NO` throughout this file), so it has no production behaviour to preserve;
+   the "default unchanged" guarantee is about the `app_mention` natural-language path, which
+   `mention_mixed` preserves exactly.
+4. Slash entry authorization is its own typed field, `slash_command_allowed_channel_ids`, because
+   `allowed_channel_ids` governs *channel-visible* disclosure while a `/mka` result is ephemeral and
+   addressed to exactly one user. Absent → no conversation restriction (the stated product goal,
+   safe because the result is invoker-only). An explicit `[]` is refused: "unrestricted" and
+   "nothing allowed" must not be the same value.
+5. `chat_postEphemeral` is a new executable posting API on this surface and is brought inside a
+   posting boundary alongside `chat_postMessage`, with the source-level inventory test widened to
+   both.
+
+Done when every flag in the WP's DONE DEFINITION holds, targeted Slack tests pass, `compileall` and
+`git diff --check` pass, mutation probes demonstrate each new guard actually guards, and a narrow
+feature commit exists on this branch with `main` untouched.
+
+### Slack `/mka` Faceted-Only Search Entry (this WP)
+
+Full design record: `docs/specs/SLACK_MKA_COMMAND_FACETED_ONLY_ENTRY.md`.
+
+**Entry mode.** One new key, `slack_search_entry_mode`, with two canonical values. Absent →
+`mention_mixed`, which is today's behaviour bit-for-bit; only an explicit `slash_faceted_only`
+selects the `/mka` product. An unrecognised value is refused at config load rather than defaulted,
+because a typo would otherwise leave app-mention search alive on a deployment whose operator
+believed they had switched it off. `slash_faceted_only` additionally requires
+`enable_faceted_search=true`, since the modal is that mode's only search entry. A mode was chosen
+over booleans because the alternatives are mutually exclusive readings of one question -- what does
+an app mention mean? -- and independent booleans could contradict each other.
+
+**`/mka`.** Registered only in slash mode. Acks first and unconditionally (Slack allows three
+seconds), then calls `views_open` directly -- no intermediate button, no retrieval, no query
+planning, no audit row. `command["text"]` is never read: `/mka`, `/mka 搜尋`, `/mka SHOPLINE` and
+`/mka <restricted name>` produce an identical blank modal, asserted as view equality rather than as
+a substring check, because the modal's own chrome legitimately contains words like 「搜尋」.
+
+**App-mention migration.** In slash mode every mention returns the same short guidance naming
+`/mka`, and returns it *before* the pagination store, `ask_fn` and every audit call. `agent_ask` is
+untouched; CLI and internal natural-language search are unchanged.
+
+**Year field.** Single `static_select` with 「全部年份」 leading and selected by default.
+「全部年份」 is a UI sentinel that decodes to *no* `interview_year` constraint -- never to a
+constraint carrying the sentinel, which would match nothing in the index while appearing in the
+plan and audit row as though a year had been chosen. An unrecognised year value is refused rather
+than coerced to 「全部年份」: coercion would turn a forged field into a whole-corpus search.
+`interview_years` keeps its tuple type; the structured layer was not rewritten for a single-select
+UI.
+
+**Narrowing.** At least one of specific year / LV2 / content tag. Free text is deliberately absent
+from that test, and 「全部年份」 leaves `interview_years` empty precisely so choosing it cannot
+smuggle a whole-corpus search through. The refusal names the fields that would satisfy it, because
+a user told only 「請至少填寫一個搜尋條件」 would reasonably retype into the free-text box.
+
+**Result visibility.** Slash results are ephemeral to the invoker, routed from the entry point
+recorded in `private_metadata` rather than from which fields happen to be populated, so a message
+cannot become public because a thread timestamp was missing. Verified for public, private and DM
+conversation id shapes.
+
+**Authorization.** `allowed_channel_ids` is unchanged and still governs every channel-visible
+message. `/mka` gets `slash_command_allowed_channel_ids`, absent → unrestricted, explicit `[]` →
+refused. `allowed_exposure_channels` and every other data-governance policy are untouched.
+
+**Session context.** A slash command carries no `thread_ts`, so each `/mka` mints an unguessable
+session id, always combined with the payload-derived user id (`f"{user_id}:{session_id}"`) before
+use. `SlackRequestTokenStore` and `pagination_key` had their third coordinate renamed
+`thread_ts` → `session_key` -- the same check under an honest name, renamed rather than reused so
+no call site could keep the old meaning by accident (the R2 `get()` → `resolve()` precedent).
+Sensitive text stays out of button values and `private_metadata`; only opaque lane ids travel there.
+
+**Pagination.** 「顯示更多」 is a button in slash mode, offered only while a page is actually
+waiting. It replays already-rendered text: no retrieval, no reranking, no query planning, no new
+audit row. Wrong user, unknown token and expired continuation are indistinguishable to the clicker.
+
+**Posting boundary.** `chat.postEphemeral` is brought inside `post_slack_ephemeral`, with the same
+properties as `post_slack_reply`. The source-level inventory test now covers both APIs and rejects
+`chat_update`, `files_upload`, `say(` and `respond(` anywhere in the package. This is the bounded
+NB-1 hardening the WP authorized, and nothing beyond it.
+
+**Schema version.** `STRUCTURED_REQUEST_SCHEMA_VERSION` (v2) is added to `structured_search.py` and
+folded into `catalog_version`, so a modal opened under the v1 multi-select schema is refused as
+stale rather than decoded under v2 -- where its absent `selected_option` would read as 「全部年份」
+and silently widen a year-restricted search.
+
+#### Findings established by this WP, verified rather than assumed
+
+1. **`chat_postEphemeral` does not declare the unfurl flags.** `slack_sdk` 3.43.0's binding has no
+   `unfurl_links`/`unfurl_media` named parameters, unlike `chat_postMessage`. It accepts `**kwargs`
+   and forwards them verbatim into the request body, so they are transmitted. Whether Slack's
+   `chat.postEphemeral` acts on them is **not** established here and is a UAT check. The boundary
+   forces them regardless; that cannot make unfurling more likely.
+2. **`slack_bolt` runs a slash-command listener asynchronously.** `dispatch` returns as soon as
+   `ack()` fires and the rest of the handler continues on a worker thread. That is correct
+   production behaviour for Slack's three-second deadline, but it makes a naive
+   assert-immediately-after-dispatch test a race. Reproduced directly: 0 `views.open` calls
+   immediately after dispatch, 1 after a 0.5s sleep. The slash contract fixture therefore uses
+   bolt's synchronous `process_before_response=True`, which runs the same registered listener
+   through the same dispatcher without the timing dependency.
+
+#### Mutation-strength evidence
+
+Every probe copies `src/` and `tests/` to `/private/tmp/mka-mka-probe`, mutates **there** so the
+repository source is never touched, runs, and is deleted afterwards. The unmutated copy passes
+(`178 passed`), so a failure below is the mutation and not the harness.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| 0 | none (harness baseline) | `178 passed` |
+| 1 | delete the guidance early return; app mentions search again | `8 failed` |
+| 2 | restore `or request.free_text.strip()`; free-text-only search allowed | `4 failed` |
+| 3 | stop treating the 「全部年份」 sentinel as "no constraint" | `13 failed` |
+| 4 | use `/mka` trailing text as a modal prefill | `6 failed` |
+| 5 | pagination button re-searches and writes a search audit row | `1 failed` |
+| 6a | drop the token-store ownership gate only | `1 failed` |
+| 6b | drop the user from the continuation lane key only | `1 failed` |
+| 6c | drop both ownership guards | `1 failed` |
+| 7 | post the slash result into the channel instead of ephemerally | `8 failed` |
+| 8 | remove the 「全部年份」 default selection | `20 failed` |
+
+Probes 6a and 6b initially passed, which was itself the finding: the two cross-user guards are each
+independently sufficient, so a single-guard removal was invisible to every test. Two tests were
+added to pin each guard on its own -- a show-more click with the correct lane and clicker but an
+invalid token, and a unit assertion that the lane key is user-scoped -- after which 6a, 6b and 6c
+all fail. Without those, a future refactor could delete one guard and leave the other silently
+carrying the whole guarantee.
+
+#### Files changed
+
+Source: `slack_interface.py` (entry mode, config validation, `/mka` handler, show-more handler,
+app-mention migration, ephemeral boundary, session helpers, entrypoint-aware submission),
+`slack_faceted_search.py` (single-select year, 「全部年份」 sentinel, entrypoint/session in
+`private_metadata`, show-more and restart blocks, v2 submission parsing),
+`structured_search.py` (`STRUCTURED_REQUEST_SCHEMA_VERSION`, narrowing rule),
+`search_facets.py` (schema version folded into `catalog_version`),
+`slack_pagination.py` (`session_key` coordinate, additive `has_more`),
+`slack_request_tokens.py` (`thread_ts` → `session_key`),
+`slack_presentation.py` (entry-point-dependent continuation hint).
+
+Tests: `test_slack_faceted_search.py`, `test_slack_faceted_search_interface.py`,
+`test_slack_bolt_contract.py`, `test_slack_interface.py`, `test_structured_search.py`,
+`test_search_facets.py`.
+
+Docs: `docs/specs/SLACK_MKA_COMMAND_FACETED_ONLY_ENTRY.md`, this file.
+
+#### Pre-existing assertions updated, and why each is not a weakening
+
+- token-store context keyword `thread_ts=` → `session_key=` (mechanical; a wrong keyword raises
+  immediately);
+- year prefill `initial_options` (list) → `initial_option` (single), following the element type;
+- `_modal_prefill` normalises 「全部年份」 to `[]`, so "this clicker sees none of the owner's
+  filters" stays one comparison across all three fields;
+- `private_metadata` equality now includes `entrypoint` and `session_id`, and a new test asserts it
+  never carries the submitting user;
+- `test_free_text_at_the_limit_passes_and_over_the_limit_is_refused` gained a narrowing facet so it
+  still tests the length bound rather than the new narrowing rule;
+- `test_no_slack_message_is_posted_outside_the_boundary` became
+  `test_no_slack_message_is_posted_outside_a_boundary`, covering both posting APIs, plus a new test
+  rejecting alternative posting APIs entirely.
+
+```text
+SLACK_ENTRY_MODE_IMPLEMENTED=YES
+SLASH_COMMAND_REGISTERED_IN_CODE=YES
+SLASH_COMMAND_DIRECT_MODAL=YES
+SLASH_COMMAND_TEXT_IGNORED=YES
+APP_MENTION_DIRECT_SEARCH_DISABLED=YES
+APP_MENTION_GUIDANCE_ONLY=YES
+YEAR_SELECTOR_SINGLE_SELECT=YES
+ALL_YEARS_OPTION_IMPLEMENTED=YES
+ALL_YEARS_DEFAULT_SELECTED=YES
+ALL_YEARS_MEANS_NO_YEAR_CONSTRAINT=YES
+ALL_YEARS_COUNTS_AS_NARROWING_CONSTRAINT=NO
+ALL_YEARS_FREE_TEXT_ONLY_REFUSED=YES
+SPECIFIC_YEAR_ONLY_SEARCH_VALID=YES
+ALL_YEARS_AUDIT_SEMANTICS_CORRECT=YES
+FREE_TEXT_ONLY_SEARCH_DISABLED=YES
+RESULT_VISIBILITY_INVOKER_ONLY=YES
+PAGINATION_BUTTON=YES
+PAGINATION_RESEARCH=NO
+REQUEST_TOKEN_CONTEXT_SAFE=YES
+SENSITIVE_TEXT_RETENTION_REGRESSION=NO
+CLICKABLE_ASSET_TITLE_PRESERVED=YES
+NO_UNFURL_REGRESSION=YES
+GOVERNANCE_REGRESSION=NO
+PRODUCTION_CONFIG_CHANGED=NO
+SLACK_APP_CONSOLE_CHANGED=NO
+PRODUCTION_ACTIVATED=NO
+BOT_STARTED=NO
+MAIN_UPDATED=NO
+```
+
+#### Verification (Claude Code, 2026-08-28)
+
+- Interpreter: the project venv at
+  `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent/.venv/bin/python` (Python 3.9.6,
+  `slack_bolt` 1.29.0, `slack_sdk` 3.43.0). Import origin confirmed as **this** worktree's `src`
+  before every run via an explicit `PYTHONPATH`, not the venv's editable install pointing at the
+  main checkout.
+- Targeted run (24 files: every Slack module plus structured search, facets, query gating,
+  taxonomy, typed retrieval, pipeline, agentic, generation, governance evals, validation, content
+  index, search-quality evaluation): **762 passed, 1 skipped, 0 failed.**
+- Test counts: `test_slack_faceted_search.py` 41 → 53, `test_slack_faceted_search_interface.py`
+  44 → 95, `test_slack_bolt_contract.py` 7 → 10, `test_slack_interface.py` 50 → 52,
+  `test_structured_search.py` 22 → 32, `test_search_facets.py` 16 → 17.
+- `python -m compileall` on `src/marketing_knowledge_agent` and every changed test file: pass.
+  `git diff --check`: pass.
+- Read-only discipline: no `.mka/` directory and no stray `.sqlite` file exists in this worktree
+  after the full run; `git status --short` lists exactly the files this WP touched and nothing else.
+- Not run: the full application suite (the pre-existing gitignored-fixture blocker recorded
+  throughout this file is unchanged, and this WP touched none of those subsystems);
+  `tests/test_slack_structured_governance.py` (same pre-existing blocker); standalone lint/type
+  tools (not configured in this repo); production sync, re-index, deploy, Slack Bot start/restart,
+  or UAT.
+- **Not verified: Slack itself.** No payload has been sent to Slack and the bot was not started.
+  The live `views_open` / `view_submission` / `chat.postEphemeral` round trip, whether Slack honours
+  the unfurl flags on an ephemeral message, whether an ephemeral message can be posted in every
+  conversation shape the bot may be invoked from, and the real three-second `ack` deadline under
+  production latency are all first exercised in UAT.
+### Superseded lock record: closed Slack Faceted Search MVP / no-unfurl milestone
+
+The lock below is the previous milestone's closure record. It is retained unchanged as that
+milestone's evidence; this WP does not alter its state, and `main` is still not updated.
+
 - State: released — no active implementer
 - Milestone state: CLOSED
 - Task: Slack Faceted Search MVP and Slack no-unfurl Human UAT remediation
-- Implementer: none — lock released; no next task assigned
+- Implementer: none
 - Review provenance:
   - Slack Faceted Search MVP Codex R3: `PASS_WITH_NONBLOCKING_FOLLOWUPS`; reviewed SHA
     `313fbf7ac2745f2397369db3e2129f1978e03bef`

@@ -216,6 +216,30 @@ def test_catalog_version_is_reproducible_for_identical_inputs(tmp_path, taxonomy
     assert first.content_index_generation_id == second.content_index_generation_id
 
 
+def test_catalog_version_changes_when_the_submission_wire_schema_changes(tmp_path, taxonomy, monkeypatch):
+    """A modal opened under an older wire schema must be refused, not decoded under the newer one.
+
+    The year field went from a multi-select carrying ``selected_options`` to a single select
+    carrying ``selected_option``, whose 「全部年份」 sentinel means *no* year constraint. An
+    in-flight v1 submission decoded by v2 would find no selection and read as 「全部年份」 --
+    quietly widening a year-restricted search to every year. Folding the schema version into
+    ``catalog_version`` is what turns that into a visible staleness refusal.
+    """
+    db_path = _build_index(tmp_path, _default_records())
+    denylist = _restricted_customers_path(tmp_path, [])
+
+    before = build_facet_catalog(db_path, taxonomy, restricted_customers_path=denylist)
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.search_facets.STRUCTURED_REQUEST_SCHEMA_VERSION", "99"
+    )
+    after = build_facet_catalog(db_path, taxonomy, restricted_customers_path=denylist)
+
+    assert before.catalog_version != after.catalog_version
+    # Nothing else moved: the Authority pin and the index bytes are the same read.
+    assert before.taxonomy_workbook_sha256 == after.taxonomy_workbook_sha256
+    assert before.content_index_generation_id == after.content_index_generation_id
+
+
 def test_catalog_version_changes_when_the_content_index_changes(tmp_path, taxonomy):
     db_path = _build_index(tmp_path, _default_records())
     before = build_facet_catalog(

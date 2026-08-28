@@ -37,6 +37,12 @@ SHOW_MORE_COMMAND = "顯示更多"
 # half, so the matcher and the instruction can never drift apart.
 SHOW_MORE_MENTION = "@Marketing Knowledge Agent"
 SHOW_MORE_REPLY = f"{SHOW_MORE_MENTION} {SHOW_MORE_COMMAND}"
+# How a page invites the reader to continue. Which one applies is a property of the entry point,
+# not of the result, so the caller states it: the ``app_mention`` flow answers in a thread the user
+# can reply to, while the ``/mka`` slash flow answers ephemerally, where there is no thread to
+# reply into and a reply would never reach the bot at all.
+SHOW_MORE_THREAD_REPLY_HINT = f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_REPLY}」。"
+SHOW_MORE_BUTTON_HINT = f"若要繼續查看，請點擊下方的「{SHOW_MORE_COMMAND}」。"
 # How many brand groups the Slack surface materialises for one search before it stops admitting
 # new ones. It is display capacity, not ranking -- slack_interface asks pipeline.agent_ask for
 # exactly this much. The renderer owns the number because a result that reaches the ceiling has to
@@ -170,7 +176,15 @@ def format_structured_slack_reply(answer) -> Optional[str]:
     return pages.pages[0] if pages is not None else None
 
 
-def build_structured_slack_pages(answer) -> Optional[SlackSearchPages]:
+def build_structured_slack_pages(
+    answer, continuation_hint: str = SHOW_MORE_THREAD_REPLY_HINT
+) -> Optional[SlackSearchPages]:
+    """Render one governed structured result into the messages that will carry it.
+
+    ``continuation_hint`` is the sentence a page ends with when more brands are waiting. It is a
+    parameter rather than a constant because the instruction is only correct for the entry point
+    that produced the search, and an instruction the reader cannot follow is worse than none.
+    """
     generated = getattr(answer, "generated", answer)
     structured = getattr(generated, "structured_result", None)
     if structured is None:
@@ -240,6 +254,7 @@ def build_structured_slack_pages(answer) -> Optional[SlackSearchPages]:
                 total_assets=total_assets,
                 remaining=len(entities) - shown,
                 at_ceiling=at_ceiling,
+                continuation_hint=continuation_hint,
             )
         )
     return SlackSearchPages(
@@ -286,6 +301,7 @@ def _render_page(
     total_assets: int,
     remaining: int,
     at_ceiling: bool,
+    continuation_hint: str = SHOW_MORE_THREAD_REPLY_HINT,
 ) -> str:
     # ``at_ceiling`` is decided by the caller from the retrieved record count, never re-derived
     # from ``total_entities`` here: the two differ whenever grouping merges or drops a brand, and
@@ -310,7 +326,7 @@ def _render_page(
             [
                 "",
                 f"尚有 {remaining} 個品牌／夥伴未顯示。",
-                f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_REPLY}」。",
+                continuation_hint,
             ]
         )
     elif at_ceiling:

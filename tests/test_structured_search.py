@@ -185,6 +185,85 @@ def test_a_valid_single_field_selection_passes(facet_catalog):
     validate_structured_search_request(request, catalog)  # must not raise
 
 
+# --------------------------------------------------------------------------------------
+# narrowing requirement: free text is a relevance goal, never a search scope
+# --------------------------------------------------------------------------------------
+
+
+def test_free_text_alone_is_refused_however_specific_it_looks(facet_catalog):
+    """The whole point of the rule.
+
+    A goal like 「會員經營」 reads like a filter but bounds nothing: it is scored against the corpus
+    rather than restricting it, so accepting it would run an open-ended sweep of everything the
+    channel may see, presented as a targeted search.
+    """
+    catalog, _db_path, _restricted_path = facet_catalog
+    request = StructuredSearchRequest(
+        free_text="會員經營", catalog_version=catalog.catalog_version
+    )
+
+    with pytest.raises(StructuredSearchValidationError, match="搜尋範圍"):
+        validate_structured_search_request(request, catalog)
+
+
+def test_all_years_does_not_count_as_a_narrowing_constraint(facet_catalog):
+    """「全部年份」 arrives as an empty ``interview_years``, which must not satisfy the rule.
+
+    This is the case the sentinel design exists to make unrepresentable: were 「全部年份」 carried
+    as a value, it would look like a chosen year here and let a whole-corpus search through.
+    """
+    catalog, _db_path, _restricted_path = facet_catalog
+    all_years_with_goal = StructuredSearchRequest(
+        interview_years=(), free_text="回購", catalog_version=catalog.catalog_version
+    )
+
+    with pytest.raises(StructuredSearchValidationError, match="搜尋範圍"):
+        validate_structured_search_request(all_years_with_goal, catalog)
+
+
+def test_the_refusal_message_names_the_fields_that_would_satisfy_it(facet_catalog):
+    """A user told only "填寫一個搜尋條件" would reasonably retype into the free-text box."""
+    catalog, _db_path, _restricted_path = facet_catalog
+    request = StructuredSearchRequest(free_text="回購", catalog_version=catalog.catalog_version)
+
+    with pytest.raises(StructuredSearchValidationError) as exc_info:
+        validate_structured_search_request(request, catalog)
+
+    message = str(exc_info.value)
+    assert "年份" in message
+    assert "Sales Category LV2" in message
+    assert "內容相關標籤" in message
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"interview_years": (2024,)},
+        {"sales_category_lv2": ("食品/飲料",)},
+        {"content_tags": ("會員經營",)},
+        {"interview_years": (2024,), "free_text": "回購"},
+        {"sales_category_lv2": ("食品/飲料",), "free_text": "回購"},
+        {"content_tags": ("會員經營",), "free_text": "回購"},
+    ],
+)
+def test_any_single_structured_facet_is_enough_to_narrow(facet_catalog, kwargs):
+    """Free text stays welcome -- as a supplement to a scope, never as the scope itself."""
+    catalog, _db_path, _restricted_path = facet_catalog
+    request = StructuredSearchRequest(catalog_version=catalog.catalog_version, **kwargs)
+
+    validate_structured_search_request(request, catalog)  # must not raise
+
+
+def test_all_years_never_becomes_an_interview_year_constraint(query_catalog, taxonomy):
+    """The plan must carry no year filter at all -- not one whose value is the sentinel."""
+    request = StructuredSearchRequest(interview_years=(), sales_category_lv2=("食品/飲料",))
+
+    plan = build_structured_query_plan(request, query_catalog, taxonomy)
+
+    assert [c.field for c in plan.constraints] == ["sales_category_lv2"]
+    assert "interview_year" not in {c.field for c in plan.constraints}
+
+
 def test_free_text_at_the_limit_passes_and_over_the_limit_is_refused(facet_catalog):
     """Refused, never truncated: a shortened goal would run a different search than the user asked.
 
@@ -193,13 +272,19 @@ def test_free_text_at_the_limit_passes_and_over_the_limit_is_refused(facet_catal
     """
     catalog, _db_path, _restricted_path = facet_catalog
 
+    # Each request also carries a narrowing facet, so what is under test here is the length bound
+    # rather than the separate "free text alone is not a search scope" rule.
     at_limit = StructuredSearchRequest(
-        free_text="會" * FREE_TEXT_MAX_LENGTH, catalog_version=catalog.catalog_version
+        interview_years=(2024,),
+        free_text="會" * FREE_TEXT_MAX_LENGTH,
+        catalog_version=catalog.catalog_version,
     )
     validate_structured_search_request(at_limit, catalog)  # must not raise
 
     over_limit = StructuredSearchRequest(
-        free_text="會" * (FREE_TEXT_MAX_LENGTH + 1), catalog_version=catalog.catalog_version
+        interview_years=(2024,),
+        free_text="會" * (FREE_TEXT_MAX_LENGTH + 1),
+        catalog_version=catalog.catalog_version,
     )
     with pytest.raises(StructuredSearchValidationError, match=str(FREE_TEXT_MAX_LENGTH)):
         validate_structured_search_request(over_limit, catalog)

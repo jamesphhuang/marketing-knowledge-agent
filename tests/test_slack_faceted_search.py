@@ -18,11 +18,14 @@ from marketing_knowledge_agent.slack_faceted_search import (
     FREE_TEXT_BLOCK_ID,
     INTERVIEW_YEARS_ACTION_ID,
     INTERVIEW_YEARS_BLOCK_ID,
+    ALL_YEARS_OPTION_LABEL,
+    ALL_YEARS_OPTION_VALUE,
     MAX_BUTTON_VALUE_CHARS,
     MAX_STATIC_SELECT_OPTIONS,
     OPEN_SEARCH_MODAL_ACTION_ID,
     SALES_CATEGORY_LV2_ACTION_ID,
     SALES_CATEGORY_LV2_BLOCK_ID,
+    SHOW_MORE_ACTION_ID,
     SlackFacetModalError,
     build_adjust_filters_message,
     build_facet_modal_view,
@@ -31,16 +34,20 @@ from marketing_knowledge_agent.slack_faceted_search import (
     parse_open_modal_button_value,
     parse_structured_search_request,
     request_token_from_button_payload,
+    restart_search_blocks,
+    session_id_from_button_payload,
+    show_more_blocks,
 )
 from marketing_knowledge_agent.slack_request_tokens import SlackRequestTokenStore
 from marketing_knowledge_agent.structured_search import (
     FREE_TEXT_MAX_LENGTH,
     StructuredSearchRequest,
+    StructuredSearchValidationError,
 )
 
 
-OWNER = {"owner_user_id": "U1", "channel_id": "C1", "thread_ts": "1"}
-CLICK = {"user_id": "U1", "channel_id": "C1", "thread_ts": "1"}
+OWNER = {"owner_user_id": "U1", "channel_id": "C1", "session_key": "1"}
+CLICK = {"user_id": "U1", "channel_id": "C1", "session_key": "1"}
 
 
 def _catalog():
@@ -188,30 +195,30 @@ def test_a_different_user_cannot_resolve_another_persons_token():
     store = SlackRequestTokenStore()
     token = store.store(StructuredSearchRequest(free_text="U1 的私人搜尋"), **OWNER)
 
-    assert store.resolve(token, user_id="U2", channel_id="C1", thread_ts="1") is None
+    assert store.resolve(token, user_id="U2", channel_id="C1", session_key="1") is None
 
 
 def test_the_same_user_in_a_different_channel_cannot_resolve_the_token():
     store = SlackRequestTokenStore()
     token = store.store(StructuredSearchRequest(free_text="U1 的私人搜尋"), **OWNER)
 
-    assert store.resolve(token, user_id="U1", channel_id="C_OTHER", thread_ts="1") is None
+    assert store.resolve(token, user_id="U1", channel_id="C_OTHER", session_key="1") is None
 
 
-def test_the_same_user_in_a_different_thread_cannot_resolve_the_token():
+def test_the_same_user_in_a_different_session_cannot_resolve_the_token():
     store = SlackRequestTokenStore()
     token = store.store(StructuredSearchRequest(free_text="U1 的私人搜尋"), **OWNER)
 
-    assert store.resolve(token, user_id="U1", channel_id="C1", thread_ts="999") is None
+    assert store.resolve(token, user_id="U1", channel_id="C1", session_key="999") is None
 
 
 @pytest.mark.parametrize(
     "context",
     [
-        {"owner_user_id": "", "channel_id": "C1", "thread_ts": "1"},
-        {"owner_user_id": "U1", "channel_id": "", "thread_ts": "1"},
-        {"owner_user_id": "U1", "channel_id": "C1", "thread_ts": ""},
-        {"owner_user_id": "  ", "channel_id": "C1", "thread_ts": "1"},
+        {"owner_user_id": "", "channel_id": "C1", "session_key": "1"},
+        {"owner_user_id": "U1", "channel_id": "", "session_key": "1"},
+        {"owner_user_id": "U1", "channel_id": "C1", "session_key": ""},
+        {"owner_user_id": "  ", "channel_id": "C1", "session_key": "1"},
     ],
 )
 def test_storing_without_complete_context_is_refused(context):
@@ -238,7 +245,38 @@ def test_modal_carries_routing_and_catalog_version_in_private_metadata():
     view = build_facet_modal_view(_catalog(), "C1", "100.1")
     metadata = json.loads(view["private_metadata"])
 
-    assert metadata == {"channel_id": "C1", "thread_ts": "100.1", "catalog_version": "v1"}
+    assert metadata == {
+        "channel_id": "C1",
+        "thread_ts": "100.1",
+        "catalog_version": "v1",
+        # Defaults to the mention flow, so a caller that states no entry point gets exactly the
+        # behaviour that predates the slash command.
+        "entrypoint": "app_mention",
+        "session_id": "",
+    }
+
+
+def test_slash_modal_carries_its_entrypoint_and_session_but_no_thread():
+    view = build_facet_modal_view(
+        _catalog(), "D999", entrypoint="slash_command", session_id="sess-1"
+    )
+    metadata = json.loads(view["private_metadata"])
+
+    assert metadata == {
+        "channel_id": "D999",
+        "thread_ts": "",
+        "catalog_version": "v1",
+        "entrypoint": "slash_command",
+        "session_id": "sess-1",
+    }
+
+
+def test_private_metadata_never_carries_the_submitting_user():
+    """Identity comes from the submission payload; the view says which search, not whose."""
+    view = build_facet_modal_view(
+        _catalog(), "D999", entrypoint="slash_command", session_id="sess-1"
+    )
+    assert "user_id" not in json.loads(view["private_metadata"])
 
 
 def test_modal_omits_an_empty_facet_entirely():
@@ -278,8 +316,7 @@ def test_modal_prefill_preselects_matching_options():
     view = build_facet_modal_view(_catalog(), "C1", "1", prefill=prefill)
 
     year_block = next(b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID)
-    selected_years = {opt["value"] for opt in year_block["element"]["initial_options"]}
-    assert selected_years == {"2024"}
+    assert year_block["element"]["initial_option"]["value"] == "2024"
 
     lv2_block = next(b for b in view["blocks"] if b.get("block_id") == SALES_CATEGORY_LV2_BLOCK_ID)
     selected_lv2 = {opt["value"] for opt in lv2_block["element"]["initial_options"]}
@@ -353,6 +390,110 @@ def test_a_facet_over_the_100_option_limit_fails_closed_with_an_operator_error()
     assert "external_select" in message  # and what to do about it
 
 
+# --------------------------------------------------------------------------------------
+# year selector: single select, 「全部年份」 default
+# --------------------------------------------------------------------------------------
+
+
+def _year_block(view):
+    return next(b for b in view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID)
+
+
+def test_year_selector_is_single_select_not_multi():
+    """「全部年份」+2025 and 2025+2024 are both meaningless as a scope.
+
+    A multi-select is the only way a user could express either, so the element type is the fix
+    rather than a validation rule that has to catch every combination after the fact.
+    """
+    element = _year_block(build_facet_modal_view(_catalog(), "C1", "1"))["element"]
+
+    assert element["type"] == "static_select"
+    assert "max_selected_items" not in element
+
+
+def test_year_selector_offers_all_years_first_and_selects_it_by_default():
+    element = _year_block(build_facet_modal_view(_catalog(), "C1", "1"))["element"]
+
+    assert element["options"][0] == {
+        "text": {"type": "plain_text", "text": ALL_YEARS_OPTION_LABEL},
+        "value": ALL_YEARS_OPTION_VALUE,
+    }
+    assert element["initial_option"]["value"] == ALL_YEARS_OPTION_VALUE
+    assert [option["value"] for option in element["options"][1:]] == ["2025", "2024"]
+
+
+def test_a_prefill_with_no_year_reopens_on_all_years():
+    """An empty prior year selection *is* 「全部年份」; reopening on it round-trips faithfully."""
+    prefill = StructuredSearchRequest(sales_category_lv2=("食品/飲料",))
+    element = _year_block(build_facet_modal_view(_catalog(), "C1", "1", prefill=prefill))["element"]
+
+    assert element["initial_option"]["value"] == ALL_YEARS_OPTION_VALUE
+
+
+def test_the_year_field_is_rendered_even_when_the_catalog_has_no_years():
+    """「全部年份」 is always a valid choice, so the field never disappears the way a facet does."""
+    no_years = FacetCatalog(
+        catalog_version="v1",
+        generated_at="2026-08-27T00:00:00+00:00",
+        taxonomy_workbook_sha256="a" * 64,
+        content_index_generation_id="b" * 64,
+        interview_years=(),
+        sales_category_lv2=(FacetValueOption("食品/飲料", 4),),
+        content_tags=(FacetValueOption("會員經營", 3),),
+    )
+    element = _year_block(build_facet_modal_view(no_years, "C1", "1"))["element"]
+
+    assert [option["value"] for option in element["options"]] == [ALL_YEARS_OPTION_VALUE]
+
+
+def test_an_initial_year_slack_would_reject_is_refused_rather_than_quietly_dropped():
+    """Slack rejects a view whose ``initial_option`` is not in ``options``.
+
+    Dropping it instead would open the modal on whatever Slack shows first -- a year nobody chose,
+    presented as though they had.
+    """
+    prefill = StructuredSearchRequest(interview_years=(1999,))
+    with pytest.raises(SlackFacetModalError, match="1999"):
+        build_facet_modal_view(_catalog(), "C1", "1", prefill=prefill)
+
+
+# --------------------------------------------------------------------------------------
+# slash-flow action blocks
+# --------------------------------------------------------------------------------------
+
+
+def test_show_more_block_carries_the_token_and_session_but_no_search_content():
+    request_token = "a" * 32
+    blocks = show_more_blocks(request_token, "sess-1")
+    element = blocks[0]["elements"][0]
+
+    assert element["action_id"] == SHOW_MORE_ACTION_ID
+    assert element["text"]["text"] == "顯示更多"
+    assert json.loads(element["value"]) == {"request_token": request_token, "session_id": "sess-1"}
+
+
+def test_restart_block_after_a_refusal_carries_a_session_but_never_a_token():
+    """The refusal path has nothing to reopen; the lane id is routing, not the refused text."""
+    value = json.loads(restart_search_blocks("sess-1")[0]["elements"][0]["value"])
+
+    assert value == {"session_id": "sess-1"}
+    assert "request_token" not in value
+
+
+def test_a_mention_flow_button_carries_no_session_id():
+    """Absence is what tells the handler to read its context from the interaction payload."""
+    message = build_adjust_filters_message("C1", "100.1", "b" * 32)
+    payload = parse_open_modal_button_value(message["blocks"][-1]["elements"][0]["value"])
+
+    assert session_id_from_button_payload(payload) == ""
+    assert request_token_from_button_payload(payload) == "b" * 32
+
+
+def test_session_id_is_ignored_unless_it_is_a_non_empty_string():
+    for payload in ({}, {"session_id": ""}, {"session_id": 5}, {"session_id": None}):
+        assert session_id_from_button_payload(payload) == ""
+
+
 def test_modal_callback_id_is_the_faceted_search_modal():
     view = build_facet_modal_view(_catalog(), "C1", "1")
     assert view["callback_id"] == FACETED_SEARCH_MODAL_CALLBACK_ID
@@ -364,14 +505,21 @@ def test_modal_callback_id_is_the_faceted_search_modal():
 # --------------------------------------------------------------------------------------
 
 
-def _state_values(years=None, lv2=None, tags=None, free_text=None):
+def _state_values(year=ALL_YEARS_OPTION_VALUE, lv2=None, tags=None, free_text=None):
+    """A ``view_submission`` state payload in the shape Slack actually sends one.
+
+    The year field is a single ``static_select``, so it reports ``selected_option`` -- singular,
+    an object, not a list. ``year=None`` models the field being absent from the payload entirely.
+    """
+
     def _options(values):
         return {"selected_options": [{"value": value} for value in values]} if values else {
             "selected_options": []
         }
 
+    year_element = {"selected_option": {"value": year} if year is not None else None}
     return {
-        INTERVIEW_YEARS_BLOCK_ID: {INTERVIEW_YEARS_ACTION_ID: _options(years)},
+        INTERVIEW_YEARS_BLOCK_ID: {INTERVIEW_YEARS_ACTION_ID: year_element},
         SALES_CATEGORY_LV2_BLOCK_ID: {SALES_CATEGORY_LV2_ACTION_ID: _options(lv2)},
         CONTENT_TAGS_BLOCK_ID: {CONTENT_TAGS_ACTION_ID: _options(tags)},
         FREE_TEXT_BLOCK_ID: {FREE_TEXT_ACTION_ID: {"type": "plain_text_input", "value": free_text}},
@@ -379,11 +527,11 @@ def _state_values(years=None, lv2=None, tags=None, free_text=None):
 
 
 def test_parse_structured_search_request_reads_selected_values_not_display_text():
-    state_values = _state_values(years=["2024", "2023"], lv2=["食品/飲料"], tags=["會員經營"], free_text="  測試  ")
+    state_values = _state_values(year="2024", lv2=["食品/飲料"], tags=["會員經營"], free_text="  測試  ")
 
     request = parse_structured_search_request(state_values, "v1")
 
-    assert request.interview_years == (2024, 2023)
+    assert request.interview_years == (2024,)
     assert request.sales_category_lv2 == ("食品/飲料",)
     assert request.content_tags == ("會員經營",)
     assert request.free_text == "測試"
@@ -401,9 +549,28 @@ def test_parse_structured_search_request_handles_all_blank_submission():
     assert request.free_text == ""
 
 
-def test_parse_structured_search_request_ignores_a_malformed_year_value():
-    state_values = _state_values(years=["not-a-year", "2024"])
+def test_all_years_sentinel_parses_to_no_year_constraint_at_all():
+    """「全部年份」 is a UI affordance: it must leave the field empty, not carry the sentinel."""
+    request = parse_structured_search_request(_state_values(year=ALL_YEARS_OPTION_VALUE), "v1")
 
-    request = parse_structured_search_request(state_values, "v1")
+    assert request.interview_years == ()
+    assert ALL_YEARS_OPTION_VALUE not in json.dumps(request.__dict__, ensure_ascii=False)
 
-    assert request.interview_years == (2024,)
+
+def test_a_specific_year_parses_to_exactly_that_year():
+    assert parse_structured_search_request(_state_values(year="2025"), "v1").interview_years == (2025,)
+
+
+def test_an_absent_year_field_reads_as_all_years():
+    """An absent selection and the sentinel are the same state, so they must decode identically."""
+    assert parse_structured_search_request(_state_values(year=None), "v1").interview_years == ()
+
+
+def test_parse_structured_search_request_refuses_a_malformed_year_value():
+    """A year this modal never rendered can only come from a forged payload.
+
+    Coercing it to 「全部年份」 would turn a forged field into an unrestricted whole-corpus search,
+    so it is refused instead -- the caller reports it back into the modal as a field error.
+    """
+    with pytest.raises(StructuredSearchValidationError, match="not-a-year"):
+        parse_structured_search_request(_state_values(year="not-a-year"), "v1")
