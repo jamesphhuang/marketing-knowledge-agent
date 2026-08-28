@@ -56,20 +56,33 @@ At this point in the implementation history, the lock state was:
 - Implementer: Claude Code
 - Reviewer: Codex — R1 CHANGES_REQUESTED (6 findings) against `3a7648f`, all remediated; R2
   CHANGES_REQUESTED (1 blocking finding, cross-user prefill disclosure) against `934d719`,
-  remediated below. **This WP was not yet reviewed or accepted at that time.** Codex R3 review was
-  pending.
+  remediated below. **This WP is NOT reviewed and NOT accepted.** Codex R3 review pending.
 - Branch: codex/impl/slack-faceted-search-mvp
-- Worktree: `/private/tmp/mka-slack-faceted-search-mvp` (isolated; did not touch the running UAT
-  bot's worktree/process, and did not touch the main worktree at
+- Worktree: `/private/tmp/mka-slack-faceted-search-mvp` (isolated; does not touch the running UAT
+  bot's worktree/process, and does not touch the main worktree at
   `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent`, whose `main` was left exactly as found —
-  behind `origin/main` by 20 commits and dirty with unrelated pre-existing local files)
-- Baseline commit: `5e1f73ce34d6c5b6791d9d0ff126c4dc0c784c40` (`origin/main` at start)
-- Product behavior changed: YES (Slack surface only, default OFF; existing behavior unchanged when
-  `enable_faceted_search=false`)
-- Intended scope: structured Block Kit Slack search by year, Sales Category LV2, content tags and
-  optional free text; additive query-planning and Slack wiring changes only. No production config,
-  sync, re-index, Stable Record V2 activation, row_v1 retirement, Authority workbook modification,
-  exposure-policy change or unrelated refactor.
+  behind `origin/main` by 20 commits (a clean fast-forward gap, not a divergence) and dirty with
+  unrelated pre-existing local files that this WP did not read, touch, stash, or commit)
+- Baseline commit: 5e1f73ce34d6c5b6791d9d0ff126c4dc0c784c40 (= `origin/main` at start; local `main`
+  was behind by 20 commits and dirty, so the new worktree was created directly from
+  `origin/main`/this worktree's own prior HEAD rather than from the stale local `main`)
+- Product behavior changed: YES (Slack surface only, default OFF; existing behavior bit-for-bit
+  unchanged when `enable_faceted_search=false`, the default)
+- Intended scope: a structured, Block-Kit-driven Slack search entry point (year / Sales Category
+  LV2 / content-tag multi-select + optional free text) that builds `TypedQueryPlan` hard constraints
+  directly rather than routing selections back through the natural-language parser, reducing
+  dependence on Search Taxonomy Authority resolution for the three fields a user can now pick
+  explicitly. New `search_facets.py` (`FacetCatalog`), `structured_search.py`
+  (`StructuredSearchRequest` + plan builder + execution), `slack_faceted_search.py` (Block Kit view
+  and payload parsing); additive changes to `query_planning.py` (`"in"`/`"contains_any"` operator
+  execution, `preresolved_fields` parameter), `slack_presentation.py` (multi-value constraint
+  rendering) and `slack_interface.py` (new `SlackConfig` fields, trigger detection, action/view
+  handler registration). No production `.mka/slack_config.json` change, no Slack Bot start/restart,
+  no production sync, no production re-index, no Stable Record V2 activation, no row_v1 retirement,
+  no Search Taxonomy Authority workbook modification, no `allowed_exposure_channels` policy change,
+  no unrelated refactor.
+- Started at: 2026-08-27
+- Last updated: 2026-08-27
 
 ```text
 IMPLEMENTATION_AUTHORIZED=YES
@@ -91,9 +104,9 @@ CODEX_R3_REVIEW=PENDING
 INTEGRATION_ORDER_DECIDED=YES
 ```
 
-Integration order was settled by `DEC-20260827-01`: this branch would merge to `main` first and
-the Search Taxonomy Slack wiring WP would adapt to it. At that time the decision settled order
-only; review and promotion were still separate pending gates.
+Integration order settled by `DEC-20260827-01`: this branch merges to `main` first and the Search
+Taxonomy Slack wiring WP adapts to it. That decision settles **order only** — `main` promotion still
+requires Codex re-review to pass and a separate explicit authorization.
 
 ### Codex review R2 — cross-user prefill disclosure (2026-08-27)
 
