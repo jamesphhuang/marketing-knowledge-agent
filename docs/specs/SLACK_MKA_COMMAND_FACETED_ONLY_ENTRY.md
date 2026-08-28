@@ -230,37 +230,125 @@ Slack artifact to a structured search, and therefore none to `chat.postMessage`.
 
 ## 10. Ephemeral posting boundary
 
-`chat.postEphemeral` is a second executable posting API on this surface, so it gets a boundary of
-its own -- `post_slack_ephemeral` -- with the same properties as `post_slack_reply`: one call site,
-unfurl flags written after the reply is unpacked, no way for a caller to re-enable unfurling. A
-source-level inventory test now covers both APIs and rejects `chat_update`, `files_upload`, `say(`
-and `respond(` anywhere in the package.
+There are two outbound boundaries, one per mechanism, each with a single call site:
 
-**Verified against the installed SDK rather than assumed:** `slack_sdk` 3.43.0's
-`chat.postEphemeral` binding does **not** declare `unfurl_links`/`unfurl_media` as named parameters,
-unlike its `chat.postMessage` one. It accepts `**kwargs` and forwards them verbatim into the request
-body, so the flags are transmitted. Whether Slack's `chat.postEphemeral` acts on them is **not**
-established by this code and has not been exercised against live Slack -- it is a UAT check.
-Setting them costs nothing and cannot make unfurling more likely.
+- `post_slack_reply` → `chat.postMessage`, for channel-visible messages (`mention_mixed`);
+- `post_slack_response_url` → `WebhookClient`, for everything the slash flow says.
+
+The response_url boundary forces four properties, written *after* the caller's message is unpacked
+so no call site can override them: `response_type="ephemeral"` (never `in_channel` — that would
+publish one user's search to the conversation), `replace_original=False` (each message is its own
+reply), and `unfurl_links`/`unfurl_media` false (the unchanged no-unfurl contract).
+
+**Verified against the installed SDK rather than assumed:** `WebhookClient.send` in `slack_sdk`
+3.43.0 declares all four of these as named parameters. That is a better contract than the one it
+replaced -- `chat.postEphemeral`'s binding declared neither unfurl flag and merely forwarded them
+through `**kwargs`.
+
+The source-level inventory test covers both mechanisms, and additionally rejects
+`chat_postEphemeral`, `chat_update`, `files_upload`, `say(`, `respond(` and raw HTTP
+(`requests.post`, `urlopen`, `http.client`) anywhere in the Slack modules. `chat.postEphemeral` is
+on the *forbidden* list rather than merely unused: an unused posting helper is exactly what a future
+handler reaches for.
 
 Clickable approved asset titles (`<approved-url|title>`) are unchanged on both paths.
 
-### Known platform constraint on ephemeral posting
+### Resolved: the ephemeral-posting constraint, and what replaced it
 
-`chat.postEphemeral` is not universally available in every conversation a slash command can be
-invoked from. Slack requires the bot to be able to post into the target conversation: in a public or
-private channel the app generally has to be a member, and an invocation from a channel the bot has
-not been added to can return `channel_not_found` even though the command itself was delivered. This
-work package does **not** work around that, deliberately -- the alternatives are `response_url`
-(a new outbound HTTP path, outside this WP's scope and outside the posting boundary) or posting
-in-channel (which would break `RESULT_VISIBILITY=INVOKER_ONLY`).
+The constraint this section used to describe as an open risk was confirmed by Human UAT and has
+been fixed. It is kept here because the reasoning is the reason the current design looks as it does.
 
-The failure is safe rather than silent-but-wrong: nothing is disclosed to the conversation, the
-search result simply does not arrive, and the exception surfaces in the bot's logs. It is listed
-here rather than guessed at because it is a live-Slack property this code cannot establish, and it
-is the first thing UAT should probe -- run `/mka` from a channel the bot is not a member of, and
-from a DM, and record what happens. If it proves to be a real obstacle, the follow-up is a
-`response_url` fallback inside the same ephemeral boundary, not a change to result visibility.
+**What was predicted.** `chat.postEphemeral` requires the app to be able to post into the target
+conversation, so an invocation from a channel the bot was never added to can return
+`channel_not_found` even though the command was delivered.
+
+**What UAT observed.** Exactly that, on the path that was least expected to matter: a `/mka` from a
+conversation outside the operator's allowlist entered the *denial* branch correctly, and then could
+not deliver the denial. The user saw nothing at all -- no modal, no refusal, no error. Only the
+operator saw it, in the bot's log.
+
+That is worse than the success-path version of the same fault, and it was made *more* likely by
+restricting the allowlist for the first UAT round: the denial branch fires precisely in the
+conversations the bot is least likely to be a member of. Optimising the success path moved the
+failure rather than removing it.
+
+**What replaced it.** Every slash-originated message now leaves through the `response_url` Slack
+attaches to the command or interaction that produced it -- see §10a. `chat.postEphemeral` is no
+longer used anywhere in the package and the helper that wrapped it has been removed, so a future
+handler cannot reach for it.
+
+## 10a. Response URL capability
+
+A `response_url` answers the interaction it came from, ephemerally by default, **without depending
+on channel membership**. That is the property the slash flow needs and `chat.postEphemeral` does not
+have.
+
+It is also a **bearer secret**: anyone holding it can post into that conversation as this app, with
+no token. So it is handled as a credential, not as a routing coordinate:
+
+| rule | why |
+| --- | --- |
+| memory only, never written to disk | a capability in a file outlives the interaction it belongs to |
+| never in `private_metadata`, a button value, a request token, a pagination key or an audit row | all of those travel to Slack and back, or persist |
+| excluded from `repr` | a debugger, a crash dump or a stray `print` would otherwise disclose it |
+| exact host allowlist, HTTPS only, before storing | this value arrives in a payload and is then POSTed to; accepting an arbitrary host would make it a request-forgery primitive |
+| TTL below Slack's documented ~30 minutes | expiry then fails in our code, with our message, rather than as a Slack error after a search has already run |
+| hard budget of 5 sends, matching Slack | the sixth is refused here rather than silently at Slack |
+| bound to user + channel + session | a capability is spent only by the interaction it was minted for |
+
+Unknown, expired, wrong-user, wrong-channel, wrong-session and exhausted all resolve to the same
+`None`. Distinguishing them would tell a caller which half of a guess was right.
+
+**Ordering matters.** The reply path is checked *before* retrieval, not after it. The failure worth
+preventing is a search that succeeds and then has nowhere to go: work done, governance spent, and a
+modal that closed on nothing. A `/mka` with no usable `response_url` opens no modal at all.
+
+**Refresh.** A button click is a new interaction with its own capability, separately budgeted and
+later-expiring. 「調整條件」 and 「重新搜尋」 refresh the stored capability from the click before
+opening the next modal, and 「顯示更多」 answers through the click's own. Ownership is *not*
+refreshed alongside it: user and channel still come from the interaction payload.
+
+Denial included: when an operator sets `slash_command_allowed_channel_ids`, a refused `/mka` is
+answered through its own command capability, which is what makes the refusal reach the very
+conversations the allowlist exists to turn away.
+
+## 10b. Modal and result presentation
+
+Human UAT asked for wording a marketer reads without translating from the data model, and for a
+result card that leads with the content rather than with identity fields.
+
+| surface | before | after |
+| --- | --- | --- |
+| modal field | `Sales Category LV2` | 品牌產業別 |
+| modal field | 內容相關標籤 | 你在找什麼功能？ |
+| modal field | 你想找什麼內容或成果 | 你想找什麼內容或成果，請輸入關鍵字 |
+| applied conditions | `Sales Category LV2` | 品牌產業別 |
+| applied conditions | 內容相關標籤 | 功能 |
+| result card | brand + Handle + LV1 + LV2 + assets | brand + assets |
+
+**These are display strings only.** Block ids, action ids, `StructuredSearchRequest` fields,
+taxonomy field names, query-plan fields and audit columns are all unchanged, and the applied-
+condition labels are a Slack-scoped mapping rather than a `FIELD_REGISTRY` rename -- renaming there
+would change CLI and `explain-query` output this work package has no business touching.
+
+`merchant_handle`, `sales_category_lv1` and `sales_category_lv2` are still carried on every entity
+and are still what grouping, conflicting-handle removal, data-conflict marking, identity and
+governance read. Only the three rendered lines are gone. That distinction is load-bearing: a group
+whose records disagree on the handle is still dropped outright rather than merged under one of
+them, which is what stops two different merchants appearing as one brand. The tests that used to
+read those properties off the rendered text now read them off the model, so hiding the lines could
+not quietly stop testing the behaviour.
+
+### ALL YEARS: same rule, earlier feedback
+
+The narrowing rule is unchanged -- 「全部年份」 still narrows nothing, and a search scoped only by
+it is still refused. UAT confirmed the rule is right and the *timing* was wrong: a user who
+reopened 調整條件, set the year back to 「全部年份」 and cleared the other fields only found out
+after submitting.
+
+The year field now carries a Block Kit hint saying so before submission. It is a hint, not a
+validation change: 「全部年份」 still does not count as a narrowing constraint, and the refusal
+still fires if the user proceeds anyway.
 
 ## 11. Schema versioning
 

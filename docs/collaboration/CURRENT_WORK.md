@@ -5,7 +5,7 @@
 ## Lock
 
 - State: active — controlled UAT preparation
-- Milestone state: SLACK_MKA_COMMAND_READY_FOR_CONTROLLED_UAT
+- Milestone state: SLACK_MKA_COMMAND_UAT_R1_REMEDIATED_AWAITING_ROUTING_DELTA_REVIEW
 - Task: Slack `/mka` Faceted-Only Search Entry
 - Implementer: Claude Code
 - Reviewer: Codex — R1 against `5954e10` CHANGES_REQUESTED (2 blocking, both remediated); R2
@@ -37,8 +37,10 @@
   `a09b89c06b6a18220e5781e032d37a1d616bfd94`; **final reviewed code candidate**
   `eb128b8080a072917c042de80705521fd2c0a734`.
 - Started at: 2026-08-28
-- Next exact action: **Controlled `/mka` UAT Activation** — a separate gate, not authorized by this
-  record. See "Next exact action" below.
+- Human UAT Phase 1: **PASS_WITH_BLOCKING_FINDING** — the search flow passed live; slash delivery
+  depended on bot membership and had to be re-routed. See the dated section below.
+- Next exact action: **independent routing/security-focused Delta Review** of the UAT R1
+  remediation, then a second controlled UAT round. Not authorized by this record.
 
 ### Reviewed-code provenance versus PR head
 
@@ -99,8 +101,15 @@ PR_STATE=OPEN
 REMOTE_CI_STATUS=NOT_CONFIGURED_OR_NO_RUNS
 
 READY_FOR_CONTROLLED_UAT=YES
-CONTROLLED_UAT_STARTED=NO
-CONTROLLED_UAT_RESULT=NOT_RUN
+CONTROLLED_UAT_STARTED=YES
+HUMAN_UAT_PHASE_1=PASS_WITH_BLOCKING_FINDING
+UAT_BOT_STOPPED_BY_HUMAN=YES
+UAT_BOT_STOP_METHOD=SIGINT
+UAT_BOT_EXIT_130_EXPECTED=YES
+UAT_BOT_RESTARTED=NO
+UAT_R1_BLOCKING_FINDING=SLASH_DELIVERY_DEPENDS_ON_BOT_MEMBERSHIP
+UAT_R1_REMEDIATED=YES
+READY_FOR_UAT_R1_DELTA_REVIEW=YES
 
 SLACK_APP_CONSOLE_CHANGED=NO
 PRODUCTION_CONFIG_CHANGED=NO
@@ -573,6 +582,133 @@ is checked rather than assumed — and R1-B1/R1-B2 still each fail a test the ot
 - Not run, unchanged: full application suite; `tests/test_slack_structured_governance.py` (see
   above); standalone lint/type tools (not configured); production sync, re-index, deploy, bot
   start/restart, or UAT. Slack itself is still unexercised.
+
+### Human UAT Phase 1 and the R1 routing remediation (2026-08-28)
+
+Controlled UAT ran against an isolated runtime built from the reviewed code candidate `eb128b8`,
+with the operational config, content index and checkout untouched throughout (hashes verified
+before and after).
+
+```text
+HUMAN_UAT_PHASE_1=PASS_WITH_BLOCKING_FINDING
+UAT_BOT_STOPPED_BY_HUMAN=YES
+UAT_BOT_STOP_METHOD=SIGINT
+UAT_BOT_EXIT_130_EXPECTED=YES
+UAT_BOT_RESTARTED=NO
+BLOCKING_FINDING=SLASH_DELIVERY_DEPENDS_ON_BOT_MEMBERSHIP
+OBSERVED_SLACK_ERROR=channel_not_found
+```
+
+The bot was stopped deliberately by the operator with `kill -INT`; exit code 130 is that SIGINT,
+not a crash. It has not been restarted, and no code below was written while it was running.
+
+#### What passed, live, against real data
+
+Preserved as recorded. These are live-Slack results, not test outcomes:
+
+| behaviour | result |
+| --- | --- |
+| `/mka` opens the modal directly | PASS |
+| `/mka` trailing text ignored | PASS |
+| 「全部年份」 default, year single-select | PASS |
+| free-text-only refused; 「全部年份」 alone refused | PASS |
+| specific-year-only search; 「全部年份」 + LV2 search | PASS |
+| 調整條件; 重新搜尋 blank | PASS |
+| 顯示更多 pagination | PASS |
+| app mention returns guidance only | PASS |
+| ephemeral delivery in a known member channel | PASS |
+| clickable approved URLs; unfurl suppression | PASS |
+
+Observed examples: a 2024-only search returned 6 brands / 15 assets; 「全部年份」 + LV2 女裝
+returned 5 brands / 7 assets. The audit log recorded 11 searches over ~22 minutes, one channel, one
+user, 10 of 11 with citations, 0 warnings, 0 denylist refusals.
+
+#### The blocking finding
+
+A `/mka` from a conversation outside `slash_command_allowed_channel_ids` entered the denial branch
+correctly, then failed to deliver the denial:
+
+```text
+handle_faceted_search_command → post_slack_ephemeral(... DENIED_CHANNEL_MESSAGE ...)
+  → chat.postEphemeral: {'ok': False, 'error': 'channel_not_found'}
+```
+
+The user saw nothing at all. The spec had predicted the constraint for the *result* path and
+flagged it as the first thing UAT should probe; what it did not anticipate is that the *refusal*
+path shares it, and fires precisely in the conversations the bot is least likely to belong to. The
+restrictive first-round allowlist — recommended here to protect the success path — therefore made
+this more likely to be hit, not less.
+
+#### Remediation: response_url replaces membership-dependent delivery
+
+Every slash-originated message now leaves through the `response_url` Slack attaches to the command
+or interaction that produced it. `chat.postEphemeral` is gone from the package entirely, and its
+helper was removed rather than left unused, because an unused posting helper is what a future
+handler reaches for. `views.open` is unchanged: it uses `trigger_id` and never depended on
+membership.
+
+A `response_url` is a bearer capability, so `slack_response_urls.py` holds it as a credential:
+memory only; excluded from `repr`; never in `private_metadata`, a button value, a request token, a
+pagination key or an audit row; exact-host HTTPS allowlist checked before storing (an arbitrary host
+would make this a request-forgery primitive); TTL below Slack's documented ~30 minutes; hard budget
+of 5 sends; bound to user + channel + session, with unknown/expired/wrong/exhausted all resolving
+to the same `None`.
+
+The reply path is checked **before** retrieval. The failure worth preventing is a search that
+succeeds and then has nowhere to go.
+
+Buttons refresh the capability from their own interaction, so a long session does not spend down
+the ageing command capability; ownership is not refreshed with it — user and channel still come
+from the payload.
+
+#### Presentation changes (nonblocking UX, same round)
+
+Modal: `Sales Category LV2` → 品牌產業別; 內容相關標籤 → 你在找什麼功能？; free-text label extended.
+Applied conditions: 品牌產業別 / 功能, mapped in the Slack renderer rather than in `FIELD_REGISTRY`.
+Result card: Handle / LV1 / LV2 lines removed. A Block Kit hint now warns about 「全部年份」 before
+submission.
+
+**Display only.** Block ids, action ids, request fields, taxonomy and audit names are unchanged, and
+`merchant_handle` / `sales_category_lv1` / `sales_category_lv2` are still carried and still drive
+grouping, conflicting-handle removal and data-conflict marking. The narrowing rule is unchanged:
+「全部年份」 still narrows nothing and is still refused alone.
+
+#### Mutation-strength evidence (UAT R1)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated. Unmutated baseline: `271 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R-1 | slash result routed back to the channel-posting path | `25 failed` |
+| R-2 | persist the capability into `private_metadata` | `2 failed` |
+| R-3 | drop the user binding from the capability store | `35 failed` |
+| R-4 | drop the channel/session binding | `34 failed` |
+| R-5 | allow more than five sends | `5 failed` |
+| R-6 | remove the adjust/restart capability refresh | `4 failed` |
+| P-1 | restore the old modal labels | `2 failed` |
+| P-2 | restore Handle/LV1/LV2 on the result card | `4 failed` |
+| P-3 | remove the conflicting-handle protection | `1 failed` |
+
+P-3 matters most of the nine: it is the one that proves hiding the three lines did not disable the
+rule that reads them.
+
+#### Verification (UAT R1 remediation)
+
+- Comparable 23-file suite: **802 passed, 1 skipped, 0 failed** (previous round: 780).
+- Plus the new `tests/test_slack_response_urls.py` (24 files): **834 passed, 1 skipped**.
+- 25-file superset incl. `test_content_index_lineage.py`: **855 passed, 1 skipped**.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin re-confirmed
+  as this worktree's `src`.
+- No live Slack call was made and the UAT bot was not restarted.
+- `tests/test_slack_structured_governance.py` remains NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE.
+
+#### Observed but deliberately not changed
+
+`slack_output_preview._render_detailed` still prints `Sales Category LV1/LV2` and `Handle`. It is a
+separate offline preview surface, not the modal and not the live result card, and UAT did not
+examine it. Renaming there was out of this round's scope; recorded so the divergence is a decision
+rather than an oversight.
 
 ### Superseded lock record: closed Slack Faceted Search MVP / no-unfurl milestone
 
