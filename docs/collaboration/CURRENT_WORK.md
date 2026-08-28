@@ -4,6 +4,52 @@
 
 ## Lock
 
+- State: released — no active implementer
+- Milestone state: CLOSED
+- Task: Slack Faceted Search MVP and Slack no-unfurl Human UAT remediation
+- Implementer: none — lock released; no next task assigned
+- Review provenance:
+  - Slack Faceted Search MVP Codex R3: `PASS_WITH_NONBLOCKING_FOLLOWUPS`; reviewed SHA
+    `313fbf7ac2745f2397369db3e2129f1978e03bef`
+  - Slack no-unfurl independent Delta Review: `PASS_WITH_NONBLOCKING_FINDINGS`; reviewed candidate
+    `0ae710f822fe797df79337a07ed18435c8cf8d88`; 0 blocking findings; NB-1 nonblocking and deferred
+- Integration: Slack Faceted Search MVP reviewed and integrated; Slack no-unfurl remediation
+  merged via PR #3
+- Merge commit on `main`: `d580f8335ea8f08be7045f30460bdc95fa3b3567`
+- Closure reconciliation branch: `codex/docs/close-slack-unfurl-remediation` (documentation only)
+- Product state: merged, post-merge verified and closed; production activation remains off
+- Started at: 2026-08-27
+- Closed at: 2026-08-28
+
+```text
+ACTIVE_IMPLEMENTER=NONE
+TASK_LOCK=RELEASED
+SLACK_FACETED_SEARCH_ACCEPTED=YES
+SLACK_FACETED_SEARCH_INTEGRATED=YES
+HUMAN_UAT=PASS
+SLACK_FACETED_SEARCH_R3_REVIEW=PASS_WITH_NONBLOCKING_FOLLOWUPS
+SLACK_FACETED_SEARCH_R3_REVIEWED_SHA=313fbf7ac2745f2397369db3e2129f1978e03bef
+SLACK_UNFURL_DELTA_REVIEW=PASS_WITH_NONBLOCKING_FINDINGS
+SLACK_UNFURL_DELTA_BLOCKING_FINDINGS=0
+SLACK_UNFURL_REVIEWED_CANDIDATE=0ae710f822fe797df79337a07ed18435c8cf8d88
+MERGED_PR=3
+MERGE_SHA=d580f8335ea8f08be7045f30460bdc95fa3b3567
+MAIN_UPDATED=YES
+POST_MERGE_VERIFICATION=PASS
+REMEDIATION_CLOSURE=CLOSED
+PRODUCTION_ACTIVATED=NO
+BOT_STARTED=NO
+NB1_STATUS=NONBLOCKING_DEFERRED
+```
+
+The detailed R1/R2 review, mutation, UAT and remediation records below are preserved as historical
+evidence. Statements inside those dated sections describe what was true at that point and do not
+override the current released lock and closed milestone above.
+
+### Historical implementation lock snapshot (2026-08-27)
+
+At this point in the implementation history, the lock state was:
+
 - State: active
 - Milestone state: SLACK_FACETED_SEARCH_MVP_CODEX_REVIEW_R2_REMEDIATED_AWAITING_R3_REVIEW
 - Task: Slack Faceted Search MVP
@@ -782,21 +828,10 @@ gives both options and prefers copying over moving, since PID 42332 is reading t
 
 ### For this WP (Slack Faceted Search MVP)
 
-1. **Codex R3 review.** R2 returned CHANGES_REQUESTED on one blocking finding (cross-user prefill
-   disclosure); it is remediated above. `CODEX_R3_REVIEW=PENDING`; this WP is deliberately not
-   marked reviewed or accepted by its own implementer.
-2. **`SlackConfig` field collision — RESOLVED** by `DEC-20260827-01` (2026-08-27): this branch is
-   the integration order's first, and the Search Taxonomy Slack wiring WP
-   (`codex/impl/slack-search-taxonomy-uat`, still uncommitted on its own branch) adapts to the
-   `SlackConfig` shape that lands with it. That WP must consume the existing
-   `search_taxonomy_workbook` / `search_taxonomy_sha256` fields rather than redeclare them; the
-   intended end state is one taxonomy pin consumed by two independent feature flags. **That
-   worktree was not modified by this decision** — its uncommitted changes are untouched.
-   No action is outstanding here for this WP.
-3. Promotion to `main` — still requires Codex re-review to pass **and** a separate explicit
-   authorization. `MAIN_UPDATE_AUTHORIZED=NO`. Deciding the order did not authorize the merge.
-4. Only after that, and only with separate explicit authorization: UAT activation per
-   `docs/specs/SLACK_FACETED_SEARCH_UAT_RUNBOOK.md`.
+- No further action is outstanding. The MVP is reviewed and integrated, the no-unfurl remediation
+  is merged through PR #3, post-merge verification passed, and the remediation is closed.
+- NB-1 remains a separate nonblocking deferred finding; no hardening is authorized by this closure.
+- Production activation remains off, and no bot start or restart is authorized by this record.
 
 ### Separate, still-open tracks (unchanged by this WP)
 
@@ -837,7 +872,12 @@ gives both options and prefers copying over moving, since PID 42332 is reading t
 
 ## Release or transfer
 
-- Lock remains active through the development-first implementation candidate.
-- Implementer transferred Codex → Claude Code on 2026-08-26 after Codex stopped at its usage limit; Codex had completed read-only discovery only, with no functional Search Taxonomy commit. Milestone anchor `5d4a21a327cf2dbb128e9ce21b07224d1e57bf84` unchanged.
-- Search Taxonomy v1 was committed as `ef970ee57f9ce91b29a0604ff3b1b540e88110c1` and is the anchor this evaluation round builds on. Stable Record Shadow, Content Index Lineage Gate and Search Taxonomy v1 all remain frozen.
-- Release/transfer: not requested in this round.
+- The Slack Faceted Search / no-unfurl task lock was released on 2026-08-28 after successful
+  post-merge verification and closure adjudication.
+- Active implementer: none. No next task or implementer is assigned by this reconciliation.
+- Historical transfer record: implementer transferred Codex → Claude Code on 2026-08-26 after
+  Codex completed read-only discovery only; milestone anchor
+  `5d4a21a327cf2dbb128e9ce21b07224d1e57bf84` remained unchanged.
+- Search Taxonomy v1 was committed as `ef970ee57f9ce91b29a0604ff3b1b540e88110c1`;
+  Stable Record Shadow, Content Index Lineage Gate and Search Taxonomy v1 remain frozen.
+- Release/transfer: complete; no transfer required.
