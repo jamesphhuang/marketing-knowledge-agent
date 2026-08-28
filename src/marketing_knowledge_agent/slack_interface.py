@@ -320,7 +320,21 @@ def _format_unstructured_slack_reply(answer, max_answer_chars: int) -> str:
 
 
 def post_slack_reply(client, reply: dict) -> None:
-    client.chat_postMessage(**reply)
+    """The single boundary every message this bot posts to Slack goes through.
+
+    Link and media unfurling is forced off here, for every message, rather than set at each call
+    site. Search results render an asset title as ``<approved-url|title>``, and Slack answers each
+    such link by expanding a preview card -- article summary, "Written by" metadata, a full-width
+    image, a YouTube thumbnail. A single search returns several assets, so a thread becomes
+    unreadable long before the results run out. The link itself is what the user needs; the preview
+    is what buries it.
+
+    The two flags are written after the reply is unpacked, so a call site cannot re-enable
+    unfurling by accident, and no caller has to remember to disable it. Nothing else about the
+    message is touched: the approved asset URL, the clickable title, the blocks and the pagination
+    text are passed through exactly as their builders produced them.
+    """
+    client.chat_postMessage(**{**reply, "unfurl_links": False, "unfurl_media": False})
 
 
 def run_slack_bot(
@@ -474,8 +488,8 @@ def _register_faceted_search_handlers(
             validate_structured_search_request(request, facet_catalog)
         except StaleFacetCatalogError:
             ack()
-            client.chat_postMessage(
-                channel=channel_id, thread_ts=thread_ts, text=FACETED_SEARCH_STALE_CATALOG_MESSAGE
+            post_slack_reply(
+                client, _reply_dict(channel_id, thread_ts, FACETED_SEARCH_STALE_CATALOG_MESSAGE)
             )
             return
         except StructuredSearchValidationError as exc:
@@ -536,28 +550,31 @@ def _register_faceted_search_handlers(
 
         pages = build_structured_slack_pages(answer)
         if pages is None:
-            client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text=_format_unstructured_slack_reply(answer, config.max_answer_chars),
+            post_slack_reply(
+                client,
+                _reply_dict(
+                    channel_id,
+                    thread_ts,
+                    _format_unstructured_slack_reply(answer, config.max_answer_chars),
+                ),
             )
         else:
             pagination_store.start(thread_key, pages.pages)
-            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=pages.pages[0])
+            post_slack_reply(client, _reply_dict(channel_id, thread_ts, pages.pages[0]))
 
         if refused:
             # A refused query's text must not survive anywhere shared, and the token store is shared
             # across every viewer of this channel. So nothing is stored and nothing is offered to
             # reopen -- only a way back to a blank modal. Storing it "just for the owner" would
             # still be storing it.
-            client.chat_postMessage(**build_restart_search_message(channel_id, thread_ts))
+            post_slack_reply(client, build_restart_search_message(channel_id, thread_ts))
             return
 
         request_token = request_token_store.store(
             request, owner_user_id=user_id, channel_id=channel_id, thread_ts=thread_ts
         )
-        client.chat_postMessage(
-            **build_adjust_filters_message(channel_id, thread_ts, request_token)
+        post_slack_reply(
+            client, build_adjust_filters_message(channel_id, thread_ts, request_token)
         )
 
 

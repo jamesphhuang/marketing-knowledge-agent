@@ -368,3 +368,21 @@ def test_real_bolt_routes_distinct_user_contexts_to_the_right_prefill(bolt_app, 
         b for b in other_view["blocks"] if b.get("block_id") == INTERVIEW_YEARS_BLOCK_ID
     )
     assert "initial_options" not in years_block["element"]
+
+
+def test_real_slack_sdk_serialization_carries_the_unfurl_suppression(bolt_app, slack_api):
+    """The unfurl flags must survive slack_sdk's own ``chat_postMessage`` serialization.
+
+    Every other unfurl test asserts on a fake client's kwargs, which proves the boundary sets the
+    flags and proves nothing about what leaves ``WebClient``. This one reads the payload
+    ``slack_sdk`` would actually have put on the wire, for both messages a search posts.
+    """
+    _response, view_payload = _open_modal(bolt_app, slack_api)
+    slack_api.post_message.clear()
+
+    _dispatch(bolt_app, _submission_body(view_payload, years=["2024"]))
+
+    assert len(slack_api.post_message) == 2
+    for payload in slack_api.post_message:
+        assert payload["unfurl_links"] is False
+        assert payload["unfurl_media"] is False

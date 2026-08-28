@@ -412,6 +412,78 @@ SLACK_TAXONOMY_ACTIVATED=NO
 MAIN_UPDATED=NO
 ```
 
+### Slack unfurl suppression — narrow UAT UX remediation (Claude Code, 2026-08-28)
+
+- Branch: `codex/fix/slack-disable-unfurl`, worktree `/private/tmp/mka-slack-disable-unfurl`,
+  baseline `23c697fed33a9f311f08c1baf8787e5030fd90ae`. Nothing here alters any other WP's state.
+- Finding, from Human UAT of the Faceted Search controlled run: search results render an asset
+  title as `<approved-url|title>`, and Slack answers each link with a preview card — SHOPLINE
+  article summary, "Written by" / "Time to read" metadata, a full-width image, a YouTube
+  thumbnail. One search posts several assets, so a thread becomes unreadable.
+- Fix: `post_slack_reply` — the helper the `app_mention` path already used — is now the single
+  posting boundary for this module, and forces `unfurl_links=False` / `unfurl_media=False` on
+  every message. The five direct `client.chat_postMessage` calls in the faceted view-submission
+  handler now route through it. The flags are written *after* the reply dict is unpacked, so no
+  call site can re-enable previews. `views_open`, the modal payload, the renderers, the approved
+  URL authority, ranking, taxonomy, pagination semantics and governance are untouched.
+- Inventory: six `chat_postMessage` call sites existed, all in `slack_interface.py`; one remains,
+  inside the boundary. No `say()` / `respond()` / `chat_update` / `chat_postEphemeral` /
+  `files_upload` exists anywhere in `src/`. A test asserts both facts over the source, so a future
+  handler cannot quietly reopen the finding.
+- Tests: **+12**, by collected count — `test_slack_interface.py` 44 → 50,
+  `test_slack_faceted_search_interface.py` 39 → 44, `test_slack_bolt_contract.py` 6 → 7.
+  Coverage: natural-language reply, pagination page 2,
+  faceted structured result, adjust-filters follow-up, restart-search after a refusal (which is
+  also the unstructured-reply branch), stale-catalog refusal, the "@Bot 搜尋" trigger reply, the
+  clickable approved link surviving the boundary, and — through real `slack_bolt` plus a stubbed
+  `WebClient.api_call` — the flags surviving `slack_sdk`'s own serialization.
+- One pre-existing assertion was updated rather than added to: `test_fake_client_receives_reply_dict`
+  compared the whole posted dict for equality, so it now includes the two flags the boundary adds.
+  Every other existing assertion indexes by key and was unaffected.
+
+#### Mutation-strength evidence
+
+Probes ran against a copy under `/private/tmp/mka-unfurl-probe`, deleted afterwards; the
+repository source was never mutated.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| 1 | drop `unfurl_links=False` from the boundary | `12 failed` |
+| 2 | drop `unfurl_media=False` from the boundary | `12 failed` |
+| 3 | let the adjust-filters call site call `chat_postMessage` directly | `3 failed` — the centralization test, the faceted-result test, and the real-bolt serialization test |
+| 4 | make `_asset_title` return a plain title (no link) | `1 failed` — proves the clickable-link assertion is not vacuous |
+
+#### Targeted verification
+
+- `tests/test_slack_interface.py`, `test_slack_faceted_search.py`,
+  `test_slack_faceted_search_interface.py`, `test_slack_bolt_contract.py`,
+  `test_slack_search_presentation_v1.py`, `test_slack_search_presentation_v2.py`,
+  `test_slack_exact_alias_query.py`, `test_slack_exact_alias_truncation.py`,
+  `test_slack_retriever_truncation_propagation.py`, `test_slack_output_preview.py` —
+  **410 passed**, 0 failed. `python -m compileall src/marketing_knowledge_agent` and
+  `git diff --check` both pass.
+- Import origin confirmed as this worktree's `src` before every run, not the venv's editable
+  install pointing at the main checkout.
+- Not run: full suite; `tests/test_slack_structured_governance.py` (pre-existing gitignored-fixture
+  blocker in this worktree, unrelated); standalone lint/type tools (not configured); Slack itself —
+  no message has been sent and the bot was not started.
+
+```text
+SLACK_UNFURL_DISABLED=YES
+UNFURL_LINKS_FALSE=YES
+UNFURL_MEDIA_FALSE=YES
+NL_SEARCH_COVERED=YES
+FACETED_SEARCH_COVERED=YES
+PAGINATION_COVERED=YES
+CLICKABLE_ASSET_TITLE_PRESERVED=YES
+APPROVED_URL_AUTHORITY_CHANGED=NO
+SEARCH_SEMANTICS_CHANGED=NO
+PAGINATION_SEMANTICS_CHANGED=NO
+PRODUCTION_CONFIG_CHANGED=NO
+BOT_RESTARTED=NO
+MAIN_UPDATED=NO
+```
+
 ## Objective and done definition
 
 - Objective: answer what the search system actually does for real user queries, not merely whether the parser returns PASS; separate taxonomy defects from index coverage gaps and from upstream data-quality defects.
