@@ -8,10 +8,13 @@
 - Milestone state: CLOSED
 - Task: Slack Faceted Search MVP and Slack no-unfurl Human UAT remediation
 - Implementer: none — lock released; no next task assigned
-- Reviewer: Codex — final verdict `PASS_WITH_NONBLOCKING_FINDINGS`; 0 blocking findings
+- Review provenance:
+  - Slack Faceted Search MVP Codex R3: `PASS_WITH_NONBLOCKING_FOLLOWUPS`; reviewed SHA
+    `313fbf7ac2745f2397369db3e2129f1978e03bef`
+  - Slack no-unfurl independent Delta Review: `PASS_WITH_NONBLOCKING_FINDINGS`; reviewed candidate
+    `0ae710f822fe797df79337a07ed18435c8cf8d88`; 0 blocking findings; NB-1 nonblocking and deferred
 - Integration: Slack Faceted Search MVP reviewed and integrated; Slack no-unfurl remediation
   merged via PR #3
-- Reviewed no-unfurl candidate: `0ae710f822fe797df79337a07ed18435c8cf8d88`
 - Merge commit on `main`: `d580f8335ea8f08be7045f30460bdc95fa3b3567`
 - Closure reconciliation branch: `codex/docs/close-slack-unfurl-remediation` (documentation only)
 - Product state: merged, post-merge verified and closed; production activation remains off
@@ -24,10 +27,12 @@ TASK_LOCK=RELEASED
 SLACK_FACETED_SEARCH_ACCEPTED=YES
 SLACK_FACETED_SEARCH_INTEGRATED=YES
 HUMAN_UAT=PASS
-REVIEW_VERDICT=PASS_WITH_NONBLOCKING_FINDINGS
-BLOCKING_FINDINGS=0
+SLACK_FACETED_SEARCH_R3_REVIEW=PASS_WITH_NONBLOCKING_FOLLOWUPS
+SLACK_FACETED_SEARCH_R3_REVIEWED_SHA=313fbf7ac2745f2397369db3e2129f1978e03bef
+SLACK_UNFURL_DELTA_REVIEW=PASS_WITH_NONBLOCKING_FINDINGS
+SLACK_UNFURL_DELTA_BLOCKING_FINDINGS=0
+SLACK_UNFURL_REVIEWED_CANDIDATE=0ae710f822fe797df79337a07ed18435c8cf8d88
 MERGED_PR=3
-REVIEWED_CANDIDATE=0ae710f822fe797df79337a07ed18435c8cf8d88
 MERGE_SHA=d580f8335ea8f08be7045f30460bdc95fa3b3567
 MAIN_UPDATED=YES
 POST_MERGE_VERIFICATION=PASS
