@@ -55,6 +55,7 @@ from .slack_pagination import (
 from .slack_presentation import (
     SHOW_MORE_BUTTON_HINT,
     SHOW_MORE_COMMAND,
+    SHOW_MORE_MENTION,
     SHOW_MORE_THREAD_REPLY_HINT,
     SLACK_SEARCH_PARENT_CAP,
     build_structured_slack_pages,
@@ -99,9 +100,18 @@ ANSWER_TRUNCATION_NOTICE = "(內容過長已截斷,完整結果請用內部工�
 SLACK_NO_RESULTS_MESSAGE = "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
 PAGINATION_EXPIRED_MESSAGE = "此搜尋工作階段已失效，請重新執行原搜尋。"
 FACETED_SEARCH_STALE_CATALOG_MESSAGE = "搜尋條件已過期，請重新點擊「開啟條件搜尋」再試一次。"
-# Shown when a Slack artifact from a superseded entry mode is used. It names the current entry and
-# nothing else: no echo of what was clicked, no query, no hint about the previous search.
-STALE_ENTRY_MODE_MESSAGE = "搜尋入口已更新，請輸入 `/mka` 重新開啟搜尋。"
+# Shown when a Slack artifact from a superseded entry mode is used. Each names the entry that
+# exists under the mode running *now*, and nothing else: no echo of what was clicked, no query, no
+# token, no hint about the previous search. They are fixed literals selected by mode, never
+# assembled from anything the interaction carried.
+#
+# There are two because there is no single correct sentence. Telling a `mention_mixed` user to type
+# `/mka` sends them to a command that mode never registers, which would leave the guidance as stale
+# as the button that produced it -- the user is told to do something that also does nothing.
+STALE_ENTRY_MODE_MESSAGE_SLASH = "搜尋入口已更新，請輸入 `/mka` 重新開啟搜尋。"
+STALE_ENTRY_MODE_MESSAGE_MENTION = (
+    f"此搜尋操作已失效，請重新標記 {SHOW_MORE_MENTION} 開始搜尋。"
+)
 # How much of a structured result the Slack surface materialises before paging over it. These are
 # display capacity, not ranking: the ordered candidate set and every governance gate in front of
 # it are unchanged, and raising the ceiling only lets Slack show more of the same ranked result.
@@ -519,6 +529,18 @@ def new_slash_session_id() -> str:
     return secrets.token_hex(SLASH_SESSION_ID_BYTES)
 
 
+def stale_entry_mode_message(search_entry_mode: str) -> str:
+    """The fixed guidance for an interaction ``entrypoint_allowed_for_mode`` refused.
+
+    Selected by the mode in force now, for the same reason that rule is: what the user should do
+    next is a fact about the current configuration, not about the artifact they clicked. The
+    refusal itself is decided elsewhere and is not affected by which sentence comes back.
+    """
+    if search_entry_mode == ENTRY_MODE_SLASH_FACETED_ONLY:
+        return STALE_ENTRY_MODE_MESSAGE_SLASH
+    return STALE_ENTRY_MODE_MESSAGE_MENTION
+
+
 def _tell_stale_clicker_to_use_the_new_entry(client, body: dict, config: SlackConfig) -> None:
     """Tell whoever clicked a superseded button where the search entry went, or say nothing.
 
@@ -535,7 +557,10 @@ def _tell_stale_clicker_to_use_the_new_entry(client, body: dict, config: SlackCo
     user_id, channel_id = context
     if not _slash_entry_allowed(config, channel_id):
         return
-    post_slack_ephemeral(client, _ephemeral_dict(channel_id, user_id, STALE_ENTRY_MODE_MESSAGE))
+    post_slack_ephemeral(
+        client,
+        _ephemeral_dict(channel_id, user_id, stale_entry_mode_message(config.search_entry_mode)),
+    )
 
 
 def entrypoint_allowed_for_mode(search_entry_mode: str, entrypoint: str) -> bool:
@@ -840,7 +865,9 @@ def _register_faceted_search_handlers(
             # arrive; ``ack`` carries it, so no posting API is involved.
             ack(
                 response_action="errors",
-                errors={FREE_TEXT_BLOCK_ID: STALE_ENTRY_MODE_MESSAGE},
+                errors={
+                    FREE_TEXT_BLOCK_ID: stale_entry_mode_message(config.search_entry_mode)
+                },
             )
             return
 

@@ -47,11 +47,13 @@ from marketing_knowledge_agent.slack_interface import (
     ENTRY_MODE_SLASH_FACETED_ONLY,
     FACETED_SEARCH_STALE_CATALOG_MESSAGE,
     PAGINATION_EXPIRED_MESSAGE,
-    STALE_ENTRY_MODE_MESSAGE,
+    STALE_ENTRY_MODE_MESSAGE_MENTION,
+    STALE_ENTRY_MODE_MESSAGE_SLASH,
     SlackConfig,
     SlackInterfaceError,
     _slash_session_key,
     entrypoint_allowed_for_mode,
+    stale_entry_mode_message,
     handle_slack_event,
     load_slack_config,
     run_slack_bot,
@@ -2238,8 +2240,10 @@ def test_a_legacy_mention_button_cannot_open_a_modal_in_slash_mode(tmp_path, val
 
     assert client.opened_views == []
     assert client.messages == []
-    # A courtesy pointer to the new entry, visible only to the clicker and carrying nothing else.
-    assert [m["text"] for m in client.ephemerals] == [STALE_ENTRY_MODE_MESSAGE]
+    # A courtesy pointer to the entry that exists now, visible only to the clicker and carrying
+    # nothing else.
+    assert [m["text"] for m in client.ephemerals] == [STALE_ENTRY_MODE_MESSAGE_SLASH]
+    assert "/mka" in client.ephemerals[0]["text"]
     assert client.ephemerals[0]["user"] == "U1"
 
 
@@ -2291,7 +2295,10 @@ def test_a_legacy_modal_submitted_after_the_mode_switch_executes_nothing(tmp_pat
     assert "slack_faceted_search" not in _audit_text(tmp_path / "audit.csv")
     # The modal explains itself rather than closing silently on a result that never arrives.
     assert ack.calls == [
-        {"response_action": "errors", "errors": {FREE_TEXT_BLOCK_ID: STALE_ENTRY_MODE_MESSAGE}}
+        {
+            "response_action": "errors",
+            "errors": {FREE_TEXT_BLOCK_ID: STALE_ENTRY_MODE_MESSAGE_SLASH},
+        }
     ]
 
 
@@ -2368,6 +2375,78 @@ def test_a_slash_artifact_is_refused_in_mention_mixed_too(tmp_path):
 
     assert client.opened_views == []
     assert client.messages == []
+    # Codex R2 P3-1: the guidance has to name the entry this mode actually has. Telling the user
+    # to type ``/mka`` here would send them to a command ``mention_mixed`` never registers, leaving
+    # the advice as stale as the button that produced it.
+    assert [m["text"] for m in client.ephemerals] == [STALE_ENTRY_MODE_MESSAGE_MENTION]
+    assert "/mka" not in client.ephemerals[0]["text"]
+    assert "@Marketing Knowledge Agent" in client.ephemerals[0]["text"]
+    assert client.ephemerals[0]["user"] == "U1"
+
+
+def test_a_stale_slash_modal_submitted_in_mention_mixed_is_refused_with_mode_correct_guidance(
+    tmp_path,
+):
+    """Codex R2 P3-1, at the other gate: a submission is refused the same way a click is.
+
+    Both refusal paths must speak for the mode running now, or one of them quietly keeps telling
+    users about an entry point that is not there.
+    """
+    app, _tmp = _run_bot_and_get_app(tmp_path)
+    catalog_version = json.loads(
+        _click_open_modal(app, json.dumps({})).opened_views[0]["view"]["private_metadata"]
+    )["catalog_version"]
+    stale_slash_metadata = json.dumps(
+        {
+            "channel_id": "C123",
+            "thread_ts": "",
+            "catalog_version": catalog_version,
+            "entrypoint": ENTRYPOINT_SLASH_COMMAND,
+            "session_id": "sess-1",
+        },
+        ensure_ascii=False,
+    )
+    audit_before = _audit_text(tmp_path / "audit.csv")
+
+    ack, client = FakeAck(), FakeSlackClient()
+    app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
+        ack=ack,
+        body={"user": {"id": "U1"}},
+        client=client,
+        view={
+            "private_metadata": stale_slash_metadata,
+            "state": {"values": _state_values(year="2024")},
+        },
+    )
+
+    # Refused, and nothing executed -- the security half is unchanged by this cleanup.
+    assert client.messages == [] and client.ephemerals == []
+    assert _audit_text(tmp_path / "audit.csv") == audit_before
+    assert ack.calls == [
+        {
+            "response_action": "errors",
+            "errors": {FREE_TEXT_BLOCK_ID: STALE_ENTRY_MODE_MESSAGE_MENTION},
+        }
+    ]
+    assert "/mka" not in ack.calls[0]["errors"][FREE_TEXT_BLOCK_ID]
+
+
+def test_stale_guidance_names_the_entry_the_current_mode_actually_has():
+    """Pinned directly, and asserted as text rather than as constant identity.
+
+    Comparing the resolver's output to the same constant the resolver returns would pass however
+    the sentences were swapped; what matters is which entry point each one names.
+    """
+    slash = stale_entry_mode_message(ENTRY_MODE_SLASH_FACETED_ONLY)
+    mention = stale_entry_mode_message(ENTRY_MODE_MENTION_MIXED)
+
+    assert "/mka" in slash
+    assert "@Marketing Knowledge Agent" not in slash
+    assert "/mka" not in mention
+    assert "@Marketing Knowledge Agent" in mention
+    # Neither may carry anything from the interaction that was refused.
+    for message in (slash, mention):
+        assert "request_token" not in message and "session_id" not in message
 
 
 def test_entrypoint_allowed_for_mode_is_the_single_rule_both_gates_share():
