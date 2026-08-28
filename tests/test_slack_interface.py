@@ -33,6 +33,7 @@ from marketing_knowledge_agent.slack_output_preview import (
 )
 from marketing_knowledge_agent.query_gating import RESTRICTED_QUERY_REFUSAL
 from marketing_knowledge_agent.query_gating import append_denylist_query_audit
+from marketing_knowledge_agent.slack_pagination import SlackPaginationStore, pagination_key
 from marketing_knowledge_agent.slack_interface import (
     ANSWER_TRUNCATION_NOTICE,
     APPROVED_ASSET_URL_OVERLAY_UNAVAILABLE,
@@ -275,7 +276,8 @@ def test_fake_client_receives_reply_dict():
 
     post_slack_reply(client, reply)
 
-    assert client.messages == [reply]
+    # The reply is forwarded unchanged apart from the two unfurl flags the boundary always adds.
+    assert client.messages == [{**reply, "unfurl_links": False, "unfurl_media": False}]
 
 
 def test_slack_audit_preserves_existing_sync_audit_schema(tmp_path):
@@ -693,3 +695,113 @@ def _build_index(tmp_path):
     db_path = tmp_path / "index.sqlite"
     SQLiteIndex(db_path).rebuild(documents, chunk_documents(documents))
     return db_path
+
+
+# --- Slack link/media unfurl suppression -------------------------------------------------------
+#
+# Human UAT found search threads unreadable: every clickable approved asset title made Slack expand
+# a preview card (article summary, "Written by" metadata, a full-width image, a YouTube thumbnail),
+# and one search posts several assets. The remedy is a single posting boundary that forces
+# unfurling off for every message this bot sends, without touching the URLs themselves.
+
+
+def _posted(client):
+    assert client.messages, "nothing was posted"
+    return client.messages[-1]
+
+
+def test_post_slack_reply_disables_link_and_media_unfurling():
+    client = FakeSlackClient()
+
+    post_slack_reply(client, {"channel": "C123", "thread_ts": "10.1", "text": "reply"})
+
+    sent = _posted(client)
+    assert sent["unfurl_links"] is False
+    assert sent["unfurl_media"] is False
+
+
+def test_a_call_site_cannot_re_enable_unfurling_through_the_reply_dict():
+    """The flags are written after the reply is unpacked, so no caller can turn previews back on."""
+    client = FakeSlackClient()
+
+    post_slack_reply(
+        client,
+        {
+            "channel": "C123",
+            "thread_ts": "10.1",
+            "text": "reply",
+            "unfurl_links": True,
+            "unfurl_media": True,
+        },
+    )
+
+    sent = _posted(client)
+    assert sent["unfurl_links"] is False
+    assert sent["unfurl_media"] is False
+
+
+def test_the_boundary_leaves_a_clickable_approved_asset_link_untouched():
+    """Suppressing the preview must not touch the link: the title stays clickable, the URL stays."""
+    client = FakeSlackClient()
+    text = "> • *文章 [1]*\n> <https://shopline.tw/blog/case|傳統製麵廠的數位轉型之路！>"
+
+    post_slack_reply(client, {"channel": "C123", "thread_ts": "10.1", "text": text})
+
+    sent = _posted(client)
+    assert sent["text"] == text
+    assert "https://shopline.tw/blog/case" in sent["text"]
+    assert "<https://shopline.tw/blog/case|傳統製麵廠的數位轉型之路！>" in sent["text"]
+    assert sent["unfurl_links"] is False and sent["unfurl_media"] is False
+
+
+def test_natural_language_reply_is_posted_with_unfurling_disabled(tmp_path):
+    """A: the app_mention path -- the reply handle_slack_event built, posted through the boundary."""
+    client = FakeSlackClient()
+
+    reply = handle_slack_event(
+        {"text": "<@BOT> campaign result", "channel": "C123", "user": "U1", "ts": "100.1"},
+        config=SlackConfig(allowed_channel_ids=["C123"]),
+        ask_fn=lambda question, **kwargs: _agentic_answer(citations=[_citation("Public source")]),
+        audit_log_path=tmp_path / "audit.csv",
+    )
+    post_slack_reply(client, reply)
+
+    sent = _posted(client)
+    assert "Public source" in sent["text"]
+    assert sent["unfurl_links"] is False and sent["unfurl_media"] is False
+
+
+def test_pagination_continuation_is_posted_with_unfurling_disabled(tmp_path):
+    """C: 「顯示更多」 replays a stored page, which must be posted through the same boundary."""
+    store = SlackPaginationStore()
+    store.start(pagination_key("C123", "100.1"), ["page one", "page two"])
+    client = FakeSlackClient()
+
+    reply = handle_slack_event(
+        {"text": "<@BOT> 顯示更多", "channel": "C123", "user": "U1", "ts": "100.1"},
+        config=SlackConfig(allowed_channel_ids=["C123"]),
+        audit_log_path=tmp_path / "audit.csv",
+        pagination_store=store,
+    )
+    post_slack_reply(client, reply)
+
+    sent = _posted(client)
+    assert sent["text"] == "page two"
+    assert sent["unfurl_links"] is False and sent["unfurl_media"] is False
+
+
+def test_no_slack_message_is_posted_outside_the_boundary():
+    """The guarantee is centralization: one ``chat_postMessage`` call, inside ``post_slack_reply``.
+
+    A second call site anywhere would post with Slack's default unfurling and reopen the finding,
+    so this is asserted over the source rather than left to each new handler to remember.
+    """
+    source = Path("src/marketing_knowledge_agent/slack_interface.py").read_text(encoding="utf-8")
+    assert source.count("chat_postMessage") == 1
+    boundary = source.split("def post_slack_reply(", 1)[1].split("\ndef ", 1)[0]
+    assert "chat_postMessage" in boundary
+
+    for module in Path("src/marketing_knowledge_agent").glob("*.py"):
+        if module.name == "slack_interface.py":
+            continue
+        assert "chat_postMessage" not in module.read_text(encoding="utf-8"), module.name

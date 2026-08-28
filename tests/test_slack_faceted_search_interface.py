@@ -1195,3 +1195,108 @@ def test_a_denylist_refusal_stores_no_request_and_offers_no_prefill_button(tmp_p
     # And that restart button opens a genuinely blank modal.
     reopened = _reopen(app, button["value"], user_id="U1")
     assert _modal_prefill(reopened.opened_views[0]["view"])[FREE_TEXT_BLOCK_ID] == ""
+
+
+# --------------------------------------------------------------------------------------
+# Slack link/media unfurl suppression (UAT UX remediation)
+#
+# Every message this handler posts goes through ``post_slack_reply``, which forces
+# ``unfurl_links``/``unfurl_media`` off. Human UAT found that a result carrying several clickable
+# approved asset titles made Slack expand a preview card per link -- article summaries, "Written
+# by" metadata, full-width images, YouTube thumbnails -- burying the results in the thread. The
+# links themselves are untouched; only Slack's automatic preview is suppressed.
+# --------------------------------------------------------------------------------------
+
+
+def _assert_no_unfurl(message):
+    assert message["unfurl_links"] is False
+    assert message["unfurl_media"] is False
+
+
+def test_faceted_result_and_adjust_button_are_posted_without_unfurling(tmp_path):
+    """B and D: the structured result page, and the "調整條件" follow-up that accompanies it."""
+    app, _tmp_path = _run_bot_and_get_app(tmp_path)
+
+    _ack, client = _submit(app, state_values=_state_values(years=["2024"]))
+
+    assert len(client.messages) == 2
+    for message in client.messages:
+        _assert_no_unfurl(message)
+    # The follow-up is still the adjust-filters message, with its button intact.
+    assert client.messages[1]["blocks"][-1]["block_id"] == "adjust_faceted_search_actions"
+
+
+def test_faceted_result_still_carries_its_clickable_asset_titles(tmp_path, monkeypatch):
+    """G: suppressing the preview must not strip or rewrite the approved asset link itself."""
+    url = "https://shopline.tw/blog/case"
+
+    def _attach_url(answer, db_path):
+        structured = getattr(answer, "generated", answer).structured_result
+        for entity in structured.matched_entities:
+            for asset in entity.assets:
+                asset.url = url
+        return None
+
+    monkeypatch.setattr(
+        "marketing_knowledge_agent.slack_interface._apply_approved_asset_urls", _attach_url
+    )
+    app, _tmp_path = _run_bot_and_get_app(tmp_path, enable_approved_asset_urls=True)
+
+    _ack, client = _submit(app, state_values=_state_values(years=["2024"]))
+
+    result = client.messages[0]
+    _assert_no_unfurl(result)
+    # The clickable mrkdwn link survives the boundary intact: URL present, title still the label.
+    assert f"<{url}|" in result["text"]
+
+
+def test_restart_search_message_after_a_refusal_is_posted_without_unfurling(tmp_path):
+    """E, plus the unstructured-reply branch: a refusal posts a body and a 「重新搜尋」 button."""
+    secret = "SECRET_CUSTOMER_NAME"
+    app, _tmp_path = _run_bot_and_get_app(tmp_path, denylist_brands=[secret])
+
+    _ack, client = _submit(
+        app, state_values=_state_values(years=["2024"], free_text=f"{secret} 案例")
+    )
+
+    assert len(client.messages) == 2
+    for message in client.messages:
+        _assert_no_unfurl(message)
+    assert client.messages[1]["blocks"][-1]["block_id"] == "restart_faceted_search_actions"
+
+
+def test_stale_catalog_message_is_posted_without_unfurling(tmp_path):
+    """F: the staleness refusal is a message too, and takes the same boundary."""
+    app, _tmp_path = _run_bot_and_get_app(tmp_path)
+    handler = app.views[FACETED_SEARCH_MODAL_CALLBACK_ID]
+    client = FakeSlackClient()
+
+    handler(
+        ack=FakeAck(),
+        body={"user": {"id": "U1"}},
+        client=client,
+        view={
+            "private_metadata": json.dumps(
+                {"channel_id": "C123", "thread_ts": "1", "catalog_version": "stale"}
+            ),
+            "state": {"values": _state_values(years=["2024"])},
+        },
+    )
+
+    assert client.messages[0]["text"] == FACETED_SEARCH_STALE_CATALOG_MESSAGE
+    _assert_no_unfurl(client.messages[0])
+
+
+def test_the_faceted_trigger_reply_is_posted_without_unfurling(tmp_path):
+    """The "@Bot 搜尋" button message travels the registered app_mention posting path."""
+    app, _tmp_path = _run_bot_and_get_app(tmp_path)
+    client = FakeSlackClient()
+
+    app.events["app_mention"](
+        event={"text": "<@BOT> 搜尋", "channel": "C123", "user": "U1", "ts": "1"},
+        client=client,
+    )
+
+    assert client.messages
+    _assert_no_unfurl(client.messages[0])
+    assert client.messages[0]["blocks"][-1]["block_id"] == "open_faceted_search_actions"
