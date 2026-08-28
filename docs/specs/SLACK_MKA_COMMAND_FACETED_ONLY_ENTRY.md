@@ -198,6 +198,23 @@ Setting them costs nothing and cannot make unfurling more likely.
 
 Clickable approved asset titles (`<approved-url|title>`) are unchanged on both paths.
 
+### Known platform constraint on ephemeral posting
+
+`chat.postEphemeral` is not universally available in every conversation a slash command can be
+invoked from. Slack requires the bot to be able to post into the target conversation: in a public or
+private channel the app generally has to be a member, and an invocation from a channel the bot has
+not been added to can return `channel_not_found` even though the command itself was delivered. This
+work package does **not** work around that, deliberately -- the alternatives are `response_url`
+(a new outbound HTTP path, outside this WP's scope and outside the posting boundary) or posting
+in-channel (which would break `RESULT_VISIBILITY=INVOKER_ONLY`).
+
+The failure is safe rather than silent-but-wrong: nothing is disclosed to the conversation, the
+search result simply does not arrive, and the exception surfaces in the bot's logs. It is listed
+here rather than guessed at because it is a live-Slack property this code cannot establish, and it
+is the first thing UAT should probe -- run `/mka` from a channel the bot is not a member of, and
+from a DM, and record what happens. If it proves to be a real obstacle, the follow-up is a
+`response_url` fallback inside the same ephemeral boundary, not a change to result visibility.
+
 ## 11. Schema versioning
 
 The modal's wire schema changed, so an in-flight modal must be refused rather than decoded under the

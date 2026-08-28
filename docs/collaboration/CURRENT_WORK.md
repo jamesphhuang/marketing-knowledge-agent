@@ -20,6 +20,9 @@
 - Slack App Console changed: NO
 - Bot started/restarted: NO
 - Main updated: NO
+- Implementation commit: `5ccf31516084f3e30dd34c3dbfcf862f6f121d08` (code, tests and the design
+  spec; this pointer is the only later addition). Branch is local and ahead of `origin/main` by
+  these commits; nothing has been pushed and `origin/main` is still the baseline `0669fbb`.
 - Started at: 2026-08-28
 
 ```text
@@ -31,6 +34,7 @@ SLACK_APP_CONSOLE_CHANGE_AUTHORIZED=NO
 BOT_START_AUTHORIZED=NO
 DEPLOYMENT_AUTHORIZED=NO
 MAIN_MERGE_AUTHORIZED=NO
+READY_FOR_DELTA_REVIEW=YES
 ```
 
 ### Assumptions and done definition (recorded before any code change)
@@ -132,7 +136,15 @@ and silently widen a year-restricted search.
    and forwards them verbatim into the request body, so they are transmitted. Whether Slack's
    `chat.postEphemeral` acts on them is **not** established here and is a UAT check. The boundary
    forces them regardless; that cannot make unfurling more likely.
-2. **`slack_bolt` runs a slash-command listener asynchronously.** `dispatch` returns as soon as
+2. **`chat.postEphemeral` is not available in every conversation.** Slack requires the app to be
+   able to post into the target conversation, so an invocation from a channel the bot was never
+   added to can fail with `channel_not_found` even though the command was delivered. Not worked
+   around here, deliberately: the alternatives are a `response_url` outbound path (outside this
+   WP's scope and outside the posting boundary) or posting in-channel, which would break
+   invoker-only visibility. The failure discloses nothing -- the result simply does not arrive --
+   and it is the first thing UAT should probe. See the spec's "Known platform constraint on
+   ephemeral posting".
+3. **`slack_bolt` runs a slash-command listener asynchronously.** `dispatch` returns as soon as
    `ack()` fires and the rest of the handler continues on a worker thread. That is correct
    production behaviour for Slack's three-second deadline, but it makes a naive
    assert-immediately-after-dispatch test a race. Reproduced directly: 0 `views.open` calls
