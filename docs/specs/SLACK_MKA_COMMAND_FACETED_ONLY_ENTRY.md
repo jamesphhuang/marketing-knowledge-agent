@@ -209,8 +209,21 @@ legacy button → modal recording `entrypoint=app_mention` → submission trusti
 A refused submission executes nothing: no `execute_structured_search`, no retrieval, no audit row,
 no message of either kind. It is answered through `ack(response_action="errors")` alone, so no
 posting API is involved, and the modal explains itself rather than closing silently on a result
-that will never arrive. A refused button click gets a fixed ephemeral pointer to `/mka` through the
-existing boundary — no public post, no echo of what was clicked, no prior query.
+that will never arrive. A refused button click gets a fixed ephemeral pointer through the existing
+boundary — no public post, no echo of what was clicked, no prior query.
+
+The guidance names the entry point the **current** mode has, chosen by `stale_entry_mode_message`:
+
+| current mode | guidance |
+| --- | --- |
+| `slash_faceted_only` | 「搜尋入口已更新，請輸入 `/mka` 重新開啟搜尋。」 |
+| `mention_mixed` | 「此搜尋操作已失效，請重新標記 @Marketing Knowledge Agent 開始搜尋。」 |
+
+One shared sentence would not do. Telling a `mention_mixed` user to type `/mka` points them at a
+command that mode never registers, leaving the advice as stale as the artifact that triggered it.
+Both are fixed literals selected by mode — never assembled from anything the interaction carried —
+and the mention wording reuses `SHOW_MORE_MENTION`, the single definition of how this bot is
+addressed.
 
 **Invariant:** under `slash_faceted_only` there is no executable route from an old mention-mode
 Slack artifact to a structured search, and therefore none to `chat.postMessage`.

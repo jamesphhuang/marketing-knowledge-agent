@@ -5,12 +5,13 @@
 ## Lock
 
 - State: active
-- Milestone state: SLACK_MKA_COMMAND_R1_REMEDIATED_AWAITING_R2_REVIEW
+- Milestone state: SLACK_MKA_COMMAND_R2_CLEANUP_DONE_AWAITING_FINAL_SPOT_REVIEW
 - Task: Slack `/mka` Faceted-Only Search Entry
 - Implementer: Claude Code
-- Reviewer: Codex — independent Delta Review R1 against `5954e10` returned CHANGES_REQUESTED with
-  2 blocking findings, both remediated below. **This WP is NOT reviewed and NOT accepted.** Codex
-  R2 re-review is pending.
+- Reviewer: Codex — R1 against `5954e10` returned CHANGES_REQUESTED (2 blocking, both remediated);
+  R2 against `0da023c` returned PASS_WITH_NONBLOCKING_FINDINGS (0 blocking, 2 nonblocking, both
+  closed by the authorized narrow cleanup below). **This WP is not yet integrated**; a final spot
+  review and integration verification are still outstanding.
 - Branch: `claude/impl/slack-mka-command`
 - Worktree: `/private/tmp/mka-slack-mka-command` (isolated; does not touch the main checkout at
   `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent`)
@@ -24,7 +25,9 @@
 - Main updated: NO
 - R1 implementation commit: `5ccf31516084f3e30dd34c3dbfcf862f6f121d08`; R1 reviewed candidate
   `5954e10bd31b308c67e349b4d76f207c5558eb03`; R1 remediation commit
-  `12f4c81e070cd04f494d44386a8e95843294f998`. Branch is local and ahead of `origin/main` by these
+  `12f4c81e070cd04f494d44386a8e95843294f998`; R2 reviewed candidate
+  `0da023c2f2f606b0a0287334537168a8a24d93f2`; R2 nonblocking cleanup commit
+  `a09b89c06b6a18220e5781e032d37a1d616bfd94`. Branch is local and ahead of `origin/main` by these
   commits; nothing has been pushed and `origin/main` is still the baseline `0669fbb`.
 - Started at: 2026-08-28
 
@@ -40,8 +43,11 @@ MAIN_MERGE_AUTHORIZED=NO
 CODEX_DELTA_REVIEW_R1=CHANGES_REQUESTED
 R1_BLOCKING_FINDINGS=2
 R1_BLOCKERS_REMEDIATED=2
-CODEX_R2_REVIEW=PENDING
-READY_FOR_R2_DELTA_REVIEW=YES
+CODEX_R2_REVIEW=PASS_WITH_NONBLOCKING_FINDINGS
+R2_BLOCKING_FINDINGS=0
+R2_NONBLOCKING_FINDINGS=2
+R2_NONBLOCKING_CLOSED=2
+READY_FOR_FINAL_SPOT_REVIEW=YES
 ```
 
 ### Assumptions and done definition (recorded before any code change)
@@ -257,9 +263,11 @@ MAIN_UPDATED=NO
   `slack_bolt` 1.29.0, `slack_sdk` 3.43.0). Import origin confirmed as **this** worktree's `src`
   before every run via an explicit `PYTHONPATH`, not the venv's editable install pointing at the
   main checkout.
-- Targeted run (24 files: every Slack module plus structured search, facets, query gating,
+- Targeted run (**23 files**: every Slack module plus structured search, facets, query gating,
   taxonomy, typed retrieval, pipeline, agentic, generation, governance evals, validation, content
   index, search-quality evaluation): **762 passed, 1 skipped, 0 failed.**
+  *(Corrected 2026-08-28 per Codex R2 finding P3-2: this set was originally labelled "24 files".
+  It is 23. See the R2 nonblocking cleanup section for the counted set and both figures.)*
 - Test counts: `test_slack_faceted_search.py` 41 → 53, `test_slack_faceted_search_interface.py`
   44 → 95, `test_slack_bolt_contract.py` 7 → 10, `test_slack_interface.py` 50 → 52,
   `test_structured_search.py` 22 → 32, `test_search_facets.py` 16 → 17.
@@ -382,8 +390,10 @@ is what demonstrates the two layers protect independently rather than one coveri
 
 #### Verification (R1 remediation)
 
-- Same 24-file suite as the R1 candidate, for comparable evidence: **778 passed, 1 skipped, 0
-  failed** (R1 candidate: 762 passed, 1 skipped; +16 from the tests added this round).
+- Same suite as the R1 candidate, for comparable evidence: **778 passed, 1 skipped, 0 failed**
+  (R1 candidate: 762 passed, 1 skipped; +16 from the tests added this round).
+  *(Corrected 2026-08-28 per Codex R2 finding P3-2: that set is **23 files**, not 24. The figure
+  itself — 778 passed, 1 skipped — was and is correct for it.)*
 - Test counts: `test_slack_faceted_search_interface.py` 95 → 110,
   `test_slack_bolt_contract.py` 10 → 11.
 - `compileall` on `src/marketing_knowledge_agent` and both changed test files: pass.
@@ -393,6 +403,108 @@ is what demonstrates the two layers protect independently rather than one coveri
   `tests/test_slack_structured_governance.py` (pre-existing gitignored `.mka/content_index.sqlite`
   fixture blocker -- **not** claimed as passing, and not a regression from this remediation);
   standalone lint/type tools (not configured); production sync, re-index, deploy, bot
+  start/restart, or UAT. Slack itself is still unexercised.
+
+### Codex Independent Delta Review R2 and nonblocking cleanup (2026-08-28)
+
+Reviewed candidate: `0da023c2f2f606b0a0287334537168a8a24d93f2`. Verdict
+**PASS_WITH_NONBLOCKING_FINDINGS**, **0 blocking**, **2 nonblocking**. Both nonblocking findings
+were authorized for a narrow cleanup and are closed below. The R1 and R1-remediation records above
+are retained unchanged as those rounds' evidence; the two suite-count lines carry an inline
+correction rather than a rewrite, so what was originally claimed remains visible.
+
+```text
+CODEX_DELTA_REVIEW_R2=PASS_WITH_NONBLOCKING_FINDINGS
+R2_REVIEWED_CANDIDATE=0da023c2f2f606b0a0287334537168a8a24d93f2
+R2_BLOCKING_FINDINGS=0
+R2_NONBLOCKING_FINDINGS=2
+P3_1_MODE_AWARE_STALE_GUIDANCE=CLOSED
+P3_2_SUITE_COUNT_CORRECTION=CLOSED
+R1_FINDING_1_STILL_CLOSED=YES
+R1_FINDING_2_STILL_CLOSED=YES
+FINAL_SPOT_REVIEW=PENDING
+```
+
+#### P3-1 -- stale-artifact guidance now names the entry the current mode has
+
+**Reproduced first**, on the reviewed candidate, at both refusal paths:
+
+```text
+mention_mixed + stale slash button   -> refused; guidance: 「請輸入 `/mka`…」
+mention_mixed + stale slash modal    -> refused; ack errors: 「請輸入 `/mka`…」
+/mka registered in this mode: False
+```
+
+The refusal was correct in both cases -- nothing opened, nothing executed, nothing posted -- so this
+was never a security defect. It was advice that was itself stale: a user under `mention_mixed` was
+told to type a command that mode never registers, so the remedy failed the same way the button did.
+
+The message is now selected by the mode in force at execution time, by
+`stale_entry_mode_message(mode)`, for the same reason `entrypoint_allowed_for_mode` is: what a user
+should do next is a fact about the current configuration, not about the artifact they clicked.
+
+| current mode | guidance |
+| --- | --- |
+| `slash_faceted_only` | 「搜尋入口已更新，請輸入 `/mka` 重新開啟搜尋。」 |
+| `mention_mixed` | 「此搜尋操作已失效，請重新標記 @Marketing Knowledge Agent 開始搜尋。」 |
+
+Both are fixed literals chosen by mode, never assembled from anything the interaction carried: no
+old query, no button value, no request token, no free text, no `private_metadata` content. The
+mention wording reuses `SHOW_MORE_MENTION`, which is already the single definition of how this bot
+is addressed, so a rename cannot leave the two instructions disagreeing.
+
+Nothing about refusal changed. `entrypoint_allowed_for_mode`, the action-time gate, the
+view-submission gate and the show-more provenance gate are all untouched, and the R1 security
+probes were re-run against this cleanup to confirm they still bite (below).
+
+#### P3-2 -- comparable-suite figures, counted rather than asserted
+
+The reviewer was right and the correction is confirmed independently here by counting the set and
+running both:
+
+| set | files | result |
+| --- | --- | --- |
+| comparable set used across R1, R1-remediation and R2 | **23** | R2 candidate: `778 passed, 1 skipped` |
+| superset, adding `tests/test_content_index_lineage.py` | **24** | R2 candidate: `799 passed, 1 skipped` |
+
+`tests/test_content_index_lineage.py` alone is `21 passed`, which is exactly the difference. The
+records above said "24-file / 778", conflating the two; the file count was wrong, the figure was
+right for the set actually run.
+
+`tests/test_slack_structured_governance.py` remains **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE**
+— its gitignored `.mka/content_index.sqlite` dependency is absent from this isolated worktree. It
+is not claimed as passing, and it is not a regression from any round of this WP.
+
+#### Mutation-strength evidence (R2 cleanup)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated. Unmutated baseline: `123 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| P31-shared | route both modes back to the single `/mka` message | `3 failed` |
+| P31-swapped | return each mode's message for the other mode | `7 failed` |
+| R1-A (re-run) | move slash-only migration routing back below the raw-question audit | `3 failed` |
+| R1-B1 (re-run) | remove the **action** gate only | `6 failed` |
+| R1-B2 (re-run) | remove the **view-submission** gate only | `4 failed` |
+
+The swapped probe matters more than the shared one: it proves the tests assert *which entry point
+each message names* rather than comparing the resolver's output to the same constant it returns,
+which would have passed however the two sentences were exchanged. The three R1 re-runs are included
+because this cleanup edits code inside both gate paths, so "the security remediations still hold"
+is checked rather than assumed — and R1-B1/R1-B2 still each fail a test the other does not.
+
+#### Verification (R2 cleanup)
+
+- Comparable 23-file suite: **780 passed, 1 skipped, 0 failed** (R2 candidate: 778; +2 from the
+  tests added by this cleanup).
+- 24-file superset: **801 passed, 1 skipped, 0 failed** (R2 candidate: 799).
+- `test_slack_faceted_search_interface.py` 110 → 112. No other test file changed.
+- `compileall` and `git diff --check`: pass. Import origin re-confirmed as this worktree's `src`.
+- `git status --short` listed exactly the two files this cleanup touched; no `.mka/`, no stray
+  `.sqlite`.
+- Not run, unchanged: full application suite; `tests/test_slack_structured_governance.py` (see
+  above); standalone lint/type tools (not configured); production sync, re-index, deploy, bot
   start/restart, or UAT. Slack itself is still unexercised.
 
 ### Superseded lock record: closed Slack Faceted Search MVP / no-unfurl milestone
