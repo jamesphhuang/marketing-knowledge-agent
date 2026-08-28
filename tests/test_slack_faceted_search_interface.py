@@ -14,6 +14,7 @@ tests -- so none of this touches a real Slack connection.
 import csv
 import json
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,7 @@ from marketing_knowledge_agent.search_taxonomy import SearchTaxonomyError
 from marketing_knowledge_agent.slack_faceted_search import (
     ALL_YEARS_OPTION_VALUE,
     APP_MENTION_GUIDANCE_MESSAGE,
+    ENTRYPOINT_APP_MENTION,
     ENTRYPOINT_SLASH_COMMAND,
     SHOW_MORE_ACTION_ID,
     SLASH_COMMAND_NAME,
@@ -45,16 +47,21 @@ from marketing_knowledge_agent.slack_interface import (
     ENTRY_MODE_SLASH_FACETED_ONLY,
     FACETED_SEARCH_STALE_CATALOG_MESSAGE,
     PAGINATION_EXPIRED_MESSAGE,
+    STALE_ENTRY_MODE_MESSAGE,
     SlackConfig,
     SlackInterfaceError,
     _slash_session_key,
+    entrypoint_allowed_for_mode,
     handle_slack_event,
     load_slack_config,
     run_slack_bot,
 )
 from marketing_knowledge_agent.slack_pagination import SlackPaginationStore
 from marketing_knowledge_agent.slack_request_tokens import SlackRequestTokenStore
-from marketing_knowledge_agent.structured_search import StructuredSearchGovernanceError
+from marketing_knowledge_agent.structured_search import (
+    StructuredSearchGovernanceError,
+    StructuredSearchRequest,
+)
 
 from test_search_taxonomy import write_taxonomy_workbook
 
@@ -2065,3 +2072,320 @@ def test_every_slash_message_is_posted_with_unfurling_disabled(tmp_path):
     for message in posted:
         assert message["unfurl_links"] is False
         assert message["unfurl_media"] is False
+
+
+# ======================================================================================
+# Codex Independent Delta Review R1 -- blocking finding remediation
+# ======================================================================================
+
+# --------------------------------------------------------------------------------------
+# R1 Finding 1: mention trailing text must never be persisted in slash_faceted_only
+# --------------------------------------------------------------------------------------
+
+
+def _audit_text(path):
+    """Everything this Slack path wrote, as raw bytes-on-disk text.
+
+    Read as one string on purpose. Asserting that a specific event is absent only proves that one
+    row shape is clean; the finding was a *different* row shape carrying the same text, written by
+    a path nobody was looking at. The question worth asking is whether the secret is anywhere in
+    the file at all.
+    """
+    return Path(path).read_text(encoding="utf-8") if Path(path).exists() else ""
+
+
+def _mention_in_slash_mode(tmp_path, event, ask_fn=None):
+    audit = tmp_path / "audit.csv"
+
+    def _must_not_retrieve(*_args, **_kwargs):
+        raise AssertionError("app_mention must not retrieve in slash_faceted_only mode")
+
+    reply = handle_slack_event(
+        event,
+        config=SlackConfig(
+            allowed_channel_ids=["C123"], search_entry_mode=ENTRY_MODE_SLASH_FACETED_ONLY
+        ),
+        ask_fn=ask_fn or _must_not_retrieve,
+        audit_log_path=audit,
+        faceted_search_enabled=True,
+    )
+    return reply, _audit_text(audit)
+
+
+def test_slash_mode_allowed_channel_mention_persists_no_trailing_text(tmp_path):
+    """R1 finding 1, case 1."""
+    reply, audit = _mention_in_slash_mode(
+        tmp_path,
+        {"text": f"<@BOT> {SECRET_CUSTOMER}", "channel": "C123", "user": "U1", "ts": "100.1"},
+    )
+
+    assert reply["text"] == APP_MENTION_GUIDANCE_MESSAGE
+    assert SECRET_CUSTOMER not in audit
+    assert SECRET_CUSTOMER not in json.dumps(reply, ensure_ascii=False)
+
+
+def test_slash_mode_denied_channel_mention_persists_no_trailing_text(tmp_path):
+    """R1 finding 1, case 2 -- the reproduced blocker.
+
+    The authorization path predates the entry mode and records the raw question, which is the
+    right trade for a natural-language search surface and the wrong one here: the same text that
+    is not a query in an allowed channel is not a query in a denied one either.
+    """
+    reply, audit = _mention_in_slash_mode(
+        tmp_path,
+        {"text": f"<@BOT> {SECRET_CUSTOMER}", "channel": "C_OTHER", "user": "U1", "ts": "100.1"},
+    )
+
+    assert reply["text"] == DENIED_CHANNEL_MESSAGE
+    assert SECRET_CUSTOMER not in audit
+    assert SECRET_CUSTOMER not in json.dumps(reply, ensure_ascii=False)
+    # The denial itself is still recorded -- only its query column is dropped.
+    rows = list(csv.DictReader((tmp_path / "audit.csv").open(encoding="utf-8")))
+    assert [r["event"] for r in rows] == ["slack_denied_channel"]
+    assert rows[0]["query"] == ""
+    assert rows[0]["channel_id"] == "C_OTHER" and rows[0]["user_id"] == "U1"
+
+
+@pytest.mark.parametrize("channel_type", ["im", "mpim"])
+def test_slash_mode_direct_message_mention_persists_no_trailing_text(tmp_path, channel_type):
+    """R1 finding 1, case 3. A DM is exactly where a customer name gets typed without thinking."""
+    reply, audit = _mention_in_slash_mode(
+        tmp_path,
+        {
+            "text": f"<@BOT> {SECRET_CUSTOMER}",
+            "channel": "D1",
+            "user": "U1",
+            "ts": "100.1",
+            "channel_type": channel_type,
+        },
+    )
+
+    assert SECRET_CUSTOMER not in audit
+    assert SECRET_CUSTOMER not in json.dumps(reply, ensure_ascii=False)
+    rows = list(csv.DictReader((tmp_path / "audit.csv").open(encoding="utf-8")))
+    assert all(row["query"] == "" for row in rows)
+
+
+def test_mention_mixed_denied_channel_audit_is_unchanged(tmp_path):
+    """R1 finding 1, case 4: backward compatibility.
+
+    In the default mode the text really is an attempted search, so the pre-existing audit contract
+    stands. Pinned so the slash-only fix cannot quietly become a global removal of legacy audit.
+    """
+    audit = tmp_path / "audit.csv"
+    reply = handle_slack_event(
+        {"text": "<@BOT> 大春煉皂的成長案例", "channel": "C_OTHER", "user": "U1", "ts": "100.1"},
+        config=SlackConfig(allowed_channel_ids=["C123"]),
+        ask_fn=lambda *a, **k: pytest.fail("a denied channel must not retrieve"),
+        audit_log_path=audit,
+    )
+
+    assert reply["text"] == DENIED_CHANNEL_MESSAGE
+    rows = list(csv.DictReader(audit.open(encoding="utf-8")))
+    assert [r["event"] for r in rows] == ["slack_denied_channel"]
+    assert rows[0]["query"] == "<@BOT> 大春煉皂的成長案例"
+
+
+# --------------------------------------------------------------------------------------
+# R1 Finding 2: a legacy mention artifact must not stay executable after a mode switch
+# --------------------------------------------------------------------------------------
+
+
+def _legacy_private_metadata(catalog_version, channel_id="C123", thread_ts="1"):
+    """``private_metadata`` exactly as the mention flow wrote it before the mode switch.
+
+    Built literally rather than by calling the mention handler, because after the fix that handler
+    will not produce one under this mode -- and the case being tested is precisely a modal that
+    already existed when the mode changed.
+    """
+    return json.dumps(
+        {
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "catalog_version": catalog_version,
+            "entrypoint": ENTRYPOINT_APP_MENTION,
+            "session_id": "",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _click_open_modal(app, value, body=None):
+    client = FakeSlackClient()
+    app.actions[OPEN_SEARCH_MODAL_ACTION_ID](
+        ack=FakeAck(), body=body or _action_body(value=value), client=client
+    )
+    return client
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        json.dumps({}),                              # legacy 開啟條件搜尋 / 重新搜尋
+        json.dumps({"request_token": "a" * 32}),     # legacy 調整條件
+    ],
+    ids=["legacy_open_or_restart_button", "legacy_adjust_button"],
+)
+def test_a_legacy_mention_button_cannot_open_a_modal_in_slash_mode(tmp_path, value):
+    """R1 finding 2, cases A/B/C.
+
+    These buttons are still sitting in channel history after the switch, so somebody will click
+    one. None may open a modal, disclose a prior request, or put anything in the channel.
+    """
+    app = _slash_app(tmp_path)
+
+    client = _click_open_modal(app, value)
+
+    assert client.opened_views == []
+    assert client.messages == []
+    # A courtesy pointer to the new entry, visible only to the clicker and carrying nothing else.
+    assert [m["text"] for m in client.ephemerals] == [STALE_ENTRY_MODE_MESSAGE]
+    assert client.ephemerals[0]["user"] == "U1"
+
+
+def test_a_legacy_adjust_button_discloses_nothing_of_the_prior_request(tmp_path):
+    """R1 finding 2, case B, stated as the disclosure it prevents."""
+    store = SlackRequestTokenStore()
+    app = _slash_app(tmp_path, request_token_store=store)
+    token = store.store(
+        StructuredSearchRequest(interview_years=(2024,), free_text=SLASH_SECRET_GOAL),
+        owner_user_id="U1",
+        channel_id="C123",
+        session_key="1",
+    )
+
+    client = _click_open_modal(app, json.dumps({"request_token": token}))
+
+    assert client.opened_views == []
+    assert SLASH_SECRET_GOAL not in json.dumps(
+        client.ephemerals + client.messages, ensure_ascii=False
+    )
+
+
+def test_a_legacy_modal_submitted_after_the_mode_switch_executes_nothing(tmp_path):
+    """R1 finding 2, case D -- the half a button-only fix would miss.
+
+    This submission never passed through today's action handler: the modal was opened before the
+    switch. So the view handler has to re-decide, rather than trusting the entry point its own
+    ``private_metadata`` records.
+    """
+    app = _slash_app(tmp_path)
+    catalog_version = json.loads(_slash_private_metadata(app))["catalog_version"]
+    audit_before = _audit_text(tmp_path / "audit.csv")
+
+    ack, client = FakeAck(), FakeSlackClient()
+    app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
+        ack=ack,
+        body={"user": {"id": "U1"}},
+        client=client,
+        view={
+            "private_metadata": _legacy_private_metadata(catalog_version),
+            "state": {"values": _state_values(year="2024")},
+        },
+    )
+
+    assert client.messages == []
+    assert client.ephemerals == []
+    # No search ran, so no search audit row was added.
+    assert _audit_text(tmp_path / "audit.csv") == audit_before
+    assert "slack_faceted_search" not in _audit_text(tmp_path / "audit.csv")
+    # The modal explains itself rather than closing silently on a result that never arrives.
+    assert ack.calls == [
+        {"response_action": "errors", "errors": {FREE_TEXT_BLOCK_ID: STALE_ENTRY_MODE_MESSAGE}}
+    ]
+
+
+def test_no_public_message_is_reachable_from_a_legacy_artifact_in_slash_mode(tmp_path):
+    """R1 finding 2, the invariant behind it, asserted end to end at handler level.
+
+    The reproduced blocker was a chain: legacy button opens a modal, the modal records
+    ``entrypoint=app_mention``, the submission trusts that, and the result goes to the channel. So
+    the whole chain is walked here, not just its first link.
+    """
+    app = _slash_app(tmp_path)
+    catalog_version = json.loads(_slash_private_metadata(app))["catalog_version"]
+
+    opened = _click_open_modal(app, json.dumps({}))
+    assert opened.opened_views == []
+
+    ack, submitted = FakeAck(), FakeSlackClient()
+    app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
+        ack=ack,
+        body={"user": {"id": "U1"}},
+        client=submitted,
+        view={
+            "private_metadata": _legacy_private_metadata(catalog_version),
+            "state": {"values": _state_values(year="2024")},
+        },
+    )
+
+    assert opened.messages == [] and submitted.messages == []
+
+
+def test_a_valid_slash_submission_still_works_after_the_gate(tmp_path):
+    """R1 finding 2, case E. The gate must refuse stale artifacts, not the live flow."""
+    app = _slash_app(tmp_path)
+
+    _ack, client = _slash_submit(app, state_values=_state_values(year="2024"))
+
+    assert client.messages == []
+    assert client.ephemerals
+    assert "大春煉皂" in client.ephemerals[0]["text"]
+
+
+def test_mention_mixed_interactions_are_unaffected_by_the_gate(tmp_path):
+    """R1 finding 2, case F. The default mode's button and modal must still work end to end."""
+    app, _tmp = _run_bot_and_get_app(tmp_path)
+
+    opened = _click_open_modal(app, json.dumps({}))
+    assert len(opened.opened_views) == 1
+
+    ack, submitted = FakeAck(), FakeSlackClient()
+    app.views[FACETED_SEARCH_MODAL_CALLBACK_ID](
+        ack=ack,
+        body={"user": {"id": "U1"}},
+        client=submitted,
+        view={
+            "private_metadata": opened.opened_views[0]["view"]["private_metadata"],
+            "state": {"values": _state_values(year="2024")},
+        },
+    )
+
+    # The legacy flow answers in-channel, as it always has.
+    assert len(submitted.messages) == 2
+    assert submitted.ephemerals == []
+
+
+def test_a_slash_artifact_is_refused_in_mention_mixed_too(tmp_path):
+    """The symmetric direction, which the shared rule gives for free.
+
+    ``/mka`` is not registered in ``mention_mixed``, so no slash session can legitimately exist
+    there; anything claiming one is stale or forged.
+    """
+    app, _tmp = _run_bot_and_get_app(tmp_path)
+
+    client = _click_open_modal(app, json.dumps({"session_id": "sess-1"}))
+
+    assert client.opened_views == []
+    assert client.messages == []
+
+
+def test_entrypoint_allowed_for_mode_is_the_single_rule_both_gates_share():
+    """Pinned directly so the two call sites cannot drift into different rules."""
+    assert entrypoint_allowed_for_mode(ENTRY_MODE_SLASH_FACETED_ONLY, ENTRYPOINT_SLASH_COMMAND)
+    assert not entrypoint_allowed_for_mode(ENTRY_MODE_SLASH_FACETED_ONLY, ENTRYPOINT_APP_MENTION)
+    assert entrypoint_allowed_for_mode(ENTRY_MODE_MENTION_MIXED, ENTRYPOINT_APP_MENTION)
+    assert not entrypoint_allowed_for_mode(ENTRY_MODE_MENTION_MIXED, ENTRYPOINT_SLASH_COMMAND)
+    # An unrecognised entry point is not authorized by either mode.
+    for mode in (ENTRY_MODE_SLASH_FACETED_ONLY, ENTRY_MODE_MENTION_MIXED):
+        assert not entrypoint_allowed_for_mode(mode, "")
+        assert not entrypoint_allowed_for_mode(mode, "something_else")
+
+
+def test_a_stale_show_more_button_is_refused_in_mention_mixed(tmp_path):
+    """The continuation button is only registered in slash mode, and gated there as well."""
+    slash = _slash_app(tmp_path)
+    assert SHOW_MORE_ACTION_ID in slash.actions
+
+    mention, _tmp = _run_bot_and_get_app(tmp_path / "mention")
+    assert SHOW_MORE_ACTION_ID not in mention.actions

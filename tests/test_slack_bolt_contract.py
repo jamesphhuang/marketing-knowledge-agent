@@ -100,6 +100,7 @@ class _Recorder:
     def __init__(self):
         self.views_open = []
         self.post_message = []
+        self.post_ephemeral = []
 
 
 @pytest.fixture
@@ -132,6 +133,8 @@ def slack_api(monkeypatch):
             recorder.views_open.append(payload)
         elif api_method == "chat.postMessage":
             recorder.post_message.append(payload)
+        elif api_method == "chat.postEphemeral":
+            recorder.post_ephemeral.append(payload)
         else:
             # An unexpected call is a contract change, not something to swallow.
             raise AssertionError(f"unexpected Slack API call: {api_method}")
@@ -171,6 +174,12 @@ def bolt_app(tmp_path, slack_api):
         request_verification_enabled=False,
         ssl_check_enabled=False,
         url_verification_enabled=False,
+        # Synchronous for the same reason ``slash_bolt_app`` is -- see its docstring. Without it
+        # bolt returns from ``dispatch`` as soon as the listener calls ``ack()`` and finishes the
+        # work on a pool thread, so every assertion below races it. That is not hypothetical here:
+        # this file failed 3 times in 15 runs under CPU load before this line was added, and passed
+        # 15 of 15 after. The listener under test is the same one either way.
+        process_before_response=True,
     )
     _register_faceted_search_handlers(
         app,
@@ -291,6 +300,64 @@ def test_the_slash_modal_is_accepted_by_slack_sdks_own_view_model(slash_bolt_app
     )
     assert year_block["element"]["type"] == "static_select"
     assert year_block["element"]["initial_option"]["value"] == ALL_YEARS_OPTION_VALUE
+
+
+def test_real_bolt_gives_a_legacy_artifact_no_route_to_a_public_message(slash_bolt_app, slack_api):
+    """Codex R1 finding 2, proven through bolt's own dispatcher rather than a fake App.
+
+    The reproduced blocker was a chain: a legacy mention button opens a modal, the modal records
+    ``entrypoint=app_mention``, the submission trusts that, and the result is posted into the
+    channel. Both links are pushed through real bolt here, because "no public route exists" is a
+    claim about what the registered listeners do when Slack actually calls them.
+    """
+    # A button posted before the entry mode changed: no slash session provenance.
+    response = _dispatch(slash_bolt_app, _action_payload(value=json.dumps({})))
+    assert response.status == 200
+    assert slack_api.views_open == []
+    assert slack_api.post_message == []
+    # Only a fixed pointer to the new entry, ephemeral to the clicker.
+    assert [m["user"] for m in slack_api.post_ephemeral] == ["U1"]
+    assert "/mka" in slack_api.post_ephemeral[-1]["text"]
+    slack_api.post_ephemeral.clear()
+
+    # And a modal that was already open when the mode changed, submitted afterwards.
+    _dispatch(slash_bolt_app, _command_payload())
+    catalog_version = json.loads(
+        slack_api.views_open[-1]["view"]["private_metadata"]
+    )["catalog_version"]
+    slack_api.post_message.clear()
+
+    legacy_view = {
+        "type": "modal",
+        "callback_id": FACETED_SEARCH_MODAL_CALLBACK_ID,
+        "private_metadata": json.dumps(
+            {
+                "channel_id": "C123",
+                "thread_ts": "100.1",
+                "catalog_version": catalog_version,
+                "entrypoint": "app_mention",
+                "session_id": "",
+            },
+            ensure_ascii=False,
+        ),
+        "state": {"values": {
+            INTERVIEW_YEARS_BLOCK_ID: {
+                INTERVIEW_YEARS_ACTION_ID: {"selected_option": {"value": "2024"}}
+            },
+            SALES_CATEGORY_LV2_BLOCK_ID: {SALES_CATEGORY_LV2_ACTION_ID: {"selected_options": []}},
+            CONTENT_TAGS_BLOCK_ID: {CONTENT_TAGS_ACTION_ID: {"selected_options": []}},
+            FREE_TEXT_BLOCK_ID: {FREE_TEXT_ACTION_ID: {"value": None}},
+        }},
+    }
+    response = _dispatch(
+        slash_bolt_app, {"type": "view_submission", "user": {"id": "U1"}, "view": legacy_view}
+    )
+
+    assert slack_api.post_message == []
+    assert slack_api.post_ephemeral == []
+    body = json.loads(response.body)
+    assert body["response_action"] == "errors"
+    assert FREE_TEXT_BLOCK_ID in body["errors"]
 
 
 def test_real_bolt_ignores_slash_command_trailing_text(slash_bolt_app, slack_api):

@@ -99,6 +99,9 @@ ANSWER_TRUNCATION_NOTICE = "(內容過長已截斷,完整結果請用內部工�
 SLACK_NO_RESULTS_MESSAGE = "找不到相關內容。請換個關鍵字,或聯繫管理者確認資料是否已收錄。"
 PAGINATION_EXPIRED_MESSAGE = "此搜尋工作階段已失效，請重新執行原搜尋。"
 FACETED_SEARCH_STALE_CATALOG_MESSAGE = "搜尋條件已過期，請重新點擊「開啟條件搜尋」再試一次。"
+# Shown when a Slack artifact from a superseded entry mode is used. It names the current entry and
+# nothing else: no echo of what was clicked, no query, no hint about the previous search.
+STALE_ENTRY_MODE_MESSAGE = "搜尋入口已更新，請輸入 `/mka` 重新開啟搜尋。"
 # How much of a structured result the Slack surface materialises before paging over it. These are
 # display capacity, not ranking: the ordered candidate set and every governance gate in front of
 # it are unchanged, and raising the ceiling only lets Slack show more of the same ranked result.
@@ -270,7 +273,43 @@ def handle_slack_event(
     thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
     raw_question = str(event.get("text") or "").strip()
 
-    if _is_direct_message(event) or channel_id not in config.allowed_channel_ids:
+    denied_conversation = _is_direct_message(event) or channel_id not in config.allowed_channel_ids
+
+    if config.search_entry_mode == ENTRY_MODE_SLASH_FACETED_ONLY:
+        # Direct search has moved to ``/mka``, so in this mode the text after a mention is not a
+        # query and must not be written down anywhere.
+        #
+        # This branch deliberately sits *above* the channel-authorization check, not below it. The
+        # authorization path predates the mode and records ``raw_question`` so an operator can see
+        # what was asked from an unauthorized conversation -- which is the right trade for a
+        # natural-language search surface, and the wrong one here: the same text that is not a
+        # query in an allowed channel is not a query in a denied one either, and a DM or an
+        # unlisted channel is exactly where someone types a customer name without thinking. Below
+        # the check, "never persisted" would have held only for conversations that happened to be
+        # allowed.
+        #
+        # The denial itself is still recorded, because "someone reached this bot from an
+        # unauthorized conversation" is operational signal worth keeping. Only the query column is
+        # dropped, and it is dropped by construction rather than by matching anything in the text:
+        # nothing here inspects what the user typed, so there is no pattern to get wrong.
+        if denied_conversation:
+            _append_slack_audit(
+                audit_log_path,
+                event="slack_denied_channel",
+                channel_id=channel_id,
+                user_id=user_id,
+                citation_count=0,
+                warning_count=0,
+                query="",
+            )
+            return _reply_dict(channel_id, thread_ts, DENIED_CHANNEL_MESSAGE)
+        # An allowed-channel mention writes no row at all: guidance is neither a query nor a
+        # denial, so there is nothing to record.
+        return _reply_dict(channel_id, thread_ts, APP_MENTION_GUIDANCE_MESSAGE)
+
+    if denied_conversation:
+        # ``mention_mixed`` is unchanged, including this row and its query column. Here the text
+        # really is an attempted search, and the pre-existing audit contract for it stands.
         _append_slack_audit(
             audit_log_path,
             event="slack_denied_channel",
@@ -283,15 +322,6 @@ def handle_slack_event(
         return _reply_dict(channel_id, thread_ts, DENIED_CHANNEL_MESSAGE)
 
     question = _strip_app_mention(raw_question)
-    if config.search_entry_mode == ENTRY_MODE_SLASH_FACETED_ONLY:
-        # Direct search has moved to ``/mka``. Every mention -- the old trigger phrases, the old
-        # 「顯示更多」 continuation, and any other text -- gets the same short guidance and nothing
-        # else. Returning here, before the pagination store, ``ask_fn`` and every audit call, is
-        # what makes that true rather than merely intended: the text the user typed is not
-        # retrieved on, not written to an audit row, not stored against a token, not prefilled into
-        # a modal, and not echoed back. It is read only to be discarded.
-        return _reply_dict(channel_id, thread_ts, APP_MENTION_GUIDANCE_MESSAGE)
-
     store = pagination_store if pagination_store is not None else default_pagination_store()
     thread_key = pagination_key(channel_id, thread_ts)
     if _is_show_more_request(question):
@@ -489,6 +519,50 @@ def new_slash_session_id() -> str:
     return secrets.token_hex(SLASH_SESSION_ID_BYTES)
 
 
+def _tell_stale_clicker_to_use_the_new_entry(client, body: dict, config: SlackConfig) -> None:
+    """Tell whoever clicked a superseded button where the search entry went, or say nothing.
+
+    Best-effort and deliberately inert: fixed text, no query, no token, no prefill, and nothing
+    from the button that was clicked. It goes through the ephemeral boundary, so it is visible only
+    to the clicker and cannot become a public post. When the interaction payload does not identify
+    a user and conversation, or the conversation is not one this flow may answer in, the click is
+    simply a no-op -- a stale button doing nothing is an acceptable outcome, and is what this
+    remediation actually requires; the message is a courtesy on top of it.
+    """
+    context = _slash_interaction_context(body)
+    if context is None:
+        return
+    user_id, channel_id = context
+    if not _slash_entry_allowed(config, channel_id):
+        return
+    post_slack_ephemeral(client, _ephemeral_dict(channel_id, user_id, STALE_ENTRY_MODE_MESSAGE))
+
+
+def entrypoint_allowed_for_mode(search_entry_mode: str, entrypoint: str) -> bool:
+    """Whether an interaction from this entry point may execute under the mode running *now*.
+
+    Slack artifacts outlive the configuration that produced them. A "開啟條件搜尋" button posted
+    into a channel last week is still sitting there, still clickable, after an operator switches
+    the entry mode -- and a modal opened seconds before the switch can be submitted seconds after
+    it. So an interaction's own provenance is necessary but never sufficient: the mode in force at
+    execution time has to authorize it too.
+
+    ``private_metadata["entrypoint"]`` is not trusted merely because this app wrote it. It is a
+    statement about how a view was opened, which is exactly the fact that goes stale; it says what
+    the interaction *is*, and this function decides whether that is currently allowed.
+
+    The rule is symmetric, and deliberately so. Under ``slash_faceted_only`` only slash-session
+    interactions execute, because the whole point of the mode is that ``/mka`` is the only search
+    entry and its results are invoker-only -- a legacy mention artifact would otherwise route a
+    real search back into a public channel. Under ``mention_mixed`` only mention interactions
+    execute: no slash session can legitimately exist there, since ``/mka`` is not even registered,
+    so anything claiming one is stale or forged. Both directions fail closed for free.
+    """
+    if search_entry_mode == ENTRY_MODE_SLASH_FACETED_ONLY:
+        return entrypoint == ENTRYPOINT_SLASH_COMMAND
+    return entrypoint == ENTRYPOINT_APP_MENTION
+
+
 def _slash_entry_allowed(config: SlackConfig, channel_id: str) -> bool:
     """Whether ``/mka`` may be used from this conversation.
 
@@ -618,6 +692,13 @@ def _register_faceted_search_handlers(
         # mention-flow one. It is a lane coordinate, not a claim about identity: who is clicking
         # and where still come from the interaction payload below, exactly as before.
         session_id = session_id_from_button_payload(payload)
+        button_entrypoint = ENTRYPOINT_SLASH_COMMAND if session_id else ENTRYPOINT_APP_MENTION
+        if not entrypoint_allowed_for_mode(config.search_entry_mode, button_entrypoint):
+            # A button left over from a different entry mode -- still in the channel, still
+            # clickable, now unusable. Refused before the modal is built, so no legacy modal can
+            # come into existence under this mode at all.
+            _tell_stale_clicker_to_use_the_new_entry(client, body, config)
+            return
         if session_id:
             context = _slash_interaction_context(body)
             if context is None:
@@ -703,7 +784,9 @@ def _register_faceted_search_handlers(
                 return
             payload = parse_open_modal_button_value((body.get("actions") or [{}])[0].get("value"))
             session_id = session_id_from_button_payload(payload)
-            if not session_id:
+            if not session_id or not entrypoint_allowed_for_mode(
+                config.search_entry_mode, ENTRYPOINT_SLASH_COMMAND
+            ):
                 return
             session_key = _slash_session_key(user_id, session_id)
             request_token = request_token_from_button_payload(payload)
@@ -747,6 +830,19 @@ def _register_faceted_search_handlers(
         # view states which search this is, the payload states who sent it.
         user_id = str((body.get("user") or {}).get("id", ""))
         is_slash = entrypoint == ENTRYPOINT_SLASH_COMMAND
+
+        if not entrypoint_allowed_for_mode(config.search_entry_mode, entrypoint):
+            # Checked here as well as at the button, and not because the button check might be
+            # skipped: a modal opened *before* an entry-mode switch is submitted *after* it, so
+            # this submission never passed through today's action handler at all. Nothing below
+            # runs -- no retrieval, no audit row, no message of either kind. The modal stays open
+            # with a fixed explanation rather than closing silently on a search that will never
+            # arrive; ``ack`` carries it, so no posting API is involved.
+            ack(
+                response_action="errors",
+                errors={FREE_TEXT_BLOCK_ID: STALE_ENTRY_MODE_MESSAGE},
+            )
+            return
 
         if is_slash:
             # A slash submission is answered ephemerally, so it needs both halves of its lane. A
