@@ -5,10 +5,12 @@
 ## Lock
 
 - State: active
-- Milestone state: SLACK_MKA_COMMAND_FACETED_ONLY_ENTRY_IN_IMPLEMENTATION
+- Milestone state: SLACK_MKA_COMMAND_R1_REMEDIATED_AWAITING_R2_REVIEW
 - Task: Slack `/mka` Faceted-Only Search Entry
 - Implementer: Claude Code
-- Reviewer: not yet reviewed; independent Delta Review pending
+- Reviewer: Codex — independent Delta Review R1 against `5954e10` returned CHANGES_REQUESTED with
+  2 blocking findings, both remediated below. **This WP is NOT reviewed and NOT accepted.** Codex
+  R2 re-review is pending.
 - Branch: `claude/impl/slack-mka-command`
 - Worktree: `/private/tmp/mka-slack-mka-command` (isolated; does not touch the main checkout at
   `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent`)
@@ -20,9 +22,10 @@
 - Slack App Console changed: NO
 - Bot started/restarted: NO
 - Main updated: NO
-- Implementation commit: `5ccf31516084f3e30dd34c3dbfcf862f6f121d08` (code, tests and the design
-  spec; this pointer is the only later addition). Branch is local and ahead of `origin/main` by
-  these commits; nothing has been pushed and `origin/main` is still the baseline `0669fbb`.
+- R1 implementation commit: `5ccf31516084f3e30dd34c3dbfcf862f6f121d08`; R1 reviewed candidate
+  `5954e10bd31b308c67e349b4d76f207c5558eb03`; R1 remediation commit
+  `12f4c81e070cd04f494d44386a8e95843294f998`. Branch is local and ahead of `origin/main` by these
+  commits; nothing has been pushed and `origin/main` is still the baseline `0669fbb`.
 - Started at: 2026-08-28
 
 ```text
@@ -34,7 +37,11 @@ SLACK_APP_CONSOLE_CHANGE_AUTHORIZED=NO
 BOT_START_AUTHORIZED=NO
 DEPLOYMENT_AUTHORIZED=NO
 MAIN_MERGE_AUTHORIZED=NO
-READY_FOR_DELTA_REVIEW=YES
+CODEX_DELTA_REVIEW_R1=CHANGES_REQUESTED
+R1_BLOCKING_FINDINGS=2
+R1_BLOCKERS_REMEDIATED=2
+CODEX_R2_REVIEW=PENDING
+READY_FOR_R2_DELTA_REVIEW=YES
 ```
 
 ### Assumptions and done definition (recorded before any code change)
@@ -270,6 +277,124 @@ MAIN_UPDATED=NO
   the unfurl flags on an ephemeral message, whether an ephemeral message can be posted in every
   conversation shape the bot may be invoked from, and the real three-second `ack` deadline under
   production latency are all first exercised in UAT.
+
+### Codex Independent Delta Review R1 and remediation (2026-08-28)
+
+Reviewed candidate: `5954e10bd31b308c67e349b4d76f207c5558eb03`. Verdict **CHANGES_REQUESTED**,
+**2 blocking findings**. Both were accepted, both **reproduced against the reviewed candidate
+before any fix**, and both are now guarded by tests proven to fail without the fix. The R1
+implementation record above is retained unchanged as that round's evidence.
+
+```text
+CODEX_DELTA_REVIEW_R1=CHANGES_REQUESTED
+R1_REVIEWED_CANDIDATE=5954e10bd31b308c67e349b4d76f207c5558eb03
+R1_BLOCKING_FINDINGS=2
+R1_BLOCKERS_REMEDIATED=2
+CODEX_R2_REVIEW=PENDING
+```
+
+#### Finding 1 -- slash-only mention trailing text was persisted
+
+**Reproduced first.** In `slash_faceted_only`, `handle_slack_event` ran the channel-authorization
+check *before* the mode migration, so a mention from a DM or an unlisted channel wrote:
+
+```text
+slack_denied_channel,C_OTHER,U1,0,0,<@BOT> SECRET_CUSTOMER_NAME
+slack_denied_channel,D1,U1,0,0,<@BOT> SECRET_CUSTOMER_NAME
+```
+
+My R1 test asserted only the allowed-channel case, so "never persisted" held exactly where it was
+least at risk and failed where it mattered most: a DM is precisely where somebody types a customer
+name without thinking.
+
+**Fix.** Migration routing now precedes every audit path. The reasoning is that the same text which
+is not a query in an allowed channel is not a query in a denied one either -- the authorization
+path predates the mode and records `raw_question` because it was written for a natural-language
+search surface. The denial itself is still recorded, because reaching this bot from an unauthorized
+conversation is operational signal worth keeping; only the query column is dropped, and it is
+dropped **by construction** rather than by matching anything in the text, so there is no redaction
+pattern that could be wrong. An allowed-channel mention writes no row at all: guidance is neither a
+query nor a denial.
+
+`mention_mixed` is untouched, including its `slack_denied_channel` row and its query column, and a
+test pins that so the slash-only fix cannot drift into a global removal of legacy audit.
+
+#### Finding 2 -- legacy mention artifacts stayed executable after a mode switch
+
+**Reproduced first**, as the full chain rather than its first link:
+
+```text
+legacy_button_opened=True
+entrypoint='app_mention'  session_id=''
+public_messages=2  ephemerals=0
+```
+
+A button posted before the switch carries no slash session, so the handler inferred
+`entrypoint=app_mention`, wrote it into `private_metadata`, and the submission trusted it -- routing
+a real governed search back into a public channel and breaking `RESULT_VISIBILITY=INVOKER_ONLY`.
+
+**Fix.** `entrypoint_allowed_for_mode(mode, entrypoint)` is now the single rule, checked against the
+mode in force **at execution time**, at three executable entry points: the open-modal action, the
+show-more action, and -- independently -- the view submission. `private_metadata["entrypoint"]` is
+not trusted merely because this app wrote it: it states how a view was opened, which is exactly the
+fact that goes stale.
+
+The view-handler gate is not redundant with the action gate, and that is the half a button-only fix
+would miss: a modal opened *before* the switch and submitted *after* it never passes through today's
+action handler at all. The mutation probes below show each layer failing a test the other does not.
+
+The rule is symmetric and that is deliberate: under `mention_mixed` a slash-provenance interaction
+also fails closed, because `/mka` is not registered there so no slash session can legitimately
+exist.
+
+Stale clickers get a fixed ephemeral pointer to `/mka` through the existing ephemeral boundary --
+no public post, no echo of what was clicked, no prior query. A stale submission is refused through
+`ack(response_action="errors")` alone, so no posting API is involved at all; the modal explains
+itself instead of closing silently on a result that will never arrive.
+
+#### Discovered while probing: a pre-existing test race, fixed
+
+`tests/test_slack_bolt_contract.py`'s `bolt_app` fixture did not set `process_before_response=True`,
+so bolt returned from `dispatch` as soon as the listener called `ack()` and finished the work on a
+pool thread, racing every assertion after it. Measured: **3 failures in 15 whole-file runs under
+CPU load** before, **0 in 15** after. Not one of the two blockers, pre-existing since the
+no-unfurl WP, and fixed here rather than reported-and-left because a flaky harness would corrupt
+the evidence this review round rests on. `slash_bolt_app` already used the same setting for the
+same documented reason.
+
+#### Mutation-strength evidence (R1 remediation)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated. Unmutated baseline: `121 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R1-A | move slash-only migration routing back below the raw-question audit | `3 failed` (denied channel, `im`, `mpim`) |
+| R1-B1 | remove the **action** gate only | `6 failed` |
+| R1-B2 | remove the **view-submission** gate only | `3 failed` |
+| R1-B3 | remove both gates | `7 failed` |
+| R1-B4 | make the rule asymmetric (`mention_mixed` accepts anything) | `2 failed` |
+
+R1-B1 and R1-B2 each fail at least one test the other does not --
+`test_a_legacy_mention_button_cannot_open_a_modal_in_slash_mode` for the action layer,
+`test_a_legacy_modal_submitted_after_the_mode_switch_executes_nothing` for the view layer -- which
+is what demonstrates the two layers protect independently rather than one covering for the other.
+
+#### Verification (R1 remediation)
+
+- Same 24-file suite as the R1 candidate, for comparable evidence: **778 passed, 1 skipped, 0
+  failed** (R1 candidate: 762 passed, 1 skipped; +16 from the tests added this round).
+- Test counts: `test_slack_faceted_search_interface.py` 95 → 110,
+  `test_slack_bolt_contract.py` 10 → 11.
+- `compileall` on `src/marketing_knowledge_agent` and both changed test files: pass.
+  `git diff --check`: pass. Import origin re-confirmed as this worktree's `src`.
+- `git status --short` listed exactly the three files this remediation touched.
+- Not run, unchanged from R1: full application suite;
+  `tests/test_slack_structured_governance.py` (pre-existing gitignored `.mka/content_index.sqlite`
+  fixture blocker -- **not** claimed as passing, and not a regression from this remediation);
+  standalone lint/type tools (not configured); production sync, re-index, deploy, bot
+  start/restart, or UAT. Slack itself is still unexercised.
+
 ### Superseded lock record: closed Slack Faceted Search MVP / no-unfurl milestone
 
 The lock below is the previous milestone's closure record. It is retained unchanged as that

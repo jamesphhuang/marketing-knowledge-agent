@@ -181,6 +181,40 @@ The page footer's continuation instruction is chosen by entry point, because an 
 reader cannot follow is worse than none: a thread reply would never reach a bot that subscribes to
 `app_mention` only, and an ephemeral message has no thread to reply into.
 
+## 9a. Mode transition and stale Slack artifacts
+
+Slack artifacts outlive the configuration that produced them. A 「開啟條件搜尋」 button posted into
+a channel last week is still there and still clickable after an operator switches the entry mode,
+and a modal opened seconds before the switch can be submitted seconds after it. So an interaction's
+own provenance is necessary but never sufficient: **the mode in force at execution time must
+authorize it too.**
+
+`private_metadata["entrypoint"]` is not trusted merely because this app wrote it. It states how a
+view was *opened*, which is exactly the fact that goes stale.
+
+One rule, `entrypoint_allowed_for_mode(mode, entrypoint)`, is checked at every executable entry
+point rather than re-derived per handler:
+
+| current mode | accepts | refuses |
+| --- | --- | --- |
+| `slash_faceted_only` | slash-session interactions | mention-mode buttons and modals, and anything without slash provenance |
+| `mention_mixed` | mention interactions | slash-session artifacts (none can legitimately exist — `/mka` is not registered) |
+
+The gate sits at the open-modal action, the show-more action, **and independently at the view
+submission**. The last is not redundant: a modal opened before a switch and submitted after it never
+passes through today's action handler at all, so a button-only fix would leave the whole chain —
+legacy button → modal recording `entrypoint=app_mention` → submission trusting it → public
+`chat.postMessage` — reachable through its second half.
+
+A refused submission executes nothing: no `execute_structured_search`, no retrieval, no audit row,
+no message of either kind. It is answered through `ack(response_action="errors")` alone, so no
+posting API is involved, and the modal explains itself rather than closing silently on a result
+that will never arrive. A refused button click gets a fixed ephemeral pointer to `/mka` through the
+existing boundary — no public post, no echo of what was clicked, no prior query.
+
+**Invariant:** under `slash_faceted_only` there is no executable route from an old mention-mode
+Slack artifact to a structured search, and therefore none to `chat.postMessage`.
+
 ## 10. Ephemeral posting boundary
 
 `chat.postEphemeral` is a second executable posting API on this surface, so it gets a boundary of
@@ -229,6 +263,14 @@ wire shape -- and bumping the builder version for a modal change would misdescri
 A stale submission is refused with the existing staleness message and no execution.
 
 ## 12. Audit
+
+In `slash_faceted_only`, an app mention writes no query-bearing row at all. Migration routing
+precedes every audit path, including the channel-authorization check that predates the mode: the
+same text that is not a query in an allowed channel is not a query in a DM or an unlisted channel
+either. A denied conversation is still recorded — reaching this bot from an unauthorized
+conversation is operational signal — but with an empty query column, dropped by construction rather
+than by matching anything in the text. `mention_mixed` keeps its existing row and query column
+unchanged, since there the text really is an attempted search.
 
 `/mka` itself writes nothing: opening a modal is not a search, and the trailing text is never
 recorded. A submitted search still writes one `slack_faceted_search` row recording the facet
