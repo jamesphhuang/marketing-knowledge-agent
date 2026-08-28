@@ -4,32 +4,65 @@
 
 ## Lock
 
-- State: active
-- Milestone state: SLACK_MKA_COMMAND_R2_CLEANUP_DONE_AWAITING_FINAL_SPOT_REVIEW
+- State: active — controlled UAT preparation
+- Milestone state: SLACK_MKA_COMMAND_READY_FOR_CONTROLLED_UAT
 - Task: Slack `/mka` Faceted-Only Search Entry
 - Implementer: Claude Code
-- Reviewer: Codex — R1 against `5954e10` returned CHANGES_REQUESTED (2 blocking, both remediated);
-  R2 against `0da023c` returned PASS_WITH_NONBLOCKING_FINDINGS (0 blocking, 2 nonblocking, both
-  closed by the authorized narrow cleanup below). **This WP is not yet integrated**; a final spot
-  review and integration verification are still outstanding.
-- Branch: `claude/impl/slack-mka-command`
+- Reviewer: Codex — R1 against `5954e10` CHANGES_REQUESTED (2 blocking, both remediated); R2
+  against `0da023c` PASS_WITH_NONBLOCKING_FINDINGS (0 blocking, 2 nonblocking, both closed by the
+  authorized narrow cleanup); Final Spot Review against `eb128b8` **PASS**, 0 blocking, 0
+  nonblocking. Every review round's evidence is preserved in its own dated section below.
+- Branch: `claude/impl/slack-mka-command`, published to `origin`
+- PR: [#5](https://github.com/jamesphhuang/marketing-knowledge-agent/pull/5) — **OPEN**, base
+  `main`, not a draft
+- Final reviewed code candidate: `eb128b8080a072917c042de80705521fd2c0a734`
+- Clean Integration Verification: PASS
+- Remote Publication: PASS
+- Remote CI: NOT_CONFIGURED_OR_NO_RUNS (no checks are reported on this branch)
 - Worktree: `/private/tmp/mka-slack-mka-command` (isolated; does not touch the main checkout at
   `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent`)
 - Baseline commit: `0669fbb325e2cf2aebb390a3a90ce7686d12c139` (= `origin/main` at start, verified
   equal before any file was changed)
 - Product behavior changed: YES (Slack surface only, behind a new explicit entry mode whose default
   is today's behaviour)
+- Product runtime: NOT ACTIVATED
 - Production activation: NO
 - Slack App Console changed: NO
 - Bot started/restarted: NO
-- Main updated: NO
-- R1 implementation commit: `5ccf31516084f3e30dd34c3dbfcf862f6f121d08`; R1 reviewed candidate
-  `5954e10bd31b308c67e349b4d76f207c5558eb03`; R1 remediation commit
+- Main updated: NO — `origin/main` is still the baseline `0669fbb`; the PR is open, not merged
+- Commit provenance: R1 implementation `5ccf31516084f3e30dd34c3dbfcf862f6f121d08`; R1 reviewed
+  candidate `5954e10bd31b308c67e349b4d76f207c5558eb03`; R1 remediation
   `12f4c81e070cd04f494d44386a8e95843294f998`; R2 reviewed candidate
-  `0da023c2f2f606b0a0287334537168a8a24d93f2`; R2 nonblocking cleanup commit
-  `a09b89c06b6a18220e5781e032d37a1d616bfd94`. Branch is local and ahead of `origin/main` by these
-  commits; nothing has been pushed and `origin/main` is still the baseline `0669fbb`.
+  `0da023c2f2f606b0a0287334537168a8a24d93f2`; R2 nonblocking cleanup
+  `a09b89c06b6a18220e5781e032d37a1d616bfd94`; **final reviewed code candidate**
+  `eb128b8080a072917c042de80705521fd2c0a734`.
 - Started at: 2026-08-28
+- Next exact action: **Controlled `/mka` UAT Activation** — a separate gate, not authorized by this
+  record. See "Next exact action" below.
+
+### Reviewed-code provenance versus PR head
+
+`FINAL_REVIEWED_CODE_SHA` is `eb128b8080a072917c042de80705521fd2c0a734` and stays that way. This
+ledger reconciliation is documentation only and creates a newer commit, so the PR head moves ahead
+of the reviewed candidate — but `src/` and `tests/` remain byte-identical to `eb128b8`, verified by
+`git diff eb128b8..HEAD -- src tests` returning empty output.
+
+The distinction matters because the two SHAs answer different questions. `eb128b8` is the code that
+was actually reviewed and integration-verified; the newer head is only the current tip of the PR
+branch. A later reader must not read the docs-only SHA as independently product-reviewed, because
+it was not: nothing executable changed in it, and no review round examined it.
+
+### Evidence basis for the gate results recorded here
+
+Recorded so a reader knows which claims rest on which evidence, rather than having to assume:
+
+- **Verified directly in this worktree during this reconciliation:** `HEAD` = `eb128b8`; the branch
+  exists on `origin` at that same SHA; PR #5 is OPEN, base `main`, head `eb128b8`, not a draft;
+  `gh pr checks 5` reports no checks on this branch; `origin/main` is still `0669fbb`;
+  `src/`/`tests/` byte-identity against `eb128b8`.
+- **Recorded as authoritative from the reviewing party, not re-performed here:** Final Spot Review
+  PASS (0 blocking, 0 nonblocking) and Clean Integration Verification PASS. This reconciliation is
+  a ledger update, not a review, and does not re-derive those outcomes.
 
 ```text
 ACTIVE_IMPLEMENTER=CLAUDE_CODE
@@ -40,14 +73,40 @@ SLACK_APP_CONSOLE_CHANGE_AUTHORIZED=NO
 BOT_START_AUTHORIZED=NO
 DEPLOYMENT_AUTHORIZED=NO
 MAIN_MERGE_AUTHORIZED=NO
+
+IMPLEMENTATION=PASS
+
 CODEX_DELTA_REVIEW_R1=CHANGES_REQUESTED
 R1_BLOCKING_FINDINGS=2
 R1_BLOCKERS_REMEDIATED=2
+
 CODEX_R2_REVIEW=PASS_WITH_NONBLOCKING_FINDINGS
 R2_BLOCKING_FINDINGS=0
 R2_NONBLOCKING_FINDINGS=2
 R2_NONBLOCKING_CLOSED=2
-READY_FOR_FINAL_SPOT_REVIEW=YES
+
+FINAL_SPOT_REVIEW=PASS
+FINAL_SPOT_BLOCKING_FINDINGS=0
+FINAL_SPOT_NONBLOCKING_FINDINGS=0
+
+FINAL_REVIEWED_CODE_SHA=eb128b8080a072917c042de80705521fd2c0a734
+INTEGRATION_VERIFICATION=PASS
+REMOTE_PUBLICATION=PASS
+
+PR_CREATION=PASS
+PR_NUMBER=5
+PR_STATE=OPEN
+REMOTE_CI_STATUS=NOT_CONFIGURED_OR_NO_RUNS
+
+READY_FOR_CONTROLLED_UAT=YES
+CONTROLLED_UAT_STARTED=NO
+CONTROLLED_UAT_RESULT=NOT_RUN
+
+SLACK_APP_CONSOLE_CHANGED=NO
+PRODUCTION_CONFIG_CHANGED=NO
+PRODUCTION_ACTIVATED=NO
+BOT_STARTED=NO
+MAIN_UPDATED=NO
 ```
 
 ### Assumptions and done definition (recorded before any code change)
@@ -293,6 +352,10 @@ Reviewed candidate: `5954e10bd31b308c67e349b4d76f207c5558eb03`. Verdict **CHANGE
 before any fix**, and both are now guarded by tests proven to fail without the fix. The R1
 implementation record above is retained unchanged as that round's evidence.
 
+The block below is **this round's state as of 2026-08-28**, not current state. `CODEX_R2_REVIEW`
+was genuinely pending when it was written; R2 has since returned
+PASS_WITH_NONBLOCKING_FINDINGS. Current state is the top-level Lock.
+
 ```text
 CODEX_DELTA_REVIEW_R1=CHANGES_REQUESTED
 R1_REVIEWED_CANDIDATE=5954e10bd31b308c67e349b4d76f207c5558eb03
@@ -412,6 +475,10 @@ Reviewed candidate: `0da023c2f2f606b0a0287334537168a8a24d93f2`. Verdict
 were authorized for a narrow cleanup and are closed below. The R1 and R1-remediation records above
 are retained unchanged as those rounds' evidence; the two suite-count lines carry an inline
 correction rather than a rewrite, so what was originally claimed remains visible.
+
+The block below is **this round's state as of 2026-08-28**, not current state.
+`FINAL_SPOT_REVIEW` was genuinely pending when it was written; it has since returned PASS with 0
+blocking and 0 nonblocking findings against `eb128b8`. Current state is the top-level Lock.
 
 ```text
 CODEX_DELTA_REVIEW_R2=PASS_WITH_NONBLOCKING_FINDINGS
@@ -1334,7 +1401,28 @@ gives both options and prefers copying over moving, since PID 42332 is reading t
 
 ## Next exact action
 
-### For this WP (Slack Faceted Search MVP)
+### Current: Slack `/mka` Faceted-Only Search Entry
+
+**Controlled `/mka` UAT Activation.** Implementation, R1 remediation, R2 cleanup, Final Spot Review
+and Clean Integration Verification are all complete, and PR #5 is open against `main`. Nothing
+below is authorized by this record; each is its own gate and needs explicit authorization:
+
+1. create the `/mka` slash command in the Slack App Console;
+2. set `slack_search_entry_mode` to `slash_faceted_only` in `.mka/slack_config.json` (which also
+   requires `enable_faceted_search=true` and the pinned taxonomy workbook/sha pair);
+3. restart the Slack Bot;
+4. run Human UAT.
+
+Until then: the product is **not activated**, the Slack App Console is **unchanged**, the bot is
+**not started**, and `main` is **not updated**. Merging PR #5 by itself would still activate
+nothing, because the default entry mode is `mention_mixed` — today's behaviour bit-for-bit.
+
+The first things UAT should probe are the two live-Slack facts this code cannot establish on its
+own, both recorded in the spec: whether `chat.postEphemeral` succeeds in every conversation shape
+`/mka` can be invoked from (a bot that was never added to a channel can get `channel_not_found`),
+and whether Slack honours the unfurl flags on an ephemeral message.
+
+### Historical: Slack Faceted Search MVP (preceding milestone, closed)
 
 - No further action is outstanding. The MVP is reviewed and integrated, the no-unfurl remediation
   is merged through PR #3, post-merge verification passed, and the remediation is closed.
