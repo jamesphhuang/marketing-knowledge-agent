@@ -58,6 +58,26 @@ def pagination_key(channel_id: str, session_key: str) -> PaginationKey:
     return (str(channel_id or ""), str(session_key or ""))
 
 
+class _LaneSupersession:
+    """The handle a superseding caller uses while it holds the lane.
+
+    Exists so "install this search's pages" is reachable only from inside the guard. A caller with
+    no continuation to install simply never calls ``install``; the lane was already cleared on
+    entry, so doing nothing is a complete supersession -- which is what a refusal, an empty result
+    and a one-page result all need.
+    """
+
+    __slots__ = ("_store", "_key")
+
+    def __init__(self, store: "SlackPaginationStore", key: PaginationKey) -> None:
+        self._store = store
+        self._key = key
+
+    def install(self, pages: Sequence[str]) -> str:
+        """Record this search's remaining pages and return the generation identifying them."""
+        return self._store._install(self._key, pages)
+
+
 @dataclass
 class _Continuation:
     generation: str
@@ -137,6 +157,41 @@ class SlackPaginationStore:
         with self._lane_lock(key):
             yield
 
+    @contextmanager
+    def supersede_lane(self, key: PaginationKey):
+        """Make a new search authoritative for this lane, and hold the lane while it is delivered.
+
+        The single supersession contract for **every** new-search outcome: a multi-page result, a
+        one-page result, an empty result, an unstructured reply, and a denylist refusal. A review
+        found the refusal path superseding through a bare ``discard`` outside any lane guard, which
+        left the one ordering this store exists to prevent reachable -- a new response delivered,
+        and *then* a page from the search it replaced:
+
+        ```text
+        A: consumes the old page, pauses before delivery
+        B: discard() + delivers the refusal
+        A: resumes and delivers the old page      <- new response, then old result
+        ```
+
+        Locking ``discard`` alone would not have closed it, because the offending window is between
+        A's consume and A's *send*. So the lane is held across invalidation **and** the caller's
+        delivery, exactly as ``lane_operation`` already holds it across a 「顯示更多」 consume and
+        send. That leaves two orderings and no third:
+
+        - a 「顯示更多」 already inside the lane finishes first, and this supersession waits: old
+          page, then new response;
+        - this supersession finishes first, and the stale click then finds its generation gone:
+          new response only.
+
+        The old continuation is dropped on entry, so a failure during the caller's delivery leaves
+        the lane invalidated rather than restoring a search the user has already moved past.
+        """
+        with self._lane_lock(key):
+            with self._lock:
+                self._expire()
+                self._entries.pop(key, None)
+            yield _LaneSupersession(self, key)
+
     def start(self, key: PaginationKey, pages: Sequence[str]) -> str:
         """Install the pages after the first one as a new generation, and return its id.
 
@@ -144,22 +199,28 @@ class SlackPaginationStore:
         older one. A result that fits one page installs no continuation and clears the lane, so a
         stale button cannot resume the search the user has moved on from -- the generation is still
         minted and returned, so the caller can label its buttons consistently either way.
+
+        Routed through ``supersede_lane`` so there is one ordering contract rather than two. A
+        caller that also needs to deliver a response under the same guard uses the context manager
+        directly; this is the convenience form for callers with nothing to send.
         """
+        with self.supersede_lane(key) as lane:
+            return lane.install(pages)
+
+    def _install(self, key: PaginationKey, pages: Sequence[str]) -> str:
+        """Record the pages after the first one under a fresh generation. Lane already held."""
         generation = secrets.token_hex(GENERATION_BYTES)
-        with self._lane_lock(key):
-            with self._lock:
-                self._expire()
-                self._entries.pop(key, None)
-                remaining = tuple(pages)[1:]
-                if remaining:
-                    self._entries[key] = _Continuation(
-                        generation=generation,
-                        pages=remaining,
-                        next_index=0,
-                        expires_at=self._clock() + self._ttl_seconds,
-                    )
-                    while len(self._entries) > self._max_entries:
-                        self._entries.popitem(last=False)
+        with self._lock:
+            remaining = tuple(pages)[1:]
+            if remaining:
+                self._entries[key] = _Continuation(
+                    generation=generation,
+                    pages=remaining,
+                    next_index=0,
+                    expires_at=self._clock() + self._ttl_seconds,
+                )
+                while len(self._entries) > self._max_entries:
+                    self._entries.popitem(last=False)
         return generation
 
     def consume_next_page(self, key: PaginationKey, generation: str) -> Optional[str]:

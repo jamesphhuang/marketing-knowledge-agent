@@ -12,6 +12,7 @@ Four changes are pinned here:
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -1286,3 +1287,228 @@ def test_the_store_serializes_its_mutable_state():
     """The mechanism the probe removes."""
     store = SlackPaginationStore()
     assert isinstance(store._lock, type(threading.RLock()))
+
+
+# ======================================================================================
+# Final Security Review R4 — every new-search outcome supersedes under one lane contract
+# ======================================================================================
+
+
+def _race_show_more_against(store, key, old_generation, supersede, b_first):
+    """Run a paused 「顯示更多」 against a superseding new search, and record the observable order.
+
+    Worker A holds the lane across consume *and* delivery, exactly as the handler does. Worker B is
+    whatever the new search does -- refusal, one-page, multi-page. What the test reads is the order
+    the two responses would reach the user.
+    """
+    order = []
+    inside = threading.Event()
+    release = threading.Event()
+
+    def worker_a():
+        with store.lane_operation(key):
+            page = store.consume_next_page(key, old_generation)
+            inside.set()
+            release.wait(timeout=5)
+            if page is not None:
+                order.append("OLD page")
+
+    def worker_b():
+        supersede()
+        order.append("NEW response")
+
+    if b_first:
+        thread_b = threading.Thread(target=worker_b)
+        thread_b.start()
+        thread_b.join(timeout=10)
+        thread_a = threading.Thread(target=worker_a)
+        thread_a.start()
+        assert inside.wait(timeout=5)
+        release.set()
+        thread_a.join(timeout=10)
+    else:
+        thread_a = threading.Thread(target=worker_a)
+        thread_a.start()
+        assert inside.wait(timeout=5)
+        thread_b = threading.Thread(target=worker_b)
+        thread_b.start()
+        release.set()
+        thread_a.join(timeout=10)
+        thread_b.join(timeout=10)
+    return order
+
+
+def _refusal_supersession(store, key):
+    """What a denylist refusal does: take the lane, install nothing, deliver inside it."""
+
+    def supersede():
+        with store.supersede_lane(key):
+            pass
+
+    return supersede
+
+
+def test_a_refusal_cannot_be_followed_by_a_page_from_the_search_it_replaced():
+    """The exact R4 blocker.
+
+    The refusal path used to supersede through a bare ``discard`` outside any lane guard, so a
+    「顯示更多」 that had already consumed its page could deliver it *after* the refusal was out --
+    a new response followed by an old result. Locking ``discard`` alone would not have helped: the
+    window is between the consume and the send.
+    """
+    store = SlackPaginationStore()
+    key = pagination_key("C1", "U1:s")
+    old = store.start(key, ["old-1", "old-2", "old-3"])
+
+    order = _race_show_more_against(store, key, old, _refusal_supersession(store, key), b_first=False)
+
+    # The 「顯示更多」 owned the lane first, so it completes and the refusal waits behind it.
+    assert order == ["OLD page", "NEW response"]
+    assert order != ["NEW response", "OLD page"]
+
+
+def test_a_refusal_that_supersedes_first_leaves_the_stale_click_with_nothing():
+    """R4's inverse ordering. Both orders are acceptable; only one interleaving is not."""
+    store = SlackPaginationStore()
+    key = pagination_key("C1", "U1:s")
+    old = store.start(key, ["old-1", "old-2", "old-3"])
+
+    order = _race_show_more_against(store, key, old, _refusal_supersession(store, key), b_first=True)
+
+    assert order == ["NEW response"]
+
+
+@pytest.mark.parametrize(
+    ("label", "new_pages"),
+    [
+        ("refusal_or_empty", None),
+        ("one_page", ["only-one"]),
+        ("multi_page", ["new-1", "new-2", "new-3"]),
+    ],
+)
+def test_every_new_search_outcome_supersedes_the_previous_continuation(label, new_pages):
+    """One contract, not three.
+
+    A refusal, a result that fits one message and a paginated result are all *new searches*, so a
+    button from the previous one is stale after any of them. The one-page case is the one that used
+    to slip through: it installs no continuation, and the old one was left alive.
+    """
+    store = SlackPaginationStore()
+    key = pagination_key("C1", "U1:s")
+    old = store.start(key, ["old-1", "old-2", "old-3"])
+
+    with store.supersede_lane(key) as lane:
+        new_generation = lane.install(new_pages) if new_pages is not None else ""
+
+    assert store.consume_next_page(key, old) is None
+    assert store.has_more(key, old) is False
+    if new_pages is not None and len(new_pages) > 1:
+        assert store.consume_next_page(key, new_generation) == new_pages[1]
+    else:
+        assert len(store) == 0
+
+
+def test_a_one_page_search_cannot_be_followed_by_an_old_page():
+    """The same ordering guarantee for a result that installs no continuation of its own."""
+    store = SlackPaginationStore()
+    key = pagination_key("C1", "U1:s")
+    old = store.start(key, ["old-1", "old-2"])
+
+    def supersede():
+        with store.supersede_lane(key) as lane:
+            lane.install(["only-one"])
+
+    assert _race_show_more_against(store, key, old, supersede, b_first=True) == ["NEW response"]
+
+
+def test_a_failed_delivery_does_not_resurrect_the_superseded_search():
+    """The lane is cleared on entry, so an exception during delivery leaves it invalidated.
+
+    Restoring the old continuation would make a search the user has already moved past current
+    again, which is the state this whole model exists to prevent.
+    """
+    store = SlackPaginationStore()
+    key = pagination_key("C1", "U1:s")
+    old = store.start(key, ["old-1", "old-2"])
+
+    with pytest.raises(RuntimeError):
+        with store.supersede_lane(key):
+            raise RuntimeError("delivery failed")
+
+    assert store.consume_next_page(key, old) is None
+    assert len(store) == 0
+
+
+def test_a_page_cannot_overtake_the_result_it_belongs_to():
+    """The lane must stay held until the *whole* new response is out, not just until it installs.
+
+    Releasing at install time is not enough, and the reason is worth stating precisely: a stale
+    click cannot produce an old page either way, because the old generation is already gone. What
+    an early release does allow is a 「顯示更多」 on the **new** generation consuming and delivering
+    page two while the new search is still delivering page one -- the second page overtaking the
+    first.
+    """
+    store = SlackPaginationStore()
+    key = pagination_key("C1", "U1:s")
+    store.start(key, ["stale-1", "stale-2"])
+
+    order = []
+    installed = threading.Event()
+    finish_delivery = threading.Event()
+    new_generation = {}
+
+    def new_search():
+        with store.supersede_lane(key) as lane:
+            new_generation["id"] = lane.install(["new-page-1", "new-page-2"])
+            installed.set()
+            finish_delivery.wait(timeout=5)
+            order.append("new result page 1")
+
+    def show_more_on_the_new_generation():
+        assert installed.wait(timeout=5)
+        with store.lane_operation(key):
+            page = store.consume_next_page(key, new_generation["id"])
+            if page is not None:
+                order.append(f"show more page ({page})")
+
+    searcher = threading.Thread(target=new_search)
+    clicker = threading.Thread(target=show_more_on_the_new_generation)
+    searcher.start()
+    clicker.start()
+    # Give the clicker every chance to overtake before the result is released.
+    installed.wait(timeout=5)
+    time.sleep(0.2)
+    finish_delivery.set()
+    searcher.join(timeout=10)
+    clicker.join(timeout=10)
+
+    assert order[0] == "new result page 1", (
+        "page two overtook the result it continues -- the lane was released before delivery"
+    )
+
+
+def test_start_and_supersede_share_one_ordering_contract():
+    """``start`` is the convenience form, not a second set of semantics."""
+    store = SlackPaginationStore()
+    key = pagination_key("C1", "U1:s")
+    old = store.start(key, ["old-1", "old-2"])
+
+    entered = threading.Event()
+
+    def hold_the_lane():
+        with store.lane_operation(key):
+            entered.set()
+            time.sleep(0.2)
+
+    holder = threading.Thread(target=hold_the_lane)
+    holder.start()
+    assert entered.wait(timeout=5)
+
+    # ``start`` must wait for the lane exactly as ``supersede_lane`` does.
+    began = time.monotonic()
+    store.start(key, ["new-1", "new-2"])
+    waited = time.monotonic() - began
+    holder.join(timeout=5)
+
+    assert waited >= 0.1, "start() did not serialize against a held lane"
+    assert store.consume_next_page(key, old) is None

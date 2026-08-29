@@ -1054,11 +1054,6 @@ def _register_faceted_search_handlers(
             query_audit_metadata={"channel_id": channel_id, "user_id": user_id},
         )
 
-        # This search supersedes whatever this thread was previously paging through -- including
-        # when it produced no pages at all. Done before the reply is sent and on every branch
-        # below, so 「顯示更多」 can never resume a result the user has already moved on from.
-        pagination_store.discard(thread_key)
-
         refused = is_restricted_refusal(answer)
         overlay_issue = (
             _apply_approved_asset_urls(answer, db_path)
@@ -1095,76 +1090,83 @@ def _register_faceted_search_handlers(
         pages = build_structured_slack_pages(
             answer, SHOW_MORE_BUTTON_HINT if is_slash else SHOW_MORE_THREAD_REPLY_HINT
         )
-        # ``start`` installs this search as the lane's newest generation and returns its id --
-        # including when the result fits one page, where it installs no continuation but still
-        # supersedes whatever was there. A button from the previous search is stale either way.
-        generation = ""
-        if pages is None:
-            body_text = _format_unstructured_slack_reply(answer, config.max_answer_chars)
-        else:
-            generation = pagination_store.start(thread_key, pages.pages)
-            body_text = pages.pages[0]
-        _post_search_reply(
-            client,
-            is_slash=is_slash,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            user_id=user_id,
-            text=body_text,
-            reservation=result_reservation,
-        )
 
-        if refused:
-            # A refused query's text must not survive anywhere shared, and the token store is shared
-            # across every viewer of this channel. So nothing is stored and nothing is offered to
-            # reopen -- only a way back to a blank modal. Storing it "just for the owner" would
-            # still be storing it.
+        # One supersession contract for every outcome -- multi-page, one-page, empty, unstructured
+        # and refusal alike. The lane is cleared on entry and held until this search's whole
+        # response is out, so a 「顯示更多」 already in flight either finishes before this starts or
+        # finds its generation gone afterwards. Superseding outside the guard is what let a refusal
+        # be delivered and then followed by a page from the search it replaced.
+        #
+        # Retrieval and the audit row are deliberately *outside*: the lane orders responses, and
+        # holding it across a search would serialize work that has nothing to do with ordering.
+        with pagination_store.supersede_lane(thread_key) as lane:
+            generation = ""
+            if pages is None:
+                body_text = _format_unstructured_slack_reply(answer, config.max_answer_chars)
+            else:
+                generation = lane.install(pages.pages)
+                body_text = pages.pages[0]
+            _post_search_reply(
+                client,
+                is_slash=is_slash,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                user_id=user_id,
+                text=body_text,
+                reservation=result_reservation,
+            )
+
+            if refused:
+                # A refused query's text must not survive anywhere shared, and the token store is
+                # shared across every viewer of this channel. So nothing is stored and nothing is
+                # offered to reopen -- only a way back to a blank modal. Storing it "just for the
+                # owner" would still be storing it.
+                if is_slash:
+                    _post_search_reply(
+                        client,
+                        is_slash=True,
+                        channel_id=channel_id,
+                        thread_ts=thread_ts,
+                        user_id=user_id,
+                        text=RESTART_SEARCH_TEXT,
+                        blocks=restart_search_blocks(session_id),
+                        reservation=response_url_store.reserve(
+                            user_id=user_id, channel_id=channel_id, session_key=session_key
+                        ),
+                    )
+                else:
+                    post_slack_reply(client, build_restart_search_message(channel_id, thread_ts))
+                return
+
+            request_token = request_token_store.store(
+                request, owner_user_id=user_id, channel_id=channel_id, session_key=session_key
+            )
             if is_slash:
+                # One follow-up message rather than two: 「顯示更多」 only when a page is actually
+                # waiting, then 「調整條件」, which is always available.
+                follow_up: List[dict] = []
+                if pages is not None and len(pages.pages) > 1:
+                    follow_up.extend(show_more_blocks(request_token, session_id, generation))
+                follow_up.extend(adjust_filters_blocks(request_token, session_id))
                 _post_search_reply(
                     client,
                     is_slash=True,
                     channel_id=channel_id,
                     thread_ts=thread_ts,
                     user_id=user_id,
-                    text=RESTART_SEARCH_TEXT,
-                    blocks=restart_search_blocks(session_id),
+                    text=ADJUST_FILTERS_TEXT,
+                    blocks=follow_up,
+                    # A second reservation, taken after the result is out. The result is the message
+                    # that had to be guaranteed before retrieval ran; this one is an affordance, and
+                    # if the budget cannot cover it the search still reached the user.
                     reservation=response_url_store.reserve(
                         user_id=user_id, channel_id=channel_id, session_key=session_key
                     ),
                 )
-            else:
-                post_slack_reply(client, build_restart_search_message(channel_id, thread_ts))
-            return
-
-        request_token = request_token_store.store(
-            request, owner_user_id=user_id, channel_id=channel_id, session_key=session_key
-        )
-        if is_slash:
-            # One follow-up message rather than two: 「顯示更多」 only when a page is actually
-            # waiting, then 「調整條件」, which is always available.
-            follow_up: List[dict] = []
-            if pages is not None and len(pages.pages) > 1:
-                follow_up.extend(show_more_blocks(request_token, session_id, generation))
-            follow_up.extend(adjust_filters_blocks(request_token, session_id))
-            _post_search_reply(
-                client,
-                is_slash=True,
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-                user_id=user_id,
-                text=ADJUST_FILTERS_TEXT,
-                blocks=follow_up,
-                # A second reservation, taken after the result is out. The result is the message
-                # that had to be guaranteed before retrieval ran; this one is an affordance, and if
-                # the budget cannot cover it the search still reached the user.
-                reservation=response_url_store.reserve(
-                    user_id=user_id, channel_id=channel_id, session_key=session_key
-                ),
+                return
+            post_slack_reply(
+                client, build_adjust_filters_message(channel_id, thread_ts, request_token)
             )
-            return
-        post_slack_reply(
-            client, build_adjust_filters_message(channel_id, thread_ts, request_token)
-        )
 
 
 def _post_search_reply(
