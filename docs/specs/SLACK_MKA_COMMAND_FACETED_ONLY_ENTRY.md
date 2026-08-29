@@ -235,9 +235,42 @@ Slack artifact to a structured search, and therefore none to `chat.postMessage`.
 Validation is an exact allowlist, checked before a capability is stored rather than before it is
 sent — refusing at the boundary where the value enters, not after it has been carried around.
 Required: HTTPS; an exact approved host; **no username, no password**; port absent or exactly 443,
-with an unparseable port refused rather than treated as absent; no fragment; a path under a Slack
-response_url root. An independent review found the looser first version accepted
+with an unparseable port refused rather than treated as absent; no fragment; no query string; and a
+**structurally validated** path. An independent review found the looser first version accepted
 `user:pass@hooks.slack.com`, `hooks.slack.com:444` and `hooks.slack.com:8443`.
+
+The path check is not a prefix test. A second review found `startswith("/commands/")` authorized
+`/commands/a/../../services/x`, `/commands/%2e%2e/x` and `/commands/a%2f..%2fservices/x` on the
+strength of the characters they begin with. Validation now runs on the **raw** path, exactly as it
+will be sent — nothing is decoded and re-checked, because a validator that normalises differently
+from the HTTP client is one that can be walked past. Four gates: every `%` escape well-formed and
+none decoding to `/`, `\`, `.` or a control byte; no raw control characters or backslashes; no
+empty, `.` or `..` segments; and a first segment naming an approved family with at least one
+segment after it.
+
+**The approved families are `commands` and `actions`, and nothing else** — the two payload kinds
+this surface actually receives, a slash command and an interactive action. `services` (incoming
+webhooks) was in an earlier version of the list and is removed: this app never receives one.
+
+### Exception secrecy
+
+`urllib`'s exceptions carry the full URL in `HTTPError.url` and usually in `str(exc)`. A review
+found that `raise ... from None` was not enough: it clears `__cause__` and suppresses traceback
+rendering, but the original stays reachable through `__context__`, where any structured reporter
+walking an exception tree will find it.
+
+The sanitized error is therefore raised **outside** every `except` block, so nothing is being
+handled and `__context__` is `None` too, and the locals holding the URL and the request are deleted
+first for reporters that serialise frame locals. Only a fixed string and an integer status cross the
+boundary.
+
+### Proxy, recorded rather than solved
+
+`urllib`'s `ProxyHandler` honours `HTTPS_PROXY`/`https_proxy`. Verified: it is absent in a process
+with no proxy variables and present in one that has them, so whether a response_url request
+traverses a proxy is a property of the deployment rather than of this code. A review classified it
+non-blocking and it is **left unchanged** — pinning it would change behaviour in a proxied network,
+which is an operator's decision. Stated here so it is not mistaken for handled.
 
 **Redirects are refused.** Validating the first hop authorizes nothing about the second, and a
 `Location` header is a destination chosen by the responder — following one would send a bearer
@@ -309,6 +342,7 @@ no token. So it is handled as a credential, not as a routing coordinate:
 | memory only, never written to disk | a capability in a file outlives the interaction it belongs to |
 | never in `private_metadata`, a button value, a request token, a pagination key or an audit row | all of those travel to Slack and back, or persist |
 | excluded from `repr`, on the stored record *and* on the reservation | a debugger, a crash dump or a stray `print` would otherwise disclose it |
+| a reservation cannot be copied, deep-copied or pickled | each would mint a second authorization from one — the clones carry the same URL with a fresh unspent flag, and pickling writes the capability into bytes that outlive the process |
 | never logged, and never in an exception message | the transport logs nothing at all, and every failure is re-raised as a fixed-text error with the chained original suppressed — `urllib` puts the full URL in `HTTPError.url` and usually in `str(exc)` |
 | strict validation before storing | see below; this value arrives in a payload and is then POSTed to |
 | TTL below Slack's documented ~30 minutes | expiry then fails in our code, with our message, rather than as a Slack error after a search has already run |
@@ -328,6 +362,12 @@ holding a one-use capability could both pass the check. `slack_bolt` dispatches 
 thread pool, so that is a real interleaving, not a theoretical one — reproduced as 2 successes on a
 budget of 1. Every mutation of store state is now inside one `threading.RLock`, and `reserve()`
 verifies and decrements in a single critical section.
+
+**And the reservation itself was spendable twice.** A later review found the same class of defect
+one level down: the store's lock protects the *budget*, but the send-once flag on the reservation
+was its own unsynchronised check-then-act, so two threads handed the same object both sent —
+reproduced as two outbound requests from one authorization. A reservation now owns a `Lock` of its
+own, and duplication is refused outright rather than allowed and hoped about.
 
 **The pre-retrieval check was observational.** `can_reply()` answered a question that was already
 stale by the time the answer was used: another handler could consume the last use in the window

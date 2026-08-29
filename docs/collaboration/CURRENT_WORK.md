@@ -5,7 +5,7 @@
 ## Lock
 
 - State: active — controlled UAT preparation
-- Milestone state: SLACK_MKA_COMMAND_UAT_R1_SECURITY_REMEDIATED_AWAITING_REVIEW_2
+- Milestone state: SLACK_MKA_COMMAND_UAT_R1_SECURITY_REMEDIATED_AWAITING_REVIEW_3
 - Task: Slack `/mka` Faceted-Only Search Entry
 - Implementer: Claude Code
 - Reviewer: Codex — R1 against `5954e10` CHANGES_REQUESTED (2 blocking, both remediated); R2
@@ -39,8 +39,8 @@
 - Started at: 2026-08-28
 - Human UAT Phase 1: **PASS_WITH_BLOCKING_FINDING** — the search flow passed live; slash delivery
   depended on bot membership and had to be re-routed. See the dated section below.
-- Next exact action: **second independent routing/security Delta Review** of the R1 security
-  remediation, then a second controlled UAT round. Not authorized by this record.
+- Next exact action: **third independent security review** of the capability model, then a second
+  controlled UAT round. Not authorized by this record.
 
 ### Reviewed-code provenance versus PR head
 
@@ -112,8 +112,11 @@ UAT_R1_REMEDIATED=YES
 UAT_R1_DELTA_REVIEW=CHANGES_REQUESTED
 UAT_R1_REVIEW_BLOCKING_FINDINGS=4
 UAT_R1_SECURITY_BLOCKERS_REMEDIATED=4
-UAT_R1_SECURITY_REVIEW_2=PENDING
-READY_FOR_UAT_R1_SECURITY_REVIEW_2=YES
+UAT_R1_SECURITY_REVIEW_2=CHANGES_REQUESTED
+UAT_R1_SECURITY_REVIEW_2_BLOCKING_FINDINGS=4
+UAT_R1_SECURITY_REVIEW_2_REMEDIATED=4
+UAT_R1_SECURITY_REVIEW_3=PENDING
+READY_FOR_UAT_R1_SECURITY_REVIEW_3=YES
 
 SLACK_APP_CONSOLE_CHANGED=NO
 PRODUCTION_CONFIG_CHANGED=NO
@@ -843,6 +846,131 @@ nothing, and under a mutation harness it reports nothing precisely when somethin
 - `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin re-confirmed
   as this worktree's `src`.
 - No live Slack call was made; the UAT bot was not restarted; nothing was pushed.
+
+### Independent Security Review R2 and the third remediation (2026-08-28)
+
+Reviewed candidate: `0470246dee7327546687b7ec23ab62783c0910d9` (code+tests
+`6e742fca494f3ee8e9925699fd6fb292187ea0b6`). Verdict **CHANGES_REQUESTED**, **4 blocking findings**,
+all HIGH/P1. All four accepted, all four **reproduced against the reviewed candidate before any
+fix**, each now guarded by a test proven to fail without its fix.
+
+The previous rounds' records are retained above unchanged. What R2 confirmed as *fixed* by the
+prior round — store-level atomic reserve, reserve-before-retrieval, and the host / userinfo / port
+/ redirect base checks — is unchanged by this round and re-verified below.
+
+```text
+UAT_R1_SECURITY_REVIEW_2=CHANGES_REQUESTED
+UAT_R1_SECURITY_REVIEW_2_REVIEWED_CANDIDATE=0470246dee7327546687b7ec23ab62783c0910d9
+UAT_R1_SECURITY_REVIEW_2_BLOCKING_FINDINGS=4
+UAT_R1_SECURITY_REVIEW_2_REMEDIATED=4
+UAT_R1_SECURITY_REVIEW_3=PENDING
+```
+
+This block is **this round's state**, not acceptance. No review has passed this candidate and no
+live UAT has been run against it.
+
+#### R2-1 (HIGH) — one reservation could be spent twice concurrently
+
+**Reproduced first:** two threads handed the same reservation object both passed
+`if not self._spent` before either set it — 2 successful spends, and 2 outbound requests.
+
+The store's lock did not cover this: it protects the *budget*, and this is the single authorization
+that budget already bought. The reservation now owns a `threading.Lock` and the unspent→spent
+transition happens inside it; the loser gets an exception rather than the URL, so a second send
+cannot be attempted.
+
+#### R2-2 (HIGH) — a reservation could be duplicated and replayed
+
+**Reproduced first:** `copy.copy` and `copy.deepcopy` produced a clone carrying the same bearer URL
+with its own fresh `_spent = False`, so the original could send and the clone could send again.
+`pickle.dumps` was worse — it serialised the capability itself into bytes (`SECRET_CAPABILITY`
+present in the output) that a revived object could spend.
+
+`ResponseReservation` is no longer a dataclass. It uses `__slots__` (no `__dict__` to copy or
+pickle) and refuses `__copy__`, `__deepcopy__`, `__reduce__` and `__getstate__` with a `TypeError`
+carrying no URL.
+
+A test-strength note found while probing: `deepcopy` and `pickle` also fail *incidentally*, because
+the owned `Lock` cannot be copied. A test accepting any `TypeError` would therefore have kept
+passing with the explicit guards deleted. The test now asserts the refusal is ours.
+
+#### R2-3 (HIGH) — the sanitized error still carried the secret
+
+**Reproduced first:** the escaping `SlackResponseUrlError` had `__cause__ = None` but
+`__context__` = the original `HTTPError`, whose `.url` is the full capability.
+
+`raise ... from None` clears `__cause__` and suppresses traceback *rendering*; it does not remove
+the context object, which any structured reporter walking an exception tree will find.
+
+The sanitized error is now raised **outside** every `except` block — nothing is being handled at
+that point, so `__context__` is `None` as well — and the locals holding the URL and the `Request`
+are deleted first, for reporters that serialise frame locals. Only a fixed string and an integer
+status cross the boundary.
+
+Tests walk the whole tree (`str`, `repr`, `args`, `__cause__`, `__context__`, URL-bearing
+attributes, and traceback frame locals, recursively) across HTTP 400, HTTP 500, refused redirect
+and connection refusal. A companion test feeds the walker a deliberately unsanitized error and
+asserts it *does* find the secret, so the other assertions cannot pass vacuously.
+
+#### R2-4 (HIGH) — the path allowlist was a prefix test
+
+**Reproduced first:** every one of these was accepted —
+`/commands/a/../../services/x`, `/commands/%2e%2e/x`, `/commands/%2E%2E/x`,
+`/commands/a%2f..%2fservices/x`, `/commands/a%5c..%5cx`, `/commands/../admin`, `/commands/%zz`,
+and `?a=1` query strings.
+
+Validation is now structural, applied to the **raw** path exactly as it will be sent — nothing is
+decoded and re-checked, because a validator that normalises differently from the HTTP client is one
+that can be walked past. Four gates: well-formed `%` escapes, none decoding to `/`, `\`, `.` or a
+control byte; no raw control characters or backslashes; no empty, `.` or `..` segments; and a first
+segment naming an approved family with at least one segment after it. Query strings are refused.
+
+**Endpoint families, established from the repository rather than guessed:** this surface receives
+`response_url` from exactly two payload kinds — slash commands (`/commands/…`) and interactive
+actions (`/actions/…`). The allowlist is those two. `/services/` (incoming webhooks) was in the
+previous list and is removed: this app never receives one.
+
+#### Proxy behaviour — recorded, not changed
+
+R2 noted stdlib `ProxyHandler` may honour `HTTPS_PROXY`. Verified directly: it is **absent** in a
+process with no proxy variables (the handler registers no methods and is dropped) and **present**
+in one that has them. So whether a response_url request traverses a proxy is a property of the
+deployment, not of this code. Classified non-blocking by the review and **left unchanged**;
+pinning it would change behaviour in a proxied network, which is an operator's decision. It is
+documented in the transport and recorded here so it is not mistaken for solved.
+
+#### Mutation-strength evidence (third remediation)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R14 | remove the reservation's own lock | `2 failed` |
+| R15 | allow copy / deepcopy / pickle | `7 failed` |
+| R16 | raise the sanitized error inside the handler again | `13 failed` |
+| R17 | restore prefix-only path validation | `21 failed` |
+| R18 | permit encoded structural bytes | `11 failed` |
+| R19 | accept any `hooks.slack.com` path family | `4 failed` |
+
+Earlier probes on boundaries this round touched were re-run and still bite: R7 store lock
+(`2 failed`), R8 reserve-before-retrieval (`2 failed`), R9 userinfo (`3 failed`), R10 non-443 port
+(`2 failed`), R11 redirect (`3 failed`), R13 retry (`8 failed`).
+
+#### Verification (third remediation)
+
+- Comparable 23-file suite: **807 passed, 1 skipped, 0 failed** (unchanged from the previous round;
+  this round's additions are all in the capability suite).
+- Plus `tests/test_slack_response_urls.py` (24 files): **931 passed, 1 skipped**
+  (previous round: 884).
+- 25-file superset incl. `test_content_index_lineage.py`: **952 passed, 1 skipped**.
+- `tests/test_slack_structured_governance.py`: **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE** —
+  2 passed, 20 errors, the same pre-existing gitignored `.mka/content_index.sqlite` dependency.
+  Not claimed as passing.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin confirmed as
+  this worktree's `src`, with `pytest`, `pydantic` and `slack_bolt` all importable — the reviewer's
+  inability to run these suites was an environment limitation on their side, not a code fault.
+- No live Slack call; UAT bot not restarted; nothing pushed.
 
 ### Superseded lock record: closed Slack Faceted Search MVP / no-unfurl milestone
 
