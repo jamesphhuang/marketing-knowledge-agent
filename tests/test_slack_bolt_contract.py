@@ -146,8 +146,8 @@ def slack_api(monkeypatch):
 
     monkeypatch.setattr(WebClient, "api_call", _stub)
 
-    def _capture_response_url(response_url, message):
-        recorder.response_url_sends.append({"url": response_url, **message})
+    def _capture_response_url(reservation, message):
+        recorder.response_url_sends.append({"url": reservation.spend(), **message})
 
     monkeypatch.setattr(
         slack_interface_module, "post_slack_response_url", _capture_response_url

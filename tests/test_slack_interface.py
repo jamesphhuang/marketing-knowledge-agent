@@ -795,10 +795,10 @@ def test_pagination_continuation_is_posted_with_unfurling_disabled(tmp_path):
 # boundary that forces the message's properties, or it reopens the finding for its own class of
 # message.
 POSTING_APIS = {
-    # The constructor call, not the bare name: the name also appears in the import and in the
-    # boundary's own docstring, and neither of those sends anything.
     "chat_postMessage": "def post_slack_reply(",
-    "WebhookClient(": "def post_slack_response_url(",
+    # The slash boundary delegates the HTTP itself to the capability module, which owns the secret
+    # and therefore owns how it is transmitted. What must stay single here is the call into it.
+    "send_response_url_message(": "def post_slack_response_url(",
 }
 # Mechanisms this surface does not use at all.
 #
@@ -815,7 +815,9 @@ FORBIDDEN_POSTING_APIS = (
 # Raw HTTP would reach a response_url without passing the boundary that forces ephemeral,
 # non-replacing, non-unfurling delivery. Checked across the Slack modules only -- ``llm.py``
 # legitimately makes its own provider calls and is not part of this surface.
-FORBIDDEN_RAW_HTTP = ("requests.post", "urlopen", "http.client")
+FORBIDDEN_RAW_HTTP = ("requests.post", "urlopen", "http.client", "httpx", "aiohttp")
+# The one module allowed to speak HTTP, because it owns the capability being spent.
+RESPONSE_URL_TRANSPORT_MODULE = "slack_response_urls.py"
 
 
 def test_no_slack_message_is_posted_outside_a_boundary():
@@ -837,6 +839,10 @@ def test_no_slack_message_is_posted_outside_a_boundary():
             continue
         text = module.read_text(encoding="utf-8")
         for api in POSTING_APIS:
+            # The capability module defines the send function the boundary calls; defining it is
+            # not a second call site.
+            if module.name == RESPONSE_URL_TRANSPORT_MODULE and api.startswith("send_"):
+                continue
             assert api not in text, f"{module.name}: {api}"
 
 
@@ -851,30 +857,60 @@ def test_no_alternative_posting_api_is_reachable_from_this_surface():
 
 
 def test_no_raw_http_can_reach_a_response_url():
-    """A hand-rolled POST would bypass the boundary that makes a slash reply ephemeral."""
+    """A hand-rolled POST would bypass the boundary that makes a slash reply ephemeral.
+
+    ``slack_response_urls.py`` is the single exception: it holds the capability, so it is also the
+    only place that may transmit one. Its own transport is asserted separately below.
+    """
     for module in Path("src/marketing_knowledge_agent").glob("slack_*.py"):
+        if module.name == RESPONSE_URL_TRANSPORT_MODULE:
+            continue
         text = module.read_text(encoding="utf-8")
         for api in FORBIDDEN_RAW_HTTP:
             assert api not in text, f"{module.name}: {api}"
+        # ``urllib.parse`` is URL *parsing* and is used legitimately for rendering; only the
+        # request side is forbidden.
+        assert "urllib.request" not in text, module.name
+        assert "WebhookClient(" not in text, module.name
+
+
+def test_the_capability_module_has_exactly_one_outbound_http_site():
+    """One reservation, one attempt, one place it can happen."""
+    source = (
+        Path("src/marketing_knowledge_agent/slack_response_urls.py")
+        .read_text(encoding="utf-8")
+    )
+    assert source.count("_OPENER.open(") == 1
+    boundary = source.split("def send_response_url_message(", 1)[1]
+    assert "_OPENER.open(" in boundary
+    # The SDK client was dropped precisely because it logs, retries and follows redirects. The name
+    # survives only in the docstring explaining that; what must be absent is any call to it.
+    assert "WebhookClient(" not in source
+    assert "slack_sdk" not in source
+    assert "requests.post" not in source
+    # Nothing in this module may log. Asserted on calls rather than on the word, because the
+    # docstring legitimately explains *why* the logging SDK client was dropped.
+    assert "import logging" not in source
+    assert "logging." not in source
+    for call in (".debug(", ".info(", ".warning(", ".error(", ".exception(", "print("):
+        assert call not in source, call
 
 
 def test_the_response_url_boundary_forces_its_four_properties(monkeypatch):
     """A caller cannot make a slash reply public, destructive, or link-unfurling."""
+    import marketing_knowledge_agent.slack_interface as slack_interface_module
+    from marketing_knowledge_agent.slack_response_urls import single_use_reservation
+
     sent = {}
 
-    class _FakeWebhookClient:
-        def __init__(self, url):
-            sent["url"] = url
+    def _capture(reservation, payload):
+        sent["url"] = reservation.spend()
+        sent["payload"] = payload
 
-        def send(self, **kwargs):
-            sent["kwargs"] = kwargs
-
-    import slack_sdk.webhook as webhook_module
-
-    monkeypatch.setattr(webhook_module, "WebhookClient", _FakeWebhookClient)
+    monkeypatch.setattr(slack_interface_module, "send_response_url_message", _capture)
 
     post_slack_response_url(
-        "https://hooks.slack.com/commands/TEST/SECRET_CAPABILITY",
+        single_use_reservation("https://hooks.slack.com/commands/TEST/SECRET_CAPABILITY"),
         {
             "text": "https://example.invalid/article",
             # Everything a call site might try to assert for itself:
@@ -886,8 +922,8 @@ def test_the_response_url_boundary_forces_its_four_properties(monkeypatch):
     )
 
     assert sent["url"] == "https://hooks.slack.com/commands/TEST/SECRET_CAPABILITY"
-    assert sent["kwargs"]["response_type"] == "ephemeral"
-    assert sent["kwargs"]["replace_original"] is False
-    assert sent["kwargs"]["unfurl_links"] is False
-    assert sent["kwargs"]["unfurl_media"] is False
-    assert sent["kwargs"]["text"] == "https://example.invalid/article"
+    assert sent["payload"]["response_type"] == "ephemeral"
+    assert sent["payload"]["replace_original"] is False
+    assert sent["payload"]["unfurl_links"] is False
+    assert sent["payload"]["unfurl_media"] is False
+    assert sent["payload"]["text"] == "https://example.invalid/article"

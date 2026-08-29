@@ -44,9 +44,12 @@ from .slack_faceted_search import (
 )
 from .slack_request_tokens import SlackRequestTokenStore, default_request_token_store
 from .slack_response_urls import (
+    ResponseReservation,
     SlackResponseUrlStore,
     default_response_url_store,
     is_valid_response_url,
+    send_response_url_message,
+    single_use_reservation,
 )
 from .slack_output_preview import (
     apply_approved_asset_url_overlay,
@@ -484,17 +487,14 @@ def post_slack_reply(client, reply: dict) -> None:
     client.chat_postMessage(**{**reply, "unfurl_links": False, "unfurl_media": False})
 
 
-def post_slack_response_url(response_url: str, message: dict) -> None:
+def post_slack_response_url(reservation: ResponseReservation, message: dict) -> None:
     """The single boundary every slash-originated message this bot sends goes through.
 
-    Human UAT established why this exists rather than ``chat.postEphemeral``: a ``/mka`` invoked
-    from a conversation the bot was never added to entered the denial path correctly and then could
-    not deliver the denial, because Slack answers ``chat.postEphemeral`` with ``channel_not_found``
-    unless the app can post into that conversation. The user saw nothing at all. Slack's own
-    mechanism for replying to an interaction regardless of membership is the ``response_url`` its
-    payload carries, so that is what this surface replies through.
+    Takes a **reservation**, not a URL. The use it represents was already decremented atomically in
+    the store, so possessing one is the authorization to send exactly once; there is no path here
+    that could send without having paid for it first, and none that could send twice.
 
-    Four properties are forced here and cannot be overridden, because they are written *after* the
+    Four properties are forced and cannot be overridden, because they are written *after* the
     caller's message is unpacked:
 
     - ``response_type="ephemeral"`` -- a slash result is addressed to the person who ran the
@@ -502,24 +502,20 @@ def post_slack_response_url(response_url: str, message: dict) -> None:
       conversation, and no call site is allowed to ask for it;
     - ``replace_original=False`` -- each message is its own reply. Replacing would silently destroy
       the page a user is still reading;
-    - ``unfurl_links`` / ``unfurl_media`` false -- the no-unfurl contract, unchanged. Unlike
-      ``chat.postEphemeral``, whose binding does not declare these, ``WebhookClient.send`` declares
-      all four of these parameters explicitly (verified against the installed ``slack_sdk``
-      3.43.0), so they are part of the documented call rather than passengers in ``**kwargs``.
+    - ``unfurl_links`` / ``unfurl_media`` false -- the unchanged no-unfurl contract.
 
-    ``response_url`` is a bearer capability: it is passed in, used, and never stored, logged or
-    echoed here. See :mod:`slack_response_urls` for how it is held and why.
+    The HTTP itself lives in :mod:`slack_response_urls`, which owns the capability and therefore
+    owns how it is transmitted: one attempt, no retry, no redirect, no logger.
     """
-    from slack_sdk.webhook import WebhookClient
-
-    WebhookClient(response_url).send(
-        **{
+    send_response_url_message(
+        reservation,
+        {
             **message,
             "response_type": "ephemeral",
             "replace_original": False,
             "unfurl_links": False,
             "unfurl_media": False,
-        }
+        },
     )
 
 
@@ -583,11 +579,11 @@ def _tell_stale_clicker_to_use_the_new_entry(body: dict, config: SlackConfig) ->
     response_url the click is simply a no-op -- a stale button doing nothing is an acceptable
     outcome and is what the remediation actually requires; the message is a courtesy on top.
     """
-    response_url = _action_response_url(body)
-    if not response_url:
+    reservation = single_use_reservation(_action_response_url(body))
+    if reservation is None:
         return
     post_slack_response_url(
-        response_url, _response_message(stale_entry_mode_message(config.search_entry_mode))
+        reservation, _response_message(stale_entry_mode_message(config.search_entry_mode))
     )
 
 
@@ -777,11 +773,15 @@ def _register_faceted_search_handlers(
                 channel_id=channel_id,
                 session_key=session_key,
             )
-            if not refreshed and not response_url_store.can_reply(
+            if not refreshed and not response_url_store.remaining_uses(
                 user_id=user_id, channel_id=channel_id, session_key=session_key
             ):
-                # Neither a fresh capability nor a live stored one: there is no way to answer the
-                # submission this modal would produce, so it is not opened.
+                # Neither a fresh capability nor a live stored one, so the submission this modal
+                # would produce could not be answered and the modal is not opened.
+                #
+                # This is a UX check, not the security decision: the authoritative one is the
+                # reservation the submission itself takes before any retrieval runs. Reserving here
+                # would spend a use on a modal that may never be submitted.
                 return
         else:
             # Who clicked, and where, is read from the interaction payload -- never from the
@@ -844,7 +844,9 @@ def _register_faceted_search_handlers(
                 # ``chat.postEphemeral``: the conversations this branch exists to turn away are
                 # exactly the ones the bot is least likely to be a member of, which is how the
                 # denial went undelivered in UAT.
-                post_slack_response_url(response_url, _response_message(DENIED_CHANNEL_MESSAGE))
+                denial = single_use_reservation(response_url)
+                if denial is not None:
+                    post_slack_response_url(denial, _response_message(DENIED_CHANNEL_MESSAGE))
                 return
             session_id = new_slash_session_id()
             if not response_url_store.store(
@@ -894,25 +896,33 @@ def _register_faceted_search_handlers(
                 )
                 is not None
             )
-            # This click is its own interaction, so it carries its own capability. Using it keeps
-            # a long browsing session from spending down the original ``/mka`` capability, and
-            # keeps paging working after that one has expired.
-            reply_url = _action_response_url(body) or response_url_store.take(
+            # This click is its own interaction and carries its own capability. Refreshing the lane
+            # with it keeps a long browsing session from spending down the original ``/mka``
+            # capability, and keeps paging working after that one has expired. The reservation is
+            # then taken from the store like every other send, so two concurrent clicks racing for
+            # a final use produce exactly one message.
+            response_url_store.store(
+                _action_response_url(body),
+                owner_user_id=user_id,
+                channel_id=channel_id,
+                session_key=session_key,
+            )
+            reservation = response_url_store.reserve(
                 user_id=user_id, channel_id=channel_id, session_key=session_key
             )
-            if not reply_url:
+            if reservation is None:
                 return
             lane = pagination_key(channel_id, session_key)
             page = pagination_store.next_page(lane) if owns_session else None
             if page is None:
-                post_slack_response_url(reply_url, _response_message(PAGINATION_EXPIRED_MESSAGE))
+                post_slack_response_url(reservation, _response_message(PAGINATION_EXPIRED_MESSAGE))
                 return
             blocks = (
                 show_more_blocks(request_token, session_id)
                 if request_token and pagination_store.has_more(lane)
                 else None
             )
-            post_slack_response_url(reply_url, _response_message(page, blocks))
+            post_slack_response_url(reservation, _response_message(page, blocks))
 
     @app.view(FACETED_SEARCH_MODAL_CALLBACK_ID)
     def handle_faceted_search_submission(ack, body, client, view):
@@ -950,19 +960,6 @@ def _register_faceted_search_handlers(
                 ack()
                 return
             session_key = _slash_session_key(user_id, session_id)
-            if not response_url_store.can_reply(
-                user_id=user_id, channel_id=channel_id, session_key=session_key
-            ):
-                # Checked *before* the search, not after it. A capability expires on Slack's clock,
-                # not ours, so the interesting failure is the one where retrieval succeeds and
-                # there is then no way to hand the result back: work done, governance spent, and
-                # the user left staring at a modal that closed on nothing. Unknown, expired,
-                # exhausted and not-yours are one outcome here on purpose.
-                ack(
-                    response_action="errors",
-                    errors={FREE_TEXT_BLOCK_ID: SLASH_SESSION_EXPIRED_MESSAGE},
-                )
-                return
         else:
             if channel_id not in config.allowed_channel_ids:
                 ack()
@@ -972,6 +969,7 @@ def _register_faceted_search_handlers(
         state_values = ((view.get("state") or {}).get("values")) or {}
         thread_key = pagination_key(channel_id, session_key)
 
+        result_reservation: Optional[ResponseReservation] = None
         try:
             request = parse_structured_search_request(state_values, catalog_version)
             validate_structured_search_request(request, facet_catalog)
@@ -984,13 +982,42 @@ def _register_faceted_search_handlers(
                 thread_ts=thread_ts,
                 user_id=user_id,
                 text=FACETED_SEARCH_STALE_CATALOG_MESSAGE,
-                session_key=session_key,
-                response_url_store=response_url_store,
+                reservation=(
+                    response_url_store.reserve(
+                        user_id=user_id, channel_id=channel_id, session_key=session_key
+                    )
+                    if is_slash
+                    else None
+                ),
             )
             return
         except StructuredSearchValidationError as exc:
+            # No reservation has been taken yet, deliberately. A validation error is answered
+            # through ``ack`` alone and sends nothing, so spending a use here would let a handful
+            # of ordinary mistakes exhaust a session that never ran a search.
             ack(response_action="errors", errors={FREE_TEXT_BLOCK_ID: str(exc)})
             return
+
+        if is_slash:
+            # Reserved, not checked, and reserved *here* -- after the request is known to be valid
+            # and before any retrieval runs.
+            #
+            # An observational "may I reply?" is stale the moment it returns: another handler on
+            # bolt's thread pool can consume the last use in the window before the send, leaving a
+            # search that has already executed with nowhere to go. Taking the use now means the
+            # reply is paid for before the work starts, and this same reservation is what
+            # authorizes the message at the end.
+            #
+            # Unknown, expired, exhausted and not-yours are one outcome on purpose.
+            result_reservation = response_url_store.reserve(
+                user_id=user_id, channel_id=channel_id, session_key=session_key
+            )
+            if result_reservation is None:
+                ack(
+                    response_action="errors",
+                    errors={FREE_TEXT_BLOCK_ID: SLASH_SESSION_EXPIRED_MESSAGE},
+                )
+                return
 
         ack()
         answer = execute_structured_search(
@@ -1060,8 +1087,7 @@ def _register_faceted_search_handlers(
             thread_ts=thread_ts,
             user_id=user_id,
             text=body_text,
-            session_key=session_key,
-            response_url_store=response_url_store,
+            reservation=result_reservation,
         )
 
         if refused:
@@ -1078,8 +1104,9 @@ def _register_faceted_search_handlers(
                     user_id=user_id,
                     text=RESTART_SEARCH_TEXT,
                     blocks=restart_search_blocks(session_id),
-                    session_key=session_key,
-                    response_url_store=response_url_store,
+                    reservation=response_url_store.reserve(
+                        user_id=user_id, channel_id=channel_id, session_key=session_key
+                    ),
                 )
             else:
                 post_slack_reply(client, build_restart_search_message(channel_id, thread_ts))
@@ -1103,8 +1130,12 @@ def _register_faceted_search_handlers(
                 user_id=user_id,
                 text=ADJUST_FILTERS_TEXT,
                 blocks=follow_up,
-                session_key=session_key,
-                response_url_store=response_url_store,
+                # A second reservation, taken after the result is out. The result is the message
+                # that had to be guaranteed before retrieval ran; this one is an affordance, and if
+                # the budget cannot cover it the search still reached the user.
+                reservation=response_url_store.reserve(
+                    user_id=user_id, channel_id=channel_id, session_key=session_key
+                ),
             )
             return
         post_slack_reply(
@@ -1121,8 +1152,7 @@ def _post_search_reply(
     user_id: str,
     text: str,
     blocks: Optional[List[dict]] = None,
-    session_key: str = "",
-    response_url_store: Optional[SlackResponseUrlStore] = None,
+    reservation: Optional[ResponseReservation] = None,
 ) -> bool:
     """Send one search-flow message through the boundary its entry point requires.
 
@@ -1131,19 +1161,14 @@ def _post_search_reply(
     opened, not from which fields happen to be populated, so a message cannot become public because
     a thread timestamp was missing.
 
-    Returns whether the message was sent. The slash path can legitimately fail to send -- the
-    capability may have been spent or expired between the pre-search check and here -- and the
-    caller stops rather than reaching for another way out.
+    Returns whether the message was sent. The slash path sends only against a reservation the
+    caller already holds -- it never reaches into the store itself, so there is no second place
+    where a use could be spent without being accounted for.
     """
     if is_slash:
-        if response_url_store is None:
+        if reservation is None:
             return False
-        reply_url = response_url_store.take(
-            user_id=user_id, channel_id=channel_id, session_key=session_key
-        )
-        if not reply_url:
-            return False
-        post_slack_response_url(reply_url, _response_message(text, blocks))
+        post_slack_response_url(reservation, _response_message(text, blocks))
         return True
     post_slack_reply(client, _reply_dict(channel_id, thread_ts, text))
     return True

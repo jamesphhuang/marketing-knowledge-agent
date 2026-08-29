@@ -13,6 +13,7 @@ tests -- so none of this touches a real Slack connection.
 
 import csv
 import json
+import threading
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
@@ -62,6 +63,7 @@ from marketing_knowledge_agent.slack_interface import (
 )
 from marketing_knowledge_agent.slack_pagination import SlackPaginationStore
 from marketing_knowledge_agent.slack_request_tokens import SlackRequestTokenStore
+from marketing_knowledge_agent.slack_response_urls import MAX_USES as MAX_RESPONSE_USES
 from marketing_knowledge_agent.structured_search import (
     StructuredSearchGovernanceError,
     StructuredSearchRequest,
@@ -170,8 +172,10 @@ class ResponseRecorder:
     def __init__(self):
         self.sent = []
 
-    def __call__(self, response_url, message):
-        self.sent.append({"url": response_url, **message})
+    def __call__(self, reservation, message):
+        # Spending here mirrors the boundary: a reservation authorizes exactly one send, and a
+        # recorder that did not spend it would let a test pass where production would raise.
+        self.sent.append({"url": reservation.spend(), **message})
 
     @property
     def texts(self):
@@ -2632,7 +2636,7 @@ def test_a_submission_whose_capability_is_gone_runs_no_search(tmp_path):
     # Spend the capability down to nothing, the way five replies would.
     store = _slash_response_url_store(app)
     for _ in range(10):
-        store.take(user_id="U1", channel_id="C123", session_key=f"U1:{session_id}")
+        store.reserve(user_id="U1", channel_id="C123", session_key=f"U1:{session_id}")
 
     ack, client = _slash_submit(app, state_values=_state_values(year="2024"), metadata=metadata)
 
@@ -2707,9 +2711,9 @@ def test_adjust_refreshes_the_capability_from_the_click(tmp_path):
     assert store.remaining_uses(
         user_id="U1", channel_id="C123", session_key=f"U1:{session_id}"
     ) == 5
-    assert store.take(
+    assert store.reserve(
         user_id="U1", channel_id="C123", session_key=f"U1:{session_id}"
-    ) == "https://hooks.slack.com/actions/TEST/SECRET_CAPABILITY"
+    ).spend() == "https://hooks.slack.com/actions/TEST/SECRET_CAPABILITY"
 
 
 def test_restart_after_a_refusal_also_refreshes_the_capability(tmp_path):
@@ -2835,3 +2839,164 @@ def test_hiding_the_handle_did_not_disable_conflicting_handle_protection(tmp_pat
 
     # The conflicting group is withheld rather than merged under one of the two handles.
     assert "同名品牌" not in client.responses.sent[0]["text"]
+
+
+# ======================================================================================
+# Independent review R1 — reservation before retrieval, at handler level
+# ======================================================================================
+
+
+def _retrieval_spy(monkeypatch=None):
+    """Count calls to ``execute_structured_search`` as the handler sees it."""
+    import marketing_knowledge_agent.slack_interface as _si
+
+    calls = []
+    original = _si.execute_structured_search
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    _si.execute_structured_search = counting
+    return calls, original
+
+
+def _restore_retrieval(original):
+    import marketing_knowledge_agent.slack_interface as _si
+
+    _si.execute_structured_search = original
+
+
+def test_no_retrieval_runs_when_the_last_use_was_taken_first(tmp_path):
+    """§19. The reservation is the gate, and it sits in front of the search.
+
+    A capability with one use left; something else consumes it; then the modal is submitted. The
+    submission must fail *before* any retrieval, not after -- a search that runs and then discovers
+    it cannot reply has already spent the work and the governance.
+    """
+    app = _slash_app(tmp_path)
+    metadata = _slash_private_metadata(app)
+    session_id = json.loads(metadata)["session_id"]
+    session_key = f"U1:{session_id}"
+    store = _slash_response_url_store(app)
+
+    # Reduce the lane to exactly one remaining use, then let another handler take it. Bounded by
+    # the budget rather than by the counter reaching a value: an unbounded "drain until" loop spins
+    # forever the moment the store stops decrementing, which is precisely the mutation the probes
+    # apply -- a test that hangs reports nothing.
+    for _ in range(MAX_RESPONSE_USES):
+        if store.remaining_uses(user_id="U1", channel_id="C123", session_key=session_key) <= 1:
+            break
+        store.reserve(user_id="U1", channel_id="C123", session_key=session_key)
+    stolen = store.reserve(user_id="U1", channel_id="C123", session_key=session_key)
+    assert stolen is not None
+    assert store.remaining_uses(user_id="U1", channel_id="C123", session_key=session_key) == 0
+
+    audit_before = _audit_text(tmp_path / "audit.csv")
+    calls, original = _retrieval_spy()
+    try:
+        ack, client = _slash_submit(
+            app, state_values=_state_values(year="2024"), metadata=metadata
+        )
+    finally:
+        _restore_retrieval(original)
+
+    assert calls == []                                   # retrieval never ran
+    assert client.responses.sent == [] and client.messages == []
+    assert _audit_text(tmp_path / "audit.csv") == audit_before
+    assert ack.calls == [
+        {
+            "response_action": "errors",
+            "errors": {FREE_TEXT_BLOCK_ID: SLASH_SESSION_EXPIRED_MESSAGE},
+        }
+    ]
+
+
+def test_the_submission_that_reserves_first_may_retrieve_and_reply(tmp_path):
+    """§19, the inverse. The gate must refuse a spent capability, not a live one."""
+    app = _slash_app(tmp_path)
+    metadata = _slash_private_metadata(app)
+    session_id = json.loads(metadata)["session_id"]
+    session_key = f"U1:{session_id}"
+    store = _slash_response_url_store(app)
+
+    calls, original = _retrieval_spy()
+    try:
+        _ack, client = _slash_submit(
+            app, state_values=_state_values(year="2024"), metadata=metadata
+        )
+    finally:
+        _restore_retrieval(original)
+
+    assert calls == [1]
+    assert client.responses.sent
+    # And the second handler now finds nothing left to take beyond the budget already spent.
+    remaining = store.remaining_uses(user_id="U1", channel_id="C123", session_key=session_key)
+    assert remaining == MAX_RESPONSE_USES - 2          # result + action message
+
+
+def test_a_validation_error_spends_no_use(tmp_path):
+    """A handful of ordinary mistakes must not exhaust a session that never ran a search."""
+    app = _slash_app(tmp_path)
+    metadata = _slash_private_metadata(app)
+    session_id = json.loads(metadata)["session_id"]
+    session_key = f"U1:{session_id}"
+    store = _slash_response_url_store(app)
+    before = store.remaining_uses(user_id="U1", channel_id="C123", session_key=session_key)
+
+    for _ in range(3):
+        ack, client = _slash_submit(
+            app, state_values=_state_values(free_text="關鍵字"), metadata=metadata
+        )
+        assert ack.calls[0]["response_action"] == "errors"
+        assert client.responses.sent == []
+
+    assert store.remaining_uses(
+        user_id="U1", channel_id="C123", session_key=session_key
+    ) == before
+
+
+def test_two_concurrent_show_more_clicks_on_a_final_use_send_once(tmp_path):
+    """§14. Pagination is on the same atomic mechanism as everything else."""
+    import marketing_knowledge_agent.slack_interface as _si
+
+    app = _multi_page_slash_app(tmp_path)
+    _ack, client = _slash_submit(app, state_values=_state_values(tags=["會員經營"]))
+    button_value = _show_more_button(client)["value"]
+    session_id = json.loads(button_value)["session_id"]
+    session_key = f"U1:{session_id}"
+    store = _slash_response_url_store(app)
+
+    # The click refreshes the lane, so force the shared capability down to its final use by
+    # pinning the refresh out and leaving exactly one.
+    sent = []
+    original_send = _si.post_slack_response_url
+    original_store = store.store
+    _si.post_slack_response_url = lambda reservation, message: sent.append(reservation.spend())
+    store.store = lambda *a, **k: False          # refresh disabled: both clicks share one budget
+    for _ in range(MAX_RESPONSE_USES):
+        if store.remaining_uses(user_id="U1", channel_id="C123", session_key=session_key) <= 1:
+            break
+        store.reserve(user_id="U1", channel_id="C123", session_key=session_key)
+
+    barrier = threading.Barrier(2, timeout=5)
+
+    def click():
+        barrier.wait()
+        app.actions[SHOW_MORE_ACTION_ID](
+            ack=FakeAck(),
+            body=_ephemeral_action_body(value=button_value),
+            client=FakeSlackClient(),
+        )
+
+    threads = [threading.Thread(target=click) for _ in range(2)]
+    try:
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+    finally:
+        _si.post_slack_response_url = original_send
+        store.store = original_store
+
+    assert len(sent) == 1
