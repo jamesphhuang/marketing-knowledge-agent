@@ -41,6 +41,7 @@ from .slack_faceted_search import (
     restart_search_blocks,
     session_id_from_button_payload,
     show_more_blocks,
+    generation_from_button_payload,
 )
 from .slack_request_tokens import SlackRequestTokenStore, default_request_token_store
 from .slack_response_urls import (
@@ -348,7 +349,12 @@ def handle_slack_event(
     if _is_show_more_request(question):
         # A continuation replays text this thread's own search already produced: no retrieval, no
         # governance decision and no audit row, because nothing new is being queried or disclosed.
-        page = store.next_page(thread_key)
+        #
+        # The mention flow has no button to carry a generation, so it asks for whichever generation
+        # the lane currently holds -- which is the newest search, exactly as before. The guarantee
+        # the generation adds here is narrower than in the slash flow but still real: a worker
+        # cannot advance or delete a continuation that was installed after it read the lane.
+        page = store.consume_current_generation(thread_key)
         return _reply_dict(channel_id, thread_ts, page or PAGINATION_EXPIRED_MESSAGE)
 
     if faceted_search_enabled and is_faceted_search_trigger(question):
@@ -896,6 +902,9 @@ def _register_faceted_search_handlers(
                 )
                 is not None
             )
+            generation = generation_from_button_payload(payload)
+            if not generation:
+                return
             # This click is its own interaction and carries its own capability. Refreshing the lane
             # with it keeps a long browsing session from spending down the original ``/mka``
             # capability, and keeps paging working after that one has expired. The reservation is
@@ -913,16 +922,27 @@ def _register_faceted_search_handlers(
             if reservation is None:
                 return
             lane = pagination_key(channel_id, session_key)
-            page = pagination_store.next_page(lane) if owns_session else None
-            if page is None:
-                post_slack_response_url(reservation, _response_message(PAGINATION_EXPIRED_MESSAGE))
-                return
-            blocks = (
-                show_more_blocks(request_token, session_id)
-                if request_token and pagination_store.has_more(lane)
-                else None
-            )
-            post_slack_response_url(reservation, _response_message(page, blocks))
+            # Consume *and deliver* inside the lane guard. The generation check alone would still
+            # allow "read a valid page, a new search installs, then send the old page" -- the check
+            # passed when it was made. Holding the lane across the send means a supersede either
+            # happens before this click, in which case the generation no longer matches and nothing
+            # is sent, or waits until the page is out. A new search followed by an old page is not
+            # reachable.
+            with pagination_store.lane_operation(lane):
+                page = (
+                    pagination_store.consume_next_page(lane, generation) if owns_session else None
+                )
+                if page is None:
+                    post_slack_response_url(
+                        reservation, _response_message(PAGINATION_EXPIRED_MESSAGE)
+                    )
+                    return
+                blocks = (
+                    show_more_blocks(request_token, session_id, generation)
+                    if request_token and pagination_store.has_more(lane, generation)
+                    else None
+                )
+                post_slack_response_url(reservation, _response_message(page, blocks))
 
     @app.view(FACETED_SEARCH_MODAL_CALLBACK_ID)
     def handle_faceted_search_submission(ack, body, client, view):
@@ -1075,10 +1095,14 @@ def _register_faceted_search_handlers(
         pages = build_structured_slack_pages(
             answer, SHOW_MORE_BUTTON_HINT if is_slash else SHOW_MORE_THREAD_REPLY_HINT
         )
+        # ``start`` installs this search as the lane's newest generation and returns its id --
+        # including when the result fits one page, where it installs no continuation but still
+        # supersedes whatever was there. A button from the previous search is stale either way.
+        generation = ""
         if pages is None:
             body_text = _format_unstructured_slack_reply(answer, config.max_answer_chars)
         else:
-            pagination_store.start(thread_key, pages.pages)
+            generation = pagination_store.start(thread_key, pages.pages)
             body_text = pages.pages[0]
         _post_search_reply(
             client,
@@ -1120,7 +1144,7 @@ def _register_faceted_search_handlers(
             # waiting, then 「調整條件」, which is always available.
             follow_up: List[dict] = []
             if pages is not None and len(pages.pages) > 1:
-                follow_up.extend(show_more_blocks(request_token, session_id))
+                follow_up.extend(show_more_blocks(request_token, session_id, generation))
             follow_up.extend(adjust_filters_blocks(request_token, session_id))
             _post_search_reply(
                 client,

@@ -881,8 +881,13 @@ def test_the_capability_module_has_exactly_one_outbound_http_site():
         .read_text(encoding="utf-8")
     )
     assert source.count("_OPENER.open(") == 1
+    # The one attempt lives in the private helper the boundary delegates to. That helper exists so
+    # the frame holding the bearer URL returns rather than raises, keeping it out of every
+    # traceback -- see the module docstring.
+    helper = source.split("def _perform_single_request(", 1)[1].split("\ndef ", 1)[0]
+    assert "_OPENER.open(" in helper
     boundary = source.split("def send_response_url_message(", 1)[1]
-    assert "_OPENER.open(" in boundary
+    assert "_perform_single_request(" in boundary
     # The SDK client was dropped precisely because it logs, retries and follows redirects. The name
     # survives only in the docstring explaining that; what must be absent is any call to it.
     assert "WebhookClient(" not in source

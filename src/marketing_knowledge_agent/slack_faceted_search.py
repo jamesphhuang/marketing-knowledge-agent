@@ -189,7 +189,7 @@ def adjust_filters_blocks(request_token: str, session_id: str = "") -> List[dict
     ]
 
 
-def show_more_blocks(request_token: str, session_id: str) -> List[dict]:
+def show_more_blocks(request_token: str, session_id: str, generation: str = "") -> List[dict]:
     """The 「顯示更多」 action block, without any routing envelope.
 
     Replaces the mention-based continuation reply for the slash flow, which has no thread to reply
@@ -212,24 +212,36 @@ def show_more_blocks(request_token: str, session_id: str) -> List[dict]:
                     "type": "button",
                     "action_id": SHOW_MORE_ACTION_ID,
                     "text": {"type": "plain_text", "text": SHOW_MORE_BUTTON_LABEL},
-                    "value": _button_value(_action_payload(request_token, session_id)),
+                    "value": _button_value(
+                        _action_payload(request_token, session_id, generation)
+                    ),
                 }
             ],
         }
     ]
 
 
-def _action_payload(request_token: Optional[str], session_id: str) -> Dict[str, Any]:
+def _action_payload(
+    request_token: Optional[str], session_id: str, generation: str = ""
+) -> Dict[str, Any]:
     """The button ``value`` for an action that continues or reopens an existing search.
 
     Only present keys are emitted, so a fresh open and a refused search both produce ``{}`` rather
     than a payload with empty fields that could compare equal to a real one.
+
+    ``generation`` says *which search* a 「顯示更多」 button belongs to, so a button left over from a
+    superseded search can be recognised as stale. It is an opaque server-minted id and authorizes
+    nothing on its own: the clicker's user, channel and session still come from the interaction
+    payload, and the request token still has to resolve for them. No query, no conditions, no
+    response_url and nothing the user typed goes in here.
     """
     payload: Dict[str, Any] = {}
     if request_token:
         payload["request_token"] = request_token
     if session_id:
         payload["session_id"] = session_id
+    if generation:
+        payload["generation"] = generation
     return payload
 
 
@@ -304,6 +316,16 @@ def request_token_from_button_payload(payload: Mapping[str, Any]) -> Optional[st
     """The opaque request token an "調整條件" button carries, or ``None`` for a fresh open."""
     token = payload.get("request_token")
     return str(token) if isinstance(token, str) and token else None
+
+
+def generation_from_button_payload(payload: Mapping[str, Any]) -> str:
+    """The pagination generation a 「顯示更多」 button belongs to, or ``""``.
+
+    A lookup coordinate like the session id, not a claim of authority: it selects which search the
+    click refers to, and a forged or stale value simply matches no live continuation.
+    """
+    generation = payload.get("generation")
+    return str(generation) if isinstance(generation, str) and generation else ""
 
 
 def session_id_from_button_payload(payload: Mapping[str, Any]) -> str:

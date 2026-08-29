@@ -495,6 +495,11 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             self.send_header("Location", self.server.redirect_target)
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif behaviour == "hang":
+            time.sleep(3)          # longer than the transport's timeout
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif behaviour in ("server_error", "client_error"):
             self.send_response(500 if behaviour == "server_error" else 400)
             self.send_header("Content-Length", "0")
@@ -996,3 +1001,243 @@ def test_the_approved_families_are_exactly_the_two_entry_points():
     )
 
     assert ALLOWED_RESPONSE_URL_PATH_FAMILIES == frozenset({"commands", "actions"})
+
+
+# ======================================================================================
+# Independent Security Review R3 — traceback secrecy and lock regression strength
+# ======================================================================================
+
+
+def _find_secret(obj, depth=0, seen=None):
+    """Reviewer-grade recursive detector: walks objects, never their ``repr``.
+
+    The previous version of these tests compared ``repr(f_locals)``, which this module's own
+    ``__repr__`` masks -- so a spent reservation sitting in a caller frame, still holding its URL,
+    went undetected. This walks ``__slots__``, ``__dict__``, containers and the URL-bearing
+    attributes ``urllib`` uses, with cycle protection.
+    """
+    seen = seen if seen is not None else set()
+    if depth > 8 or id(obj) in seen:
+        return False
+    seen.add(id(obj))
+
+    if isinstance(obj, str):
+        return CAPABILITY_SECRET in obj
+    if isinstance(obj, (bytes, bytearray)):
+        return CAPABILITY_SECRET.encode() in obj
+    if isinstance(obj, dict):
+        return any(
+            _find_secret(k, depth + 1, seen) or _find_secret(v, depth + 1, seen)
+            for k, v in list(obj.items())
+        )
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        return any(_find_secret(item, depth + 1, seen) for item in list(obj))
+
+    for slot in getattr(type(obj), "__slots__", ()) or ():
+        try:
+            if _find_secret(getattr(obj, slot), depth + 1, seen):
+                return True
+        except Exception:  # noqa: BLE001 - a reporter would swallow this too
+            pass
+    for attribute in ("url", "full_url", "request", "reason", "args", "filename"):
+        if hasattr(obj, attribute):
+            try:
+                if _find_secret(getattr(obj, attribute), depth + 1, seen):
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+    instance_dict = getattr(obj, "__dict__", None)
+    if isinstance(instance_dict, dict) and _find_secret(dict(instance_dict), depth + 1, seen):
+        return True
+    return False
+
+
+def _leaking_frames(exc, depth=0, seen=None):
+    """Which frames in an exception's whole tree expose the capability.
+
+    Frames belonging to this test module are skipped: a test's own fixtures legitimately hold the
+    sentinel, and counting them would make every result a false positive. Everything under
+    ``marketing_knowledge_agent`` -- and any other caller -- is fair game.
+    """
+    seen = seen if seen is not None else set()
+    if exc is None or id(exc) in seen or depth > 6:
+        return []
+    seen.add(id(exc))
+
+    leaks = []
+    if _find_secret(getattr(exc, "args", ())):
+        leaks.append(f"{type(exc).__name__}.args")
+
+    traceback_frame = exc.__traceback__
+    while traceback_frame is not None:
+        frame = traceback_frame.tb_frame
+        if frame.f_globals.get("__name__") != __name__:
+            if _find_secret(dict(frame.f_locals)):
+                leaks.append(f"{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_code.co_name}")
+        traceback_frame = traceback_frame.tb_next
+
+    leaks += _leaking_frames(getattr(exc, "__cause__", None), depth + 1, seen)
+    leaks += _leaking_frames(getattr(exc, "__context__", None), depth + 1, seen)
+    return leaks
+
+
+def _send_through_a_holding_caller(reservation, payload):
+    """A caller frame that keeps the reservation, exactly as the real handlers do."""
+    held = reservation
+    send_response_url_message(held, payload)
+
+
+def test_a_spent_reservation_no_longer_holds_the_capability():
+    """R3 finding 1, at its root. The transfer out of the reservation is destructive."""
+    reservation = ResponseReservation(FAKE_URL)
+
+    assert reservation.spend() == FAKE_URL
+
+    assert reservation.spent is True
+    assert reservation._url is None
+    assert _find_secret(reservation) is False
+
+
+def test_a_reservation_is_emptied_even_when_the_send_fails():
+    """A failed send is not refunded, and the capability does not come back either."""
+    with _local_server("server_error") as origin:
+        reservation = _reservation_for(origin)
+        with pytest.raises(SlackResponseUrlError):
+            send_response_url_message(reservation, {"text": "hello"})
+
+    assert reservation.spent is True
+    assert reservation._url is None
+
+
+@pytest.mark.parametrize(
+    ("label", "behaviour", "code"),
+    [
+        ("http_400", "client_error", None),
+        ("http_500", "server_error", None),
+        ("redirect_302", "redirect", 302),
+        ("redirect_307", "redirect", 307),
+    ],
+)
+def test_no_traceback_frame_exposes_the_capability(label, behaviour, code):
+    """R3 finding 1. ``__cause__``/``__context__`` were already clean; the frames were not."""
+    with _local_server(
+        behaviour, redirect_target="http://127.0.0.1:9/capture", redirect_code=code or 307
+    ) as origin:
+        with pytest.raises(SlackResponseUrlError) as exc_info:
+            _send_through_a_holding_caller(_reservation_for(origin), {"text": "hello"})
+
+    error = exc_info.value
+    assert error.__cause__ is None and error.__context__ is None
+    assert _leaking_frames(error) == []
+
+
+def test_no_traceback_frame_exposes_the_capability_on_a_connection_failure():
+    reservation = ResponseReservation("http://127.0.0.1:9/commands/TEST/SECRET_CAPABILITY")
+
+    with pytest.raises(SlackResponseUrlError) as exc_info:
+        _send_through_a_holding_caller(reservation, {"text": "hello"})
+
+    assert _leaking_frames(exc_info.value) == []
+
+
+def test_no_traceback_frame_exposes_the_capability_on_a_timeout():
+    """A timeout raises from inside ``urllib``, so its frames are the deepest ones checked."""
+    with _local_server("hang") as origin:
+        reservation = _reservation_for(origin)
+        with pytest.raises(SlackResponseUrlError) as exc_info:
+            _send_through_a_holding_caller(reservation, {"text": "hello"})
+
+    assert _leaking_frames(exc_info.value) == []
+
+
+def test_the_detector_finds_a_capability_that_really_is_reachable():
+    """Control case. Without this, a detector that silently found nothing would pass everything.
+
+    The unsafe shape is the previous candidate's: a sanitized error raised from a frame that still
+    holds an object carrying the URL.
+
+    It is compiled into a *synthetic module namespace* rather than defined here, because
+    ``_leaking_frames`` deliberately skips frames belonging to this test module -- a test's own
+    fixtures legitimately hold the sentinel. A control case defined inline would be skipped by that
+    same filter and prove nothing, which is exactly what happened on the first attempt.
+    """
+    namespace = {
+        "__name__": "synthetic_not_the_test_module",
+        "SlackResponseUrlError": SlackResponseUrlError,
+        "FAKE_URL": FAKE_URL,
+    }
+    exec(  # noqa: S102 - a controlled literal, to obtain a frame outside this module
+        "class _LeakyHolder:\n"
+        "    def __init__(self, url):\n"
+        "        self.url = url\n"
+        "\n"
+        "def unsafe_caller():\n"
+        "    holder = _LeakyHolder(FAKE_URL)\n"
+        "    raise SlackResponseUrlError('sanitized')\n",
+        namespace,
+    )
+
+    with pytest.raises(SlackResponseUrlError) as exc_info:
+        namespace["unsafe_caller"]()
+
+    leaks = _leaking_frames(exc_info.value)
+    assert leaks != [], "the detector cannot see a capability it should have found"
+    assert any("unsafe_caller" in leak for leak in leaks)
+
+
+# --------------------------------------------------------------------------------------
+# R3 finding 3 (P2): the reservation's lock must be provably entered
+# --------------------------------------------------------------------------------------
+
+
+def test_the_spend_transition_actually_enters_the_reservations_lock():
+    """R3's non-blocking finding: removing the lock failed nothing.
+
+    The behavioural race test is probabilistic about *when* it would notice, so it kept passing
+    with the lock deleted. This is deterministic and white-box: the reservation's own lock is
+    swapped for one that records entry, and the state transition must happen inside it.
+
+    Kept alongside the behavioural test rather than replacing it -- one proves the runtime outcome,
+    this one proves the guard cannot silently disappear in a refactor.
+    """
+    reservation = ResponseReservation(FAKE_URL)
+    entered = []
+    real_lock = reservation._lock
+
+    class _TrackingLock:
+        def __enter__(self):
+            entered.append("enter")
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc_info):
+            entered.append("exit")
+            return real_lock.__exit__(*exc_info)
+
+    reservation._lock = _TrackingLock()
+
+    assert reservation.spend() == FAKE_URL
+
+    assert entered == ["enter", "exit"], "spend() did not run inside the reservation's lock"
+
+
+def test_the_spend_transition_holds_the_lock_across_the_whole_transition():
+    """Entering is not enough: the check, the mark and the hand-over must all be inside it."""
+    reservation = ResponseReservation(FAKE_URL)
+    observed = []
+    real_lock = reservation._lock
+
+    class _ObservingLock:
+        def __enter__(self):
+            observed.append(("enter", reservation._spent, reservation._url is not None))
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc_info):
+            observed.append(("exit", reservation._spent, reservation._url is not None))
+            return real_lock.__exit__(*exc_info)
+
+    reservation._lock = _ObservingLock()
+    reservation.spend()
+
+    # Unspent-and-holding on the way in; spent-and-empty on the way out. There is no observable
+    # spent-with-secret state, which is the property the destructive transfer buys.
+    assert observed == [("enter", False, True), ("exit", True, False)]

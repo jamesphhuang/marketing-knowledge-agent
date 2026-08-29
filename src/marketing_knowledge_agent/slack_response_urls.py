@@ -204,18 +204,30 @@ class ResponseReservation:
         self._lock = threading.Lock()
 
     def spend(self) -> str:
-        """The URL, once, to exactly one caller.
+        """The URL, once, to exactly one caller -- and the reservation stops holding it.
 
-        Check and set happen under this reservation's own lock. The store's lock does not help
-        here: it protects the *budget*, and this protects the single authorization that budget
-        already paid for. A loser gets an exception rather than the URL, so a second send cannot be
-        attempted, let alone made.
+        Check, mark and **hand over** happen under this reservation's own lock. The store's lock
+        does not help here: it protects the *budget*, and this protects the single authorization
+        that budget already paid for. A loser gets an exception rather than the URL, so a second
+        send cannot be attempted, let alone made.
+
+        The transfer is destructive, and that is a security property rather than tidiness. A later
+        review found that a *spent* reservation still carried its URL, and handler frames hold the
+        reservation, so any error reporter walking traceback frame locals could read the capability
+        straight off it -- ``__cause__`` and ``__context__`` being clean did not help. The earlier
+        test missed it because it compared ``repr(f_locals)``, and this class's own ``__repr__``
+        masks the URL.
+
+        So the state machine has exactly two observable states: unspent-with-secret, and
+        spent-without-secret. There is no window in which a reservation is both spent and still
+        holding what it authorized.
         """
         with self._lock:
-            if self._spent:
+            if self._spent or self._url is None:
                 raise SlackResponseUrlError("response capability reservation already spent")
             self._spent = True
-            return self._url
+            url, self._url = self._url, None
+            return url
 
     @property
     def spent(self) -> bool:
@@ -432,53 +444,56 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirectHandler)
 
 
-def send_response_url_message(reservation: ResponseReservation, payload: Dict[str, object]) -> None:
-    """POST one message to a reserved response_url. The single outbound HTTP site on this surface.
+def _perform_single_request(url: str, payload: Dict[str, object]) -> Optional[str]:
+    """Make the one HTTP attempt. Never raises; returns a non-secret failure description or ``None``.
 
-    A few lines of stdlib rather than the Slack SDK's webhook client, for three reasons an
-    independent review established against the installed 3.43.0: it accepts a ``logger`` and its
-    request path can emit ``req.full_url``, which is the capability itself; it retries by default,
-    so one locally accounted use could become several HTTP requests and overrun Slack's own five-use
-    budget; and it exposes no way to refuse redirects.
+    This frame is the only one that ever holds the bearer URL and the ``Request`` built from it, and
+    it is deliberately the frame that does **not** raise. Returning normally keeps it out of every
+    traceback, so the sanitized error the caller raises cannot carry it in frame locals -- which is
+    where a review found the capability still reachable after ``__cause__`` and ``__context__`` had
+    both been cleaned.
 
-    Exactly one HTTP attempt per reservation. A failed send is *not* refunded: Slack may have
-    received and acted on the request even when the client saw a transport error, so re-spending the
-    use could exceed the server-side budget and deliver the message twice.
-
-    **On the failure path.** ``urllib``'s exceptions carry the full URL -- ``HTTPError.url``, and
-    usually ``str(exc)`` -- and the sanitized error raised in their place must not carry it back
-    out. ``raise ... from None`` is not enough: it clears ``__cause__`` and suppresses traceback
-    rendering, but the original stays reachable through ``__context__``, which an independent review
-    reproduced and which any structured error reporter that walks an exception tree will find.
-
-    So the sanitized error is raised **outside** every ``except`` block. Nothing is being handled at
-    that point, so ``__context__`` is ``None`` as well as ``__cause__``. Only a fixed string and an
-    integer status cross the boundary, and the URL and request locals are deleted first so they
-    cannot be recovered from this frame by a reporter that serialises locals.
+    Sensitive exceptions are converted to a fixed string here and never escape: ``urllib`` puts the
+    full URL in ``HTTPError.url`` and usually in ``str(exc)``.
     """
-    url = reservation.spend()
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
-
-    # Carries nothing but a fixed message; deliberately not the exception itself.
-    failure: Optional[str] = None
     try:
         with _OPENER.open(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
             status = getattr(response, "status", None)
             if status is not None and not 200 <= int(status) < 300:
-                failure = f"Slack response_url 回應非成功狀態：{int(status)}"
+                return f"Slack response_url 回應非成功狀態：{int(status)}"
+            return None
     except urllib.error.HTTPError as exc:
         # Covers the refused redirect too: _NoRedirectHandler leaves the 3xx as an HTTPError.
-        failure = f"Slack response_url 回應非成功狀態：{exc.code}"
+        return f"Slack response_url 回應非成功狀態：{exc.code}"
     except Exception as exc:  # noqa: BLE001 - only the type name is kept, never the URL
-        failure = f"Slack response_url 傳送失敗：{type(exc).__name__}"
+        return f"Slack response_url 傳送失敗：{type(exc).__name__}"
 
+
+def send_response_url_message(reservation: ResponseReservation, payload: Dict[str, object]) -> None:
+    """POST one message to a reserved response_url. The single outbound boundary on this surface.
+
+    A few lines of stdlib rather than the Slack SDK's webhook client, for three reasons established
+    against the installed 3.43.0: it accepts a ``logger`` and its request path can emit
+    ``req.full_url``, which is the capability itself; it retries by default, so one locally
+    accounted use could become several HTTP requests and overrun Slack's own five-use budget; and it
+    offers no way to refuse redirects.
+
+    Exactly one HTTP attempt per reservation. A failed send is *not* refunded: Slack may have
+    received and acted on the request even when the client saw a transport error, so re-spending
+    could exceed the server-side budget and deliver the message twice. The reservation is left spent
+    **and empty** either way.
+
+    This frame never binds the URL to a name. ``reservation.spend()`` is passed straight into the
+    helper, so the capability lives on the value stack rather than in ``f_locals``, and the only
+    objects a reporter could find here are a reservation that no longer holds it and a fixed
+    failure string.
+    """
+    failure = _perform_single_request(reservation.spend(), payload)
     if failure is not None:
-        # Outside the handler, so no exception is active and the sanitized error inherits no
-        # context. The locals holding the capability go first, for reporters that walk frames.
-        del url, request
         raise SlackResponseUrlError(failure)

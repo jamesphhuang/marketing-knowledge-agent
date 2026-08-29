@@ -446,7 +446,7 @@ def test_flag_enabled_but_ordinary_question_still_calls_ask_fn(tmp_path):
 
 def test_show_more_still_takes_priority_when_flag_is_enabled(tmp_path):
     store = SlackPaginationStore()
-    store.start(("C123", "1"), ["page one", "page two"])
+    generation = store.start(("C123", "1"), ["page one", "page two"])
 
     def fake_ask(question, **kwargs):
         raise AssertionError("顯示更多 must never trigger a new search")
@@ -1044,12 +1044,12 @@ def test_a_new_submission_supersedes_the_previous_pagination_in_the_same_thread(
     app, _tmp_path = _run_bot_and_get_app(tmp_path, db_path=db_path)
 
     _submit(app, state_values=_state_values(tags=["會員經營"]), thread_ts="1")
-    first_continuation = sentinel_store.next_page(("C123", "1"))
+    first_continuation = sentinel_store.consume_current_generation(("C123", "1"))
     assert first_continuation is not None
 
     # A second search in the same thread must start its own continuation, not extend the first.
     _submit(app, state_values=_state_values(tags=["會員經營"]), thread_ts="1")
-    resumed = sentinel_store.next_page(("C123", "1"))
+    resumed = sentinel_store.consume_current_generation(("C123", "1"))
     assert resumed == first_continuation  # page 2 of the *new* search, from the start
 
 
@@ -1087,7 +1087,7 @@ def test_a_refusal_discards_the_previous_pagination_rather_than_leaving_it_resum
     )
 
     assert len(sentinel_store) == 0
-    assert sentinel_store.next_page(("C123", "1")) is None
+    assert sentinel_store.consume_current_generation(("C123", "1")) is None
 
     # And 「顯示更多」 says the session expired rather than replaying the superseded result.
     app_mention_handler = app.events["app_mention"]
@@ -1730,7 +1730,7 @@ def test_a_restricted_name_in_a_mention_is_not_retrieved_audited_stored_or_echoe
 def test_mention_pagination_is_retired_in_slash_mode(tmp_path):
     """「顯示更多」 as a thread reply must no longer resume anything."""
     store = SlackPaginationStore()
-    store.start(("C123", "100.1"), ["page one", "page two"])
+    generation = store.start(("C123", "100.1"), ["page one", "page two"])
 
     reply = handle_slack_event(
         {"text": "<@BOT> 顯示更多", "channel": "C123", "user": "U1", "ts": "100.1"},
@@ -1745,7 +1745,7 @@ def test_mention_pagination_is_retired_in_slash_mode(tmp_path):
     assert reply["text"] == APP_MENTION_GUIDANCE_MESSAGE
     assert "page two" not in reply["text"]
     # The stored continuation is left untouched rather than consumed by a mention.
-    assert store.next_page(("C123", "100.1")) == "page two"
+    assert store.consume_next_page(("C123", "100.1"), generation) == "page two"
 
 
 def test_the_default_mode_still_searches_on_a_mention(tmp_path):
