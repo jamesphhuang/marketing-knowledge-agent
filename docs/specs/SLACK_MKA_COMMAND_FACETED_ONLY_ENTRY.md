@@ -230,26 +230,44 @@ Slack artifact to a structured search, and therefore none to `chat.postMessage`.
 
 ## 10. Ephemeral posting boundary
 
+### Destination and transport
+
+Validation is an exact allowlist, checked before a capability is stored rather than before it is
+sent — refusing at the boundary where the value enters, not after it has been carried around.
+Required: HTTPS; an exact approved host; **no username, no password**; port absent or exactly 443,
+with an unparseable port refused rather than treated as absent; no fragment; a path under a Slack
+response_url root. An independent review found the looser first version accepted
+`user:pass@hooks.slack.com`, `hooks.slack.com:444` and `hooks.slack.com:8443`.
+
+**Redirects are refused.** Validating the first hop authorizes nothing about the second, and a
+`Location` header is a destination chosen by the responder — following one would send a bearer
+capability wherever it pointed, with the host allowlist having checked the hop that did not matter.
+
+The transport is a few lines of standard library rather than the Slack SDK's webhook client, for
+three reasons established against the installed 3.43.0: it accepts a `logger` and its request path
+can emit `req.full_url`, which is the capability itself; it retries by default, so one locally
+accounted use could become several requests against Slack's own budget; and it offers no way to
+refuse redirects.
+
 There are two outbound boundaries, one per mechanism, each with a single call site:
 
 - `post_slack_reply` → `chat.postMessage`, for channel-visible messages (`mention_mixed`);
-- `post_slack_response_url` → `WebhookClient`, for everything the slash flow says.
+- `post_slack_response_url` → the response_url transport, for everything the slash flow says.
 
 The response_url boundary forces four properties, written *after* the caller's message is unpacked
 so no call site can override them: `response_type="ephemeral"` (never `in_channel` — that would
 publish one user's search to the conversation), `replace_original=False` (each message is its own
 reply), and `unfurl_links`/`unfurl_media` false (the unchanged no-unfurl contract).
 
-**Verified against the installed SDK rather than assumed:** `WebhookClient.send` in `slack_sdk`
-3.43.0 declares all four of these as named parameters. That is a better contract than the one it
-replaced -- `chat.postEphemeral`'s binding declared neither unfurl flag and merely forwarded them
-through `**kwargs`.
-
 The source-level inventory test covers both mechanisms, and additionally rejects
-`chat_postEphemeral`, `chat_update`, `files_upload`, `say(`, `respond(` and raw HTTP
-(`requests.post`, `urlopen`, `http.client`) anywhere in the Slack modules. `chat.postEphemeral` is
-on the *forbidden* list rather than merely unused: an unused posting helper is exactly what a future
-handler reaches for.
+`chat_postEphemeral`, `chat_update`, `files_upload`, `say(`, `respond(`, and raw HTTP
+(`requests.post`, `urlopen`, `http.client`, `httpx`, `aiohttp`) anywhere in the Slack modules.
+`slack_response_urls.py` is the single exception, because it owns the capability and is therefore
+the only place allowed to transmit one — and it is separately asserted to hold exactly one outbound
+call site and to contain no logging call at all.
+
+`chat.postEphemeral` is on the *forbidden* list rather than merely unused: an unused posting helper
+is exactly what a future handler reaches for.
 
 Clickable approved asset titles (`<approved-url|title>`) are unchanged on both paths.
 
@@ -290,8 +308,9 @@ no token. So it is handled as a credential, not as a routing coordinate:
 | --- | --- |
 | memory only, never written to disk | a capability in a file outlives the interaction it belongs to |
 | never in `private_metadata`, a button value, a request token, a pagination key or an audit row | all of those travel to Slack and back, or persist |
-| excluded from `repr` | a debugger, a crash dump or a stray `print` would otherwise disclose it |
-| exact host allowlist, HTTPS only, before storing | this value arrives in a payload and is then POSTed to; accepting an arbitrary host would make it a request-forgery primitive |
+| excluded from `repr`, on the stored record *and* on the reservation | a debugger, a crash dump or a stray `print` would otherwise disclose it |
+| never logged, and never in an exception message | the transport logs nothing at all, and every failure is re-raised as a fixed-text error with the chained original suppressed — `urllib` puts the full URL in `HTTPError.url` and usually in `str(exc)` |
+| strict validation before storing | see below; this value arrives in a payload and is then POSTed to |
 | TTL below Slack's documented ~30 minutes | expiry then fails in our code, with our message, rather than as a Slack error after a search has already run |
 | hard budget of 5 sends, matching Slack | the sixth is refused here rather than silently at Slack |
 | bound to user + channel + session | a capability is spent only by the interaction it was minted for |
@@ -299,9 +318,43 @@ no token. So it is handled as a credential, not as a routing coordinate:
 Unknown, expired, wrong-user, wrong-channel, wrong-session and exhausted all resolve to the same
 `None`. Distinguishing them would tell a caller which half of a guess was right.
 
-**Ordering matters.** The reply path is checked *before* retrieval, not after it. The failure worth
-preventing is a search that succeeds and then has nowhere to go: work done, governance spent, and a
-modal that closed on nothing. A `/mka` with no usable `response_url` opens no modal at all.
+### Atomicity: reserve, don't check
+
+An independent review reproduced two related defects in the first version of this design, and both
+shaped what is here now.
+
+**Uses were spendable twice.** Verification and decrement were separate steps, so two threads
+holding a one-use capability could both pass the check. `slack_bolt` dispatches listeners on a
+thread pool, so that is a real interleaving, not a theoretical one — reproduced as 2 successes on a
+budget of 1. Every mutation of store state is now inside one `threading.RLock`, and `reserve()`
+verifies and decrements in a single critical section.
+
+**The pre-retrieval check was observational.** `can_reply()` answered a question that was already
+stale by the time the answer was used: another handler could consume the last use in the window
+before the send, leaving a search that had run with nowhere to go.
+
+Both are closed by the same change. `can_reply()` and `take()` no longer exist. The only way
+executable code obtains a capability is `reserve()`, which returns a **send-once reservation** whose
+use has already been consumed atomically. Holding one *is* the authorization to send.
+
+The ordering is therefore:
+
+```text
+validate mode → validate request → reserve one use → retrieval → send with that reservation
+```
+
+A validation error reserves nothing, because it answers through `ack` alone; spending a use there
+would let a handful of ordinary mistakes exhaust a session that never ran a search. A `/mka` with
+no usable `response_url` opens no modal at all.
+
+Three semantics worth stating because they are judgement calls, not defaults:
+
+- **a failed send is not refunded** — Slack may have received and acted on the request even when
+  the client saw a transport error, so re-spending could exceed the server-side budget and deliver
+  the message twice;
+- **one reservation is at most one HTTP attempt** — no retry, by construction;
+- **a refresh does not revoke an outstanding reservation** — its use was consumed when it was
+  issued, so it is a send already paid for; revoking it would drop a reply the user is owed.
 
 **Refresh.** A button click is a new interaction with its own capability, separately budgeted and
 later-expiring. 「調整條件」 and 「重新搜尋」 refresh the stored capability from the click before

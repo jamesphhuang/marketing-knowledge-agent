@@ -5,7 +5,7 @@
 ## Lock
 
 - State: active — controlled UAT preparation
-- Milestone state: SLACK_MKA_COMMAND_UAT_R1_REMEDIATED_AWAITING_ROUTING_DELTA_REVIEW
+- Milestone state: SLACK_MKA_COMMAND_UAT_R1_SECURITY_REMEDIATED_AWAITING_REVIEW_2
 - Task: Slack `/mka` Faceted-Only Search Entry
 - Implementer: Claude Code
 - Reviewer: Codex — R1 against `5954e10` CHANGES_REQUESTED (2 blocking, both remediated); R2
@@ -39,7 +39,7 @@
 - Started at: 2026-08-28
 - Human UAT Phase 1: **PASS_WITH_BLOCKING_FINDING** — the search flow passed live; slash delivery
   depended on bot membership and had to be re-routed. See the dated section below.
-- Next exact action: **independent routing/security-focused Delta Review** of the UAT R1
+- Next exact action: **second independent routing/security Delta Review** of the R1 security
   remediation, then a second controlled UAT round. Not authorized by this record.
 
 ### Reviewed-code provenance versus PR head
@@ -109,7 +109,11 @@ UAT_BOT_EXIT_130_EXPECTED=YES
 UAT_BOT_RESTARTED=NO
 UAT_R1_BLOCKING_FINDING=SLASH_DELIVERY_DEPENDS_ON_BOT_MEMBERSHIP
 UAT_R1_REMEDIATED=YES
-READY_FOR_UAT_R1_DELTA_REVIEW=YES
+UAT_R1_DELTA_REVIEW=CHANGES_REQUESTED
+UAT_R1_REVIEW_BLOCKING_FINDINGS=4
+UAT_R1_SECURITY_BLOCKERS_REMEDIATED=4
+UAT_R1_SECURITY_REVIEW_2=PENDING
+READY_FOR_UAT_R1_SECURITY_REVIEW_2=YES
 
 SLACK_APP_CONSOLE_CHANGED=NO
 PRODUCTION_CONFIG_CHANGED=NO
@@ -709,6 +713,136 @@ rule that reads them.
 separate offline preview surface, not the modal and not the live result card, and UAT did not
 examine it. Renaming there was out of this round's scope; recorded so the divergence is a decision
 rather than an oversight.
+
+### Independent Delta Review of the UAT R1 remediation, and the security remediation (2026-08-28)
+
+Reviewed candidate: `76b0b3fc2c376546cd5aaf03f880ff3b6578ec8d` (code+tests
+`7055905f1354f184467fb233dd1ab8f5751f942d`). Verdict **CHANGES_REQUESTED**, **4 blocking findings**,
+all HIGH. All four were accepted, all four **reproduced against the reviewed candidate before any
+fix**, and each is now guarded by a test proven to fail without its fix.
+
+The Human UAT R1 record above is retained unchanged as that round's evidence.
+
+```text
+UAT_R1_DELTA_REVIEW=CHANGES_REQUESTED
+UAT_R1_REVIEWED_CANDIDATE=76b0b3fc2c376546cd5aaf03f880ff3b6578ec8d
+UAT_R1_REVIEW_BLOCKING_FINDINGS=4
+UAT_R1_SECURITY_BLOCKERS_REMEDIATED=4
+UAT_R1_SECURITY_REVIEW_2=PENDING
+```
+
+The block above is **this round's state**, not a claim of acceptance. No review has passed this
+candidate, and no live UAT has been run against it.
+
+#### Finding 1 (HIGH) — the use budget could be double-spent concurrently
+
+**Reproduced first.** `take()` checked liveness and decremented as two separate steps, so two
+threads holding a one-use capability could both pass the check before either decremented. A plain
+barrier at the call site did not surface it — the window is between two operations *inside*
+`take()`, so a probabilistic test can run for a long time without landing in it. Holding the window
+open explicitly showed it immediately:
+
+```text
+capability had remaining_uses = 1
+concurrent successful takes  = 2
+```
+
+**Fix.** All mutable store state is now behind one `threading.RLock`, and verification plus
+decrement happen in a single critical section. The GIL is not a substitute: the race is between
+bytecode operations, not inside one.
+
+#### Finding 2 (HIGH) — URL validation was incomplete, and redirects were followed
+
+**Reproduced first:** `https://user:pass@hooks.slack.com/…`, `https://hooks.slack.com:444/…` and
+`https://hooks.slack.com:8443/…` were all accepted.
+
+**Fix.** Validation now requires HTTPS, an exact approved host, no username, no password, port
+absent or exactly 443 (with an unparseable port refused rather than treated as absent), no
+fragment, and a path under a Slack response_url root. The GovSlack host was dropped: commercial
+Slack is the deployment target, and an approved host that is never used is an allowance with no
+benefit.
+
+Redirects are refused outright, because validating the first hop authorizes nothing about the
+second. A probe found the first version of this test was **vacuous** — it pointed the redirect at a
+dead port, where a followed redirect fails too, so it passed with the guard removed. It now uses a
+live capture server and asserts that server received nothing. It is also parametrised over
+301/302/303/307: `urllib` already refuses 307 on a POST, so 307 alone would have proved nothing;
+301/302/303 are the codes the standard library *does* follow, and where the guard actually bears.
+
+#### Finding 3 (HIGH) — the SDK could log the bearer capability
+
+**Reproduced first:** `slack_sdk` 3.43.0's webhook client accepts a `logger`, ships
+`ConnectionErrorRetryHandler` by default, and its request path can emit `req.full_url` — which *is*
+the capability.
+
+**Fix.** The SDK client was dropped for a few lines of standard library inside the same reviewed
+boundary. It logs nothing at all, and every failure is re-raised as `SlackResponseUrlError` whose
+message is fixed text; `from None` suppresses the chained original, because `urllib`'s own
+exceptions carry the full URL in `HTTPError.url` and often in `str(exc)`. Logs are captured at
+DEBUG in tests, so a lower application level is not what is hiding the secret.
+
+#### Finding 4 (HIGH) — the pre-retrieval check was observational, not a reservation
+
+**Reproduced first:** `can_reply()` returned `True`, another handler consumed the final use, and the
+later `take()` returned `None` — a search would have run with nowhere to send its result.
+
+**Fix.** `can_reply()` and `take()` are gone from the store's API. The only way executable code
+obtains a capability is `reserve()`, which verifies and consumes one use atomically and returns a
+send-once reservation. The submission reserves **after** the request is validated and **before** any
+retrieval; the same reservation is what authorizes the outbound message at the end.
+
+Validation errors deliberately reserve nothing — they answer through `ack` alone, and spending a use
+there would let a handful of ordinary mistakes exhaust a session that never ran a search.
+
+#### Send and refresh semantics, recorded because they are judgement calls
+
+- **A failed send is not refunded.** Slack may have received and acted on the request even when the
+  client saw a transport error, so re-spending the use could exceed the server-side budget and
+  deliver the message twice.
+- **One reservation is at most one HTTP attempt.** No retry, by construction.
+- **A refresh does not revoke an outstanding reservation.** Its use was consumed atomically when it
+  was issued, so it is a send already paid for; revoking it would drop a reply the user is owed
+  rather than prevent one they are not.
+
+#### Mutation-strength evidence (security remediation)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated. Unmutated baseline: `259 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R7 | remove the store lock | `2 failed` |
+| R8 | reserve *after* retrieval instead of before | `2 failed` |
+| R9 | accept userinfo in a response_url | `3 failed` |
+| R10 | accept an arbitrary port | `2 failed` |
+| R11 | follow redirects | `3 failed` (301/302/303) |
+| R12 | log the request URL, as the SDK client would | `4 failed` |
+| R13 | retry automatically | `7 failed` |
+
+R11 is worth reading twice: it **did not fail** on the first attempt, and that was the finding — the
+test was asserting the wrong thing. Both the test and this table reflect the version that bites.
+
+Retained probes were re-run against this candidate and still bite: R-2 capability-in-metadata
+(`2 failed`), R-3 drop user binding (`14 failed`), R-5 unbounded uses (`14 failed`), R-6 no refresh
+(`4 failed`), P-2 restore card metadata (`3 failed`), P-3 remove the conflicting-handle guard
+(`1 failed`).
+
+R-5 initially **hung** rather than failing, and that was a defect in the tests rather than in the
+product: two helpers drained a lane with `while remaining_uses > 1`, which never terminates once
+the store stops decrementing. Both are now bounded by the budget. A test that hangs reports
+nothing, and under a mutation harness it reports nothing precisely when something is wrong.
+
+#### Verification (security remediation)
+
+- Comparable 23-file suite: **807 passed, 1 skipped, 0 failed** (previous round: 802).
+- Plus `tests/test_slack_response_urls.py` (24 files): **884 passed, 1 skipped**.
+- 25-file superset incl. `test_content_index_lineage.py`: **905 passed, 1 skipped**.
+- `tests/test_slack_structured_governance.py`: **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE** —
+  2 passed, 20 errors, all the pre-existing gitignored `.mka/content_index.sqlite` dependency this
+  isolated worktree has never had. Not claimed as passing, and not a regression from this round.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin re-confirmed
+  as this worktree's `src`.
+- No live Slack call was made; the UAT bot was not restarted; nothing was pushed.
 
 ### Superseded lock record: closed Slack Faceted Search MVP / no-unfurl milestone
 
