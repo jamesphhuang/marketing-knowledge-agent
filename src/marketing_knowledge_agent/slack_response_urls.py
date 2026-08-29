@@ -56,9 +56,22 @@ DEFAULT_TIMEOUT_SECONDS = 10
 # pattern: this value arrives in a payload and is then POSTed to, so a substring match would accept
 # ``hooks.slack.com.evil.test``.
 ALLOWED_RESPONSE_URL_HOSTS = frozenset({"hooks.slack.com"})
-# Slack response_urls are served from these path roots. Constrained because a validated host with an
-# arbitrary path is still a request this app makes on someone else's behalf.
-ALLOWED_RESPONSE_URL_PATH_PREFIXES = ("/commands/", "/actions/", "/services/")
+# The response_url path families this surface actually receives, and nothing else.
+#
+# ``commands`` is what a slash-command payload carries and ``actions`` is what an interactive
+# payload carries -- the two entry points this bot has. ``services`` (the incoming-webhook family)
+# was in an earlier version of this list and is removed: this app never receives one, and an
+# approved endpoint family that is never used is an allowance with no benefit.
+#
+# Compared as a whole first segment, never as a string prefix. A prefix test authorizes
+# ``/commands/a/../../services/x`` on the strength of the characters it starts with, which is
+# exactly the bypass an independent review reproduced.
+ALLOWED_RESPONSE_URL_PATH_FAMILIES = frozenset({"commands", "actions"})
+# Characters whose percent-encoded forms are refused outright, because decoding any of them
+# changes what the path *means*: the separators redraw segment boundaries, and the dot builds
+# relative segments. Refusing the encoded form means this validator and any downstream normaliser
+# cannot disagree about the destination -- there is nothing left to normalise.
+_STRUCTURAL_BYTES = frozenset(b"/\\.")
 
 CapabilityKey = Tuple[str, str, str]
 
@@ -112,36 +125,122 @@ def is_valid_response_url(url: object) -> bool:
         return False
     if parsed.hostname not in ALLOWED_RESPONSE_URL_HOSTS:
         return False
-    return parsed.path.startswith(ALLOWED_RESPONSE_URL_PATH_PREFIXES)
+    if parsed.query:
+        # Slack's response_urls carry their identity in the path. A query string is therefore
+        # either unnecessary or a signal the value was constructed; neither is a reason to accept
+        # one.
+        return False
+    return _path_is_an_approved_response_url(parsed.path)
 
 
-@dataclass
+def _path_is_an_approved_response_url(path: str) -> bool:
+    """Whether this raw path is a Slack response_url endpoint, decided structurally.
+
+    Single validation model, applied to the **raw** path exactly as it will be sent. Nothing is
+    decoded and then re-checked, because a validator that normalises differently from the HTTP
+    client is a validator that can be walked past -- which is how ``/commands/%2e%2e/x`` and
+    ``/commands/a%2f..%2fservices/x`` were accepted before.
+
+    Four gates, in order:
+
+    1. every ``%`` escape is well formed, and none of them decodes to a structural byte
+       (``/``, ``\`` or ``.``) or to a control character. Refusing the encoded form is what makes
+       decoding irrelevant;
+    2. no raw control characters or backslashes;
+    3. split on ``/``: no empty segment (``//``), no ``.``, no ``..``;
+    4. the first segment names an approved family, and something follows it.
+    """
+    if not path.startswith("/"):
+        return False
+
+    index = 0
+    while index < len(path):
+        char = path[index]
+        if char == "%":
+            escape = path[index + 1 : index + 3]
+            if len(escape) != 2 or any(c not in "0123456789abcdefABCDEF" for c in escape):
+                return False
+            decoded = int(escape, 16)
+            if decoded in _STRUCTURAL_BYTES or decoded < 0x20 or decoded == 0x7F:
+                return False
+            index += 3
+            continue
+        if char == "\\" or ord(char) < 0x20 or ord(char) == 0x7F:
+            return False
+        index += 1
+
+    segments = path.split("/")[1:]
+    if any(segment in ("", ".", "..") for segment in segments):
+        return False
+    return len(segments) >= 2 and segments[0] in ALLOWED_RESPONSE_URL_PATH_FAMILIES
+
+
 class ResponseReservation:
     """One already-consumed send against a capability.
 
-    The use it represents was decremented atomically when this object was created, so holding one
-    *is* the authorization to send exactly once. It is process-local, never serialized, and its URL
-    is excluded from ``repr`` so a debugger, a crash dump or a stray print cannot disclose it.
+    The use it represents was decremented atomically in the store when this object was created, so
+    holding one *is* the authorization to send exactly once.
+
+    Deliberately not a dataclass. An independent review reproduced two ways the previous dataclass
+    version handed out a second send from a single authorization, and both come from treating an
+    authorization object as ordinary data:
+
+    - **it was copyable.** ``copy.copy`` and ``copy.deepcopy`` produced a clone carrying the same
+      bearer URL with its own fresh ``_spent = False``, so the original could send and the clone
+      could send again. ``pickle`` was worse: it serialised the capability itself into bytes;
+    - **the send-once transition was not atomic.** ``if not self._spent: self._spent = True`` is a
+      check-then-act, so two threads handed the same object could both pass the check -- reproduced
+      as two outbound requests from one reservation.
+
+    So: ``__slots__`` (no ``__dict__`` to copy or pickle), an owned ``Lock`` guarding the
+    transition, and every duplication protocol refused rather than silently allowed.
     """
 
-    _url: str = field(repr=False)
-    _spent: bool = field(default=False, repr=False)
+    __slots__ = ("_url", "_spent", "_lock")
+
+    def __init__(self, url: str) -> None:
+        self._url = url
+        self._spent = False
+        self._lock = threading.Lock()
 
     def spend(self) -> str:
-        """The URL, once.
+        """The URL, once, to exactly one caller.
 
-        Send-once is enforced here rather than trusted: a reservation that could be spent twice
-        would be a second budget the store never granted, which is the same double-spend this
-        module exists to prevent, one level up.
+        Check and set happen under this reservation's own lock. The store's lock does not help
+        here: it protects the *budget*, and this protects the single authorization that budget
+        already paid for. A loser gets an exception rather than the URL, so a second send cannot be
+        attempted, let alone made.
         """
-        if self._spent:
-            raise SlackResponseUrlError("response capability reservation already spent")
-        self._spent = True
-        return self._url
+        with self._lock:
+            if self._spent:
+                raise SlackResponseUrlError("response capability reservation already spent")
+            self._spent = True
+            return self._url
 
     @property
     def spent(self) -> bool:
-        return self._spent
+        with self._lock:
+            return self._spent
+
+    def __repr__(self) -> str:
+        # Never the URL. This is what a debugger, a crash dump or a stray print would show.
+        return f"<ResponseReservation spent={self._spent}>"
+
+    # Duplication is refused rather than allowed-and-hoped-about. Each protocol below would
+    # otherwise mint a second authorization from one: the copies carry the same bearer URL and a
+    # fresh unspent flag, and pickling additionally writes the capability to bytes that can outlive
+    # the process. The messages carry no URL.
+    def __copy__(self):
+        raise TypeError("a response capability reservation may not be copied")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("a response capability reservation may not be deep-copied")
+
+    def __reduce__(self):
+        raise TypeError("a response capability reservation may not be serialized")
+
+    def __getstate__(self):
+        raise TypeError("a response capability reservation may not be serialized")
 
 
 def single_use_reservation(response_url: str) -> Optional[ResponseReservation]:
@@ -153,7 +252,7 @@ def single_use_reservation(response_url: str) -> Optional[ResponseReservation]:
     """
     if not is_valid_response_url(response_url):
         return None
-    return ResponseReservation(_url=response_url.strip())
+    return ResponseReservation(response_url.strip())
 
 
 @dataclass
@@ -264,7 +363,7 @@ class SlackResponseUrlStore:
             entry.remaining_uses -= 1
             if entry.remaining_uses <= 0:
                 self._entries.pop(key, None)
-            return ResponseReservation(_url=entry.url)
+            return ResponseReservation(entry.url)
 
     def discard(self, *, user_id: str, channel_id: str, session_key: str) -> None:
         with self._lock:
@@ -322,6 +421,14 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 # One opener, built once, with the default redirect handler replaced. ``build_opener`` installs
 # only the handlers it is given plus the defaults it still needs, and a handler of the same class
 # replaces its default -- so no redirect can be followed through this opener.
+#
+# **Deployment consideration, deliberately not changed here.** ``build_opener`` also installs
+# ``ProxyHandler``, which honours ``HTTPS_PROXY``/``https_proxy`` from the process environment. It
+# is absent in a process with no proxy variables set -- the handler adds no methods and is dropped
+# -- and present in one that has them, so whether a response_url request traverses a proxy is a
+# property of the deployment, not of this code. An independent review classified this as
+# non-blocking; it is recorded rather than "fixed" because pinning it would change how the bot
+# behaves in a proxied network, which is an operator's decision and not this module's to make.
 _OPENER = urllib.request.build_opener(_NoRedirectHandler)
 
 
@@ -329,22 +436,25 @@ def send_response_url_message(reservation: ResponseReservation, payload: Dict[st
     """POST one message to a reserved response_url. The single outbound HTTP site on this surface.
 
     A few lines of stdlib rather than the Slack SDK's webhook client, for three reasons an
-    independent review established against the installed 3.43.0:
-
-    - it accepts a ``logger`` and its request path can emit ``req.full_url``, which is the
-      capability itself;
-    - it retries by default (``ConnectionErrorRetryHandler``), so one local use could become several
-      HTTP requests and overrun Slack's own five-use budget;
-    - it exposes no way to refuse redirects.
-
-    Nothing here logs. Every failure is converted to ``SlackResponseUrlError``, whose message is
-    fixed text: ``urllib``'s own exceptions carry the full URL in ``HTTPError.url`` and often in
-    ``str(exc)``, and that exception would otherwise travel to bolt's error handler and the logs.
-    ``from None`` suppresses the chained original for the same reason.
+    independent review established against the installed 3.43.0: it accepts a ``logger`` and its
+    request path can emit ``req.full_url``, which is the capability itself; it retries by default,
+    so one locally accounted use could become several HTTP requests and overrun Slack's own five-use
+    budget; and it exposes no way to refuse redirects.
 
     Exactly one HTTP attempt per reservation. A failed send is *not* refunded: Slack may have
     received and acted on the request even when the client saw a transport error, so re-spending the
     use could exceed the server-side budget and deliver the message twice.
+
+    **On the failure path.** ``urllib``'s exceptions carry the full URL -- ``HTTPError.url``, and
+    usually ``str(exc)`` -- and the sanitized error raised in their place must not carry it back
+    out. ``raise ... from None`` is not enough: it clears ``__cause__`` and suppresses traceback
+    rendering, but the original stays reachable through ``__context__``, which an independent review
+    reproduced and which any structured error reporter that walks an exception tree will find.
+
+    So the sanitized error is raised **outside** every ``except`` block. Nothing is being handled at
+    that point, so ``__context__`` is ``None`` as well as ``__cause__``. Only a fixed string and an
+    integer status cross the boundary, and the URL and request locals are deleted first so they
+    cannot be recovered from this frame by a reporter that serialises locals.
     """
     url = reservation.spend()
     request = urllib.request.Request(
@@ -353,21 +463,22 @@ def send_response_url_message(reservation: ResponseReservation, payload: Dict[st
         headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
+
+    # Carries nothing but a fixed message; deliberately not the exception itself.
+    failure: Optional[str] = None
     try:
         with _OPENER.open(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
             status = getattr(response, "status", None)
             if status is not None and not 200 <= int(status) < 300:
-                raise SlackResponseUrlError(
-                    f"Slack response_url 回應非成功狀態：{int(status)}"
-                )
+                failure = f"Slack response_url 回應非成功狀態：{int(status)}"
     except urllib.error.HTTPError as exc:
         # Covers the refused redirect too: _NoRedirectHandler leaves the 3xx as an HTTPError.
-        raise SlackResponseUrlError(
-            f"Slack response_url 回應非成功狀態：{exc.code}"
-        ) from None
-    except SlackResponseUrlError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - the type is all that may escape, never the URL
-        raise SlackResponseUrlError(
-            f"Slack response_url 傳送失敗：{type(exc).__name__}"
-        ) from None
+        failure = f"Slack response_url 回應非成功狀態：{exc.code}"
+    except Exception as exc:  # noqa: BLE001 - only the type name is kept, never the URL
+        failure = f"Slack response_url 傳送失敗：{type(exc).__name__}"
+
+    if failure is not None:
+        # Outside the handler, so no exception is active and the sanitized error inherits no
+        # context. The locals holding the capability go first, for reporters that walk frames.
+        del url, request
+        raise SlackResponseUrlError(failure)

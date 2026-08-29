@@ -5,9 +5,12 @@ holding it can post into that conversation as the app, without a token. It must 
 to a repository, and a test fixture is a repository file like any other.
 """
 
+import copy
 import io
 import logging
+import pickle
 import threading
+import urllib.error
 import traceback
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -459,7 +462,6 @@ def test_the_hostile_url_shapes_are_all_refused(url):
         "https://hooks.slack.com/commands/TEST/X",
         "https://hooks.slack.com:443/commands/TEST/X",
         "https://hooks.slack.com/actions/TEST/X",
-        "https://hooks.slack.com/services/TEST/X",
         "https://HOOKS.SLACK.COM/commands/TEST/X",
     ],
 )
@@ -493,8 +495,8 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             self.send_header("Location", self.server.redirect_target)
             self.send_header("Content-Length", "0")
             self.end_headers()
-        elif behaviour == "server_error":
-            self.send_response(500)
+        elif behaviour in ("server_error", "client_error"):
+            self.send_response(500 if behaviour == "server_error" else 400)
             self.send_header("Content-Length", "0")
             self.end_headers()
         else:
@@ -534,7 +536,7 @@ def _reservation_for(server):
     contacting Slack.
     """
     host, port = server.server_address
-    return ResponseReservation(_url=f"http://{host}:{port}/commands/TEST/SECRET_CAPABILITY")
+    return ResponseReservation(f"http://{host}:{port}/commands/TEST/SECRET_CAPABILITY")
 
 
 @pytest.mark.parametrize("code", [301, 302, 303, 307])
@@ -576,7 +578,7 @@ def test_the_capture_server_would_notice_a_followed_redirect():
     with _local_server("ok") as capture:
         host, port = capture.server_address
         send_response_url_message(
-            ResponseReservation(_url=f"http://{host}:{port}/capture"), {"text": "hello"}
+            ResponseReservation(f"http://{host}:{port}/capture"), {"text": "hello"}
         )
 
         assert capture.requests == ["/capture"]
@@ -660,9 +662,7 @@ def test_the_exception_a_caller_sees_carries_no_capability(behaviour):
 
 def test_a_transport_failure_carries_no_capability_either():
     """Nothing is listening on this port, so urllib raises before any HTTP happens."""
-    reservation = ResponseReservation(
-        _url="http://127.0.0.1:9/commands/TEST/SECRET_CAPABILITY"
-    )
+    reservation = ResponseReservation("http://127.0.0.1:9/commands/TEST/SECRET_CAPABILITY")
     with _capture_all_logs() as logs:
         with pytest.raises(SlackResponseUrlError) as exc_info:
             send_response_url_message(reservation, {"text": "hello"})
@@ -695,10 +695,304 @@ def test_a_failed_send_does_not_refund_the_use():
     assert store.remaining_uses(**CLICK) == 0
 
     with _local_server("server_error") as origin:
-        failing = ResponseReservation(_url=_reservation_for(origin)._url)
+        failing = ResponseReservation(_reservation_for(origin)._url)
         with pytest.raises(SlackResponseUrlError):
             send_response_url_message(failing, {"text": "hello"})
 
     # The store is untouched by a transport failure; the use stays spent.
     assert store.remaining_uses(**CLICK) == 0
     assert reservation.spent is False
+
+
+# ======================================================================================
+# Independent Security Review R2 — four blocking findings
+# ======================================================================================
+
+# --------------------------------------------------------------------------------------
+# R2 finding 1: one reservation, one send, even under concurrency
+# --------------------------------------------------------------------------------------
+
+
+def test_one_reservation_concurrently_spent_by_two_threads_sends_once():
+    """The store's lock protects the budget; this protects the single authorization it bought.
+
+    Reproduced against the previous candidate as 2 outbound requests from the same reservation
+    object. Forced overlap rather than a probabilistic loop -- the window is a check-then-act, so a
+    loop can run for a long time without landing in it.
+    """
+    reservation = ResponseReservation(FAKE_URL)
+    barrier = threading.Barrier(2, timeout=5)
+    won, refused = [], []
+    lock = threading.Lock()
+
+    def worker():
+        barrier.wait()
+        try:
+            url = reservation.spend()
+        except SlackResponseUrlError:
+            with lock:
+                refused.append(1)
+        else:
+            with lock:
+                won.append(url)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=10)
+
+    assert len(won) == 1
+    assert len(refused) == 1
+
+
+def test_two_concurrent_sends_of_one_reservation_make_one_http_request():
+    """The same guarantee where it actually matters: outbound requests, not local calls."""
+    with _local_server("ok") as origin:
+        reservation = _reservation_for(origin)
+        barrier = threading.Barrier(2, timeout=5)
+        errors = []
+
+        def worker():
+            barrier.wait()
+            try:
+                send_response_url_message(reservation, {"text": "hello"})
+            except SlackResponseUrlError:
+                errors.append(1)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+
+        assert len(origin.requests) == 1
+        assert len(errors) == 1
+
+
+def test_the_reservation_owns_its_own_lock():
+    """The mechanism the probe removes."""
+    assert isinstance(ResponseReservation(FAKE_URL)._lock, type(threading.Lock()))
+
+
+# --------------------------------------------------------------------------------------
+# R2 finding 2: a reservation cannot be duplicated into a second authorization
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "duplicate"),
+    [
+        ("copy", copy.copy),
+        ("deepcopy", copy.deepcopy),
+        ("pickle", pickle.dumps),
+    ],
+)
+@pytest.mark.parametrize("already_spent", [False, True])
+def test_a_reservation_cannot_be_duplicated(label, duplicate, already_spent):
+    """Each of these minted a second send from one authorization.
+
+    ``copy``/``deepcopy`` produced a clone with the same bearer URL and a fresh unspent flag;
+    ``pickle`` additionally wrote the capability into bytes that outlive the process. Refused for a
+    spent reservation as well as an unspent one -- a duplicate of a spent one is still a copy of
+    the secret.
+    """
+    reservation = ResponseReservation(FAKE_URL)
+    if already_spent:
+        reservation.spend()
+
+    with pytest.raises(TypeError) as exc_info:
+        duplicate(reservation)
+
+    # Asserting *our* refusal, not merely that something raised. ``deepcopy`` and ``pickle`` would
+    # also fail incidentally because the owned ``Lock`` cannot be copied -- so a test that accepted
+    # any ``TypeError`` would keep passing if the explicit guards were deleted and the lock were
+    # later replaced with something copyable.
+    assert "response capability reservation" in str(exc_info.value)
+    # The refusal itself must not disclose what it is protecting.
+    assert CAPABILITY_SECRET not in str(exc_info.value)
+
+
+def test_a_reservation_carries_no_instance_dictionary_to_copy():
+    """``__slots__`` is why the duplication protocols have nothing to work with by default."""
+    assert not hasattr(ResponseReservation(FAKE_URL), "__dict__")
+
+
+def test_the_reservation_repr_shows_state_but_never_the_capability():
+    unspent = ResponseReservation(FAKE_URL)
+    spent = ResponseReservation(FAKE_URL)
+    spent.spend()
+
+    assert CAPABILITY_SECRET not in repr(unspent)
+    assert CAPABILITY_SECRET not in repr(spent)
+    assert "spent=False" in repr(unspent) and "spent=True" in repr(spent)
+
+
+# --------------------------------------------------------------------------------------
+# R2 finding 3: the sanitized error carries no secret anywhere in its tree
+# --------------------------------------------------------------------------------------
+
+
+def _exception_tree_strings(exc, depth=0, seen=None):
+    """Everything a structured error reporter could serialize from an exception.
+
+    Deliberately not a formatted traceback: ``raise ... from None`` suppresses *rendering* while
+    leaving the original reachable through ``__context__``, which is exactly how the capability
+    survived the previous sanitization. A reporter that walks objects finds what a printed
+    traceback hides.
+    """
+    seen = seen if seen is not None else set()
+    if exc is None or id(exc) in seen or depth > 6:
+        return []
+    seen.add(id(exc))
+
+    parts = [type(exc).__name__]
+    for render in (str, repr):
+        try:
+            parts.append(render(exc))
+        except Exception:  # noqa: BLE001 - a reporter would swallow this too
+            pass
+    try:
+        parts.append(repr(getattr(exc, "args", None)))
+    except Exception:  # noqa: BLE001
+        pass
+    for attribute in ("url", "full_url", "reason", "request", "response", "filename", "hdrs"):
+        if hasattr(exc, attribute):
+            try:
+                parts.append(f"{attribute}={getattr(exc, attribute)!r}")
+            except Exception:  # noqa: BLE001 - a reporter would swallow this too
+                pass
+    traceback_frame = getattr(exc, "__traceback__", None)
+    while traceback_frame is not None:
+        try:
+            parts.append(repr(traceback_frame.tb_frame.f_locals))
+        except Exception:  # noqa: BLE001
+            pass
+        traceback_frame = traceback_frame.tb_next
+
+    parts += _exception_tree_strings(getattr(exc, "__cause__", None), depth + 1, seen)
+    parts += _exception_tree_strings(getattr(exc, "__context__", None), depth + 1, seen)
+    return parts
+
+
+@pytest.mark.parametrize(
+    ("label", "behaviour", "code"),
+    [
+        ("http_400", "client_error", None),
+        ("http_500", "server_error", None),
+        ("redirect_302", "redirect", 302),
+        ("redirect_307", "redirect", 307),
+    ],
+)
+def test_no_capability_survives_anywhere_in_the_exception_tree(label, behaviour, code):
+    """R2 finding 3. ``__context__`` held the original ``HTTPError``, whose ``.url`` is the secret."""
+    with _local_server(
+        behaviour, redirect_target="http://127.0.0.1:9/capture", redirect_code=code or 307
+    ) as origin:
+        with pytest.raises(SlackResponseUrlError) as exc_info:
+            send_response_url_message(_reservation_for(origin), {"text": "hello"})
+
+    error = exc_info.value
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    tree = " || ".join(_exception_tree_strings(error))
+    assert CAPABILITY_SECRET not in tree
+    assert "/commands/TEST/" not in tree
+
+
+def test_no_capability_survives_a_connection_failure_either():
+    """Nothing is listening, so ``urllib`` raises a ``URLError`` before any HTTP happens."""
+    reservation = ResponseReservation("http://127.0.0.1:9/commands/TEST/SECRET_CAPABILITY")
+
+    with pytest.raises(SlackResponseUrlError) as exc_info:
+        send_response_url_message(reservation, {"text": "hello"})
+
+    error = exc_info.value
+    assert error.__cause__ is None and error.__context__ is None
+    assert CAPABILITY_SECRET not in " || ".join(_exception_tree_strings(error))
+
+
+def test_the_reporter_walker_would_notice_a_leak():
+    """Proves the assertions above are not vacuous.
+
+    A deliberately unsanitized error -- the shape the previous candidate produced -- is walked by
+    the same function, which must find the secret. Without this, a walker that silently returned
+    nothing would make every test above pass.
+    """
+    try:
+        try:
+            raise urllib.error.HTTPError(FAKE_URL, 500, "boom", {}, io.BytesIO(b""))
+        except urllib.error.HTTPError:
+            raise SlackResponseUrlError("sanitized") from None
+    except SlackResponseUrlError as leaky:
+        assert leaky.__context__ is not None
+        assert CAPABILITY_SECRET in " || ".join(_exception_tree_strings(leaky))
+
+
+# --------------------------------------------------------------------------------------
+# R2 finding 4: path validation is structural, not a prefix test
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # dot segments, raw and encoded, in both cases
+        "https://hooks.slack.com/commands/a/../x",
+        "https://hooks.slack.com/commands/a/../../actions/x",
+        "https://hooks.slack.com/commands/../admin",
+        "https://hooks.slack.com/commands/%2e%2e/x",
+        "https://hooks.slack.com/commands/%2E%2E/x",
+        "https://hooks.slack.com/commands/%2e./x",
+        "https://hooks.slack.com/commands/.%2e/x",
+        "https://hooks.slack.com/commands/./x",
+        # encoded separators that would redraw segment boundaries after decoding
+        "https://hooks.slack.com/commands/a%2f..%2factions/x",
+        "https://hooks.slack.com/commands/a%2F..%2Factions/x",
+        "https://hooks.slack.com/commands/a%5c..%5cx",
+        "https://hooks.slack.com/commands/a%5C..%5Cx",
+        "https://hooks.slack.com/commands/a\\..\\x",
+        # malformed and control-character escapes
+        "https://hooks.slack.com/commands/%zz",
+        "https://hooks.slack.com/commands/%2",
+        "https://hooks.slack.com/commands/%",
+        "https://hooks.slack.com/commands/%00x",
+        "https://hooks.slack.com/commands/%0ax",
+        "https://hooks.slack.com/commands/%7f",
+        # empty segments and shapes with no payload segment
+        "https://hooks.slack.com/commands//x",
+        "https://hooks.slack.com/commands/",
+        "https://hooks.slack.com/commands",
+        "https://hooks.slack.com/",
+        # endpoint families this app never receives
+        "https://hooks.slack.com/services/TEST/X",
+        "https://hooks.slack.com/workflows/TEST/X",
+        "https://hooks.slack.com/api/chat.postMessage",
+        # query strings
+        "https://hooks.slack.com/commands/TEST/X?a=1",
+    ],
+)
+def test_path_bypasses_are_refused(url):
+    """R2 finding 4. A prefix test authorized these on the characters they start with."""
+    assert is_valid_response_url(url) is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://hooks.slack.com/commands/T0001/1234/abcd",
+        "https://hooks.slack.com/actions/T0001/1234/abcd",
+        "https://hooks.slack.com:443/commands/T0001/1234/abcd",
+    ],
+)
+def test_the_two_families_this_surface_actually_receives_are_accepted(url):
+    """``commands`` from a slash payload, ``actions`` from an interactive one, and nothing else."""
+    assert is_valid_response_url(url) is True
+
+
+def test_the_approved_families_are_exactly_the_two_entry_points():
+    from marketing_knowledge_agent.slack_response_urls import (
+        ALLOWED_RESPONSE_URL_PATH_FAMILIES,
+    )
+
+    assert ALLOWED_RESPONSE_URL_PATH_FAMILIES == frozenset({"commands", "actions"})
