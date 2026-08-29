@@ -475,7 +475,7 @@ a newer search and render a button that advanced someone else's result.
 
 Generation checks alone are insufficient, because "read a valid page, a new search installs, then
 send" passes its check when it is made. A **per-lane guard** serialises consume-and-deliver against
-`start` for the same lane, leaving exactly two orderings:
+the new search's whole response, leaving exactly two orderings:
 
 | ordering | allowed |
 | --- | --- |
@@ -486,6 +486,19 @@ send" passes its check when it is made. A **per-lane guard** serialises consume-
 The guard is per lane, so unrelated conversations never wait on each other, and the network send
 happens in the caller's guarded block rather than inside the store — which owns continuation state,
 not Slack transport.
+
+**One supersession contract, for every outcome.** A final review found the guard covered `start`
+and 「顯示更多」 but not the paths that superseded through a bare `discard`: a denylist refusal, an
+empty result, an unstructured reply, and a one-page result. Those could deliver a new response and
+then be followed by a page from the search they replaced. Locking `discard` would not have closed
+it — the window is between the consume and the *send*.
+
+So `supersede_lane` takes the lane, clears it, and holds it until the caller's delivery finishes;
+every new search goes through it, and `start` is the convenience form of the same contract rather
+than a second one. A result that fits one message is still a new search and still supersedes.
+Retrieval and the audit row stay outside the guard, because the lane orders responses rather than
+work. The lane is cleared on entry, so a failed delivery leaves it invalidated rather than
+resurrecting the search the user has moved past.
 
 The generation is 32 hex characters and **authorizes nothing on its own**: the clicker's user,
 channel and session still come from the interaction payload, and the request token must still

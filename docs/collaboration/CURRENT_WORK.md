@@ -5,7 +5,7 @@
 ## Lock
 
 - State: active — controlled UAT preparation
-- Milestone state: SLACK_MKA_COMMAND_UAT_R1_SECURITY_REMEDIATED_AWAITING_REVIEW_4
+- Milestone state: SLACK_MKA_COMMAND_AWAITING_R4_1_EXACT_CLOSURE_VERIFICATION
 - Task: Slack `/mka` Faceted-Only Search Entry
 - Implementer: Claude Code
 - Reviewer: Codex — R1 against `5954e10` CHANGES_REQUESTED (2 blocking, both remediated); R2
@@ -39,8 +39,8 @@
 - Started at: 2026-08-28
 - Human UAT Phase 1: **PASS_WITH_BLOCKING_FINDING** — the search flow passed live; slash delivery
   depended on bot membership and had to be re-routed. See the dated section below.
-- Next exact action: **fourth independent security review** of the capability and pagination
-  models, then a second controlled UAT round. Not authorized by this record.
+- Next exact action: **R4.1 exact-blocker closure verification**. If it passes, integration and a
+  second controlled UAT round follow — neither is authorized by this record.
 
 ### Reviewed-code provenance versus PR head
 
@@ -119,8 +119,11 @@ UAT_R1_SECURITY_REVIEW_3=CHANGES_REQUESTED
 UAT_R1_SECURITY_REVIEW_3_BLOCKING_FINDINGS=2
 UAT_R1_SECURITY_REVIEW_3_NONBLOCKING_FINDINGS=1
 UAT_R1_SECURITY_REVIEW_3_REMEDIATED=3
-UAT_R1_SECURITY_REVIEW_4=PENDING
-READY_FOR_UAT_R1_SECURITY_REVIEW_4=YES
+FINAL_SECURITY_REVIEW_R4=CHANGES_REQUESTED
+FINAL_SECURITY_REVIEW_R4_BLOCKING_FINDINGS=1
+FINAL_SECURITY_REVIEW_R4_REMEDIATED=1
+R4_1_EXACT_CLOSURE_VERIFICATION=PENDING
+READY_FOR_R4_1_EXACT_CLOSURE_REVIEW=YES
 
 SLACK_APP_CONSOLE_CHANGED=NO
 PRODUCTION_CONFIG_CHANGED=NO
@@ -1111,6 +1114,99 @@ R17 prefix-path (`21 failed`).
   Not claimed as passing.
 - `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin confirmed as
   this worktree's `src`.
+- No live Slack call; UAT bot not restarted; nothing pushed.
+
+### Final Security Review R4 and the supersession remediation (2026-08-28)
+
+Reviewed candidate: `67ba3a097bb457a8b7c210ccf8e6c6bedb519a7e`. R4 was a complete sweep and
+returned **CHANGES_REQUESTED** with **1 blocking finding** — the last reproducible P1. It was
+accepted, **reproduced against the reviewed candidate before any fix**, and is now guarded by tests
+proven to fail without it.
+
+R4 confirmed the R3 blockers as closed and unchanged by this round: the traceback/frame capability
+leak, and the pagination generation model covering `start` and 「顯示更多」 consume-and-deliver.
+
+```text
+FINAL_SECURITY_REVIEW_R4=CHANGES_REQUESTED
+FINAL_SECURITY_REVIEW_R4_REVIEWED_CANDIDATE=67ba3a097bb457a8b7c210ccf8e6c6bedb519a7e
+FINAL_SECURITY_REVIEW_R4_BLOCKING_FINDINGS=1
+FINAL_SECURITY_REVIEW_R4_REMEDIATED=1
+R3_TRACEBACK_BLOCKER=CLOSED
+R3_GENERATION_BLOCKER=CLOSED
+R4_1_EXACT_CLOSURE_VERIFICATION=PENDING
+```
+
+This block is **this round's state**, not acceptance. No review has passed this candidate and no
+live UAT has been run against it.
+
+#### R4 (P1) — refusal and no-pages supersession sat outside the lane contract
+
+**Reproduced first**, exactly as reported:
+
+```text
+1. NEW refusal delivered
+2. OLD page delivered (old-2)
+```
+
+The generation model covered `start` and 「顯示更多」, but the paths that superseded through a bare
+`pagination_store.discard` — a denylist refusal, an empty result, an unstructured reply, and a
+one-page result — took no lane guard at all. So a 「顯示更多」 that had already consumed its page
+could deliver it *after* the new response was out.
+
+Locking `discard` would not have closed it. The window is between the consume and the **send**, so
+the guard has to span the new search's whole response, exactly as it already spans a 「顯示更多」's
+consume-and-send.
+
+**Fix: one supersession primitive.** `supersede_lane(key)` takes the lane, clears whatever it holds,
+and keeps it until the caller's delivery is finished. Every new-search outcome goes through it —
+multi-page, one-page, empty, unstructured and refusal alike — and `start` is now the convenience
+form of the same contract rather than a second set of semantics. Two orderings remain and there is
+no third:
+
+| ordering | status |
+| --- | --- |
+| 「顯示更多」 owns the lane first → old page, then new response | allowed |
+| supersession owns the lane first → new response, stale click refuses | allowed |
+| new response delivered, then an old page | **unreachable** |
+
+Retrieval and the audit row stay *outside* the guard: the lane orders responses, and holding it
+across a search would serialize work that has nothing to do with ordering. Reserve-before-retrieval
+is unchanged.
+
+The old continuation is dropped on entry, so a failure during delivery leaves the lane invalidated
+rather than restoring a search the user has already moved past.
+
+#### Mutation-strength evidence (supersession remediation)
+
+Probes on a copy under `/private/tmp/mka-mka-probe`, deleted afterwards. Baseline: `238 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| S1 | refusal supersedes through a bare unguarded discard again | `3 failed` |
+| S2 | release the lane before the caller delivers | `1 failed` |
+| S3 | remove the generation comparison | `5 failed` |
+| S4 | restore an unconditional stale pop | `1 failed` |
+| S5 | one-page/no-pages search skips supersession | `7 failed` |
+
+S2 did not fail at first, and the reason is worth recording rather than papering over: the mutation
+still blocks on lane *entry*, so it cannot produce an old page — the old generation is gone either
+way. What an early release genuinely allows is a 「顯示更多」 on the **new** generation delivering
+page two while the new search is still delivering page one. A test for that overtaking case was
+added, and S2 now fails on it. The probe found a gap in the tests, not a second product defect.
+
+#### Verification (supersession remediation)
+
+- Comparable 23-file suite: **827 passed, 1 skipped, 0 failed** (previous round: 818).
+- Plus `tests/test_slack_response_urls.py` (24 files): **962 passed, 1 skipped**
+  (previous round: 953).
+- 25-file superset incl. `test_content_index_lineage.py`: **983 passed, 1 skipped**.
+- `tests/test_slack_structured_governance.py`: **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE** —
+  2 passed, 20 errors, the same pre-existing gitignored `.mka/content_index.sqlite` dependency.
+  Not claimed as passing.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin confirmed as
+  this worktree's `src`.
+- Three files changed: `slack_pagination.py`, `slack_interface.py`,
+  `tests/test_slack_search_presentation_v2.py`.
 - No live Slack call; UAT bot not restarted; nothing pushed.
 
 ### Superseded lock record: closed Slack Faceted Search MVP / no-unfurl milestone
