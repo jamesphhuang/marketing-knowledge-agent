@@ -252,7 +252,7 @@ segment after it.
 this surface actually receives, a slash command and an interactive action. `services` (incoming
 webhooks) was in an earlier version of the list and is removed: this app never receives one.
 
-### Exception secrecy
+### Exception and frame secrecy
 
 `urllib`'s exceptions carry the full URL in `HTTPError.url` and usually in `str(exc)`. A review
 found that `raise ... from None` was not enough: it clears `__cause__` and suppresses traceback
@@ -260,9 +260,23 @@ rendering, but the original stays reachable through `__context__`, where any str
 walking an exception tree will find it.
 
 The sanitized error is therefore raised **outside** every `except` block, so nothing is being
-handled and `__context__` is `None` too, and the locals holding the URL and the request are deleted
-first for reporters that serialise frame locals. Only a fixed string and an integer status cross the
+handled and `__context__` is `None` too. Only a fixed string and an integer status cross the
 boundary.
+
+A later review showed that was still not enough. `__cause__` and `__context__` were clean, and the
+capability was *still* reachable — through a **traceback frame local**: a spent reservation kept its
+URL, and handler frames hold the reservation. The test that should have caught it compared
+`repr(f_locals)`, which this class's own `__repr__` masks, so it was structurally incapable of
+seeing the leak.
+
+Two changes close it. Spending is destructive, so a spent reservation holds nothing. And the HTTP
+attempt lives in a private helper that **returns** a non-secret status instead of raising, so the
+one frame that ever holds the URL and the `Request` never appears in a traceback at all; the
+boundary passes `reservation.spend()` straight into it, keeping the capability on the value stack
+rather than in `f_locals`.
+
+The detector that guards this walks objects rather than reprs, and is itself checked against a
+deliberately leaky control case.
 
 ### Proxy, recorded rather than solved
 
@@ -343,6 +357,8 @@ no token. So it is handled as a credential, not as a routing coordinate:
 | never in `private_metadata`, a button value, a request token, a pagination key or an audit row | all of those travel to Slack and back, or persist |
 | excluded from `repr`, on the stored record *and* on the reservation | a debugger, a crash dump or a stray `print` would otherwise disclose it |
 | a reservation cannot be copied, deep-copied or pickled | each would mint a second authorization from one — the clones carry the same URL with a fresh unspent flag, and pickling writes the capability into bytes that outlive the process |
+| spending is **destructive** — a spent reservation no longer holds its URL | handler frames hold the reservation, so a spent-but-still-loaded one is readable from traceback frame locals by any error reporter that walks objects |
+| the one frame that holds the URL returns rather than raises | a frame that raises appears in the traceback; a frame that returns does not |
 | never logged, and never in an exception message | the transport logs nothing at all, and every failure is re-raised as a fixed-text error with the chained original suppressed — `urllib` puts the full URL in `HTTPError.url` and usually in `str(exc)` |
 | strict validation before storing | see below; this value arrives in a payload and is then POSTed to |
 | TTL below Slack's documented ~30 minutes | expiry then fails in our code, with our message, rather than as a Slack error after a search has already run |
@@ -442,6 +458,47 @@ after submitting.
 The year field now carries a Block Kit hint saying so before submission. It is a hint, not a
 validation change: 「全部年份」 still does not count as a narrowing constraint, and the refusal
 still fires if the user proceeds anyway.
+
+## 10c. Pagination generations
+
+A new search supersedes the old one. That was true sequentially and, an independent review showed,
+**not** true under concurrency: a 「顯示更多」 worker that had already read an entry kept operating
+on it while a new search installed a replacement, then delivered a page from the superseded result
+and — on a last page — ran an unconditional `pop` that deleted the *new* continuation. Same user
+and same session, so no ownership check applied.
+
+Every continuation now carries an opaque server-minted **generation**, and every operation names the
+generation it believes it is working on. A stale generation reads nothing, advances nothing and
+removes nothing; a last page removes the entry only when it is still that generation's.
+`has_more` is generation-aware for the same reason — a key-only question let a stale worker observe
+a newer search and render a button that advanced someone else's result.
+
+Generation checks alone are insufficient, because "read a valid page, a new search installs, then
+send" passes its check when it is made. A **per-lane guard** serialises consume-and-deliver against
+`start` for the same lane, leaving exactly two orderings:
+
+| ordering | allowed |
+| --- | --- |
+| old page delivered, then new search becomes authoritative | yes |
+| new search becomes authoritative, then stale click refuses | yes |
+| new search becomes authoritative, then old page delivered | **unreachable** |
+
+The guard is per lane, so unrelated conversations never wait on each other, and the network send
+happens in the caller's guarded block rather than inside the store — which owns continuation state,
+not Slack transport.
+
+The generation is 32 hex characters and **authorizes nothing on its own**: the clicker's user,
+channel and session still come from the interaction payload, and the request token must still
+resolve for them. It carries no query, no conditions and nothing the user typed.
+
+A dedicated generation was chosen over reusing the request token: the token's TTL and the
+continuation's TTL are independent, and coupling them would let a token refresh silently change
+pagination identity.
+
+The `app_mention` flow has no button to carry one, so it consumes whichever generation the lane
+currently holds, resolving and consuming in a single critical section. That is a narrower guarantee
+than the slash flow's, and still enough that a worker cannot advance or delete a continuation
+installed after it read the lane.
 
 ## 11. Schema versioning
 

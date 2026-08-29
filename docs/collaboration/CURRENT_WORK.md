@@ -5,7 +5,7 @@
 ## Lock
 
 - State: active — controlled UAT preparation
-- Milestone state: SLACK_MKA_COMMAND_UAT_R1_SECURITY_REMEDIATED_AWAITING_REVIEW_3
+- Milestone state: SLACK_MKA_COMMAND_UAT_R1_SECURITY_REMEDIATED_AWAITING_REVIEW_4
 - Task: Slack `/mka` Faceted-Only Search Entry
 - Implementer: Claude Code
 - Reviewer: Codex — R1 against `5954e10` CHANGES_REQUESTED (2 blocking, both remediated); R2
@@ -39,8 +39,8 @@
 - Started at: 2026-08-28
 - Human UAT Phase 1: **PASS_WITH_BLOCKING_FINDING** — the search flow passed live; slash delivery
   depended on bot membership and had to be re-routed. See the dated section below.
-- Next exact action: **third independent security review** of the capability model, then a second
-  controlled UAT round. Not authorized by this record.
+- Next exact action: **fourth independent security review** of the capability and pagination
+  models, then a second controlled UAT round. Not authorized by this record.
 
 ### Reviewed-code provenance versus PR head
 
@@ -115,8 +115,12 @@ UAT_R1_SECURITY_BLOCKERS_REMEDIATED=4
 UAT_R1_SECURITY_REVIEW_2=CHANGES_REQUESTED
 UAT_R1_SECURITY_REVIEW_2_BLOCKING_FINDINGS=4
 UAT_R1_SECURITY_REVIEW_2_REMEDIATED=4
-UAT_R1_SECURITY_REVIEW_3=PENDING
-READY_FOR_UAT_R1_SECURITY_REVIEW_3=YES
+UAT_R1_SECURITY_REVIEW_3=CHANGES_REQUESTED
+UAT_R1_SECURITY_REVIEW_3_BLOCKING_FINDINGS=2
+UAT_R1_SECURITY_REVIEW_3_NONBLOCKING_FINDINGS=1
+UAT_R1_SECURITY_REVIEW_3_REMEDIATED=3
+UAT_R1_SECURITY_REVIEW_4=PENDING
+READY_FOR_UAT_R1_SECURITY_REVIEW_4=YES
 
 SLACK_APP_CONSOLE_CHANGED=NO
 PRODUCTION_CONFIG_CHANGED=NO
@@ -970,6 +974,143 @@ Earlier probes on boundaries this round touched were re-run and still bite: R7 s
 - `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin confirmed as
   this worktree's `src`, with `pytest`, `pydantic` and `slack_bolt` all importable — the reviewer's
   inability to run these suites was an environment limitation on their side, not a code fault.
+- No live Slack call; UAT bot not restarted; nothing pushed.
+
+### Independent Security Review R3 and the fourth remediation (2026-08-28)
+
+Reviewed candidate: `adc8f587c5ee755a797cee38a51cad21fc4700e2` (code+tests
+`a009e662b1b6532acc296389619dc32df2c87484`). Verdict **CHANGES_REQUESTED** — **2 blocking (P1)**
+and **1 nonblocking (P2)**. All three accepted, all three **reproduced against the reviewed
+candidate before any fix**.
+
+Earlier rounds' records are retained above unchanged. What R3 confirmed as still closed — the store
+`RLock`, atomic reserve, reserve-before-retrieval, copy/pickle refusal, host/userinfo/port and
+structural path validation, no-redirect, no-retry — is unchanged by this round and re-probed below.
+
+```text
+UAT_R1_SECURITY_REVIEW_3=CHANGES_REQUESTED
+UAT_R1_SECURITY_REVIEW_3_REVIEWED_CANDIDATE=adc8f587c5ee755a797cee38a51cad21fc4700e2
+UAT_R1_SECURITY_REVIEW_3_BLOCKING_FINDINGS=2
+UAT_R1_SECURITY_REVIEW_3_NONBLOCKING_FINDINGS=1
+UAT_R1_SECURITY_REVIEW_3_REMEDIATED=3
+UAT_R1_SECURITY_REVIEW_4=PENDING
+```
+
+This block is **this round's state**, not acceptance. No review has passed this candidate and no
+live UAT has been run against it.
+
+#### R3-1 (P1) — the capability survived in traceback frame locals
+
+**Reproduced first.** `__cause__` and `__context__` were both `None`, and the secret was still
+reachable: a *spent* reservation kept its `_url`, and handler frames hold the reservation, so an
+error reporter walking frame locals reads the capability straight off it.
+
+```text
+reservation in traceback frame: spent=True, _url retained=True
+old repr(f_locals) test finds it : (masked by ResponseReservation.__repr__)
+deep object walk finds it        : True
+```
+
+The previous test compared `repr(f_locals)`, and this class's own `__repr__` hides the URL — so the
+test was structurally incapable of seeing the leak it was meant to prevent.
+
+**Fix, in two parts.** `spend()` now transfers the URL **destructively** inside the same critical
+section that marks the reservation spent, so the only observable states are unspent-with-secret and
+spent-without-secret; there is no spent-with-secret window. And the HTTP attempt moved into a
+private helper that *returns* a non-secret status instead of raising, so the one frame that ever
+holds the URL and the `Request` never appears in a traceback. The boundary passes
+`reservation.spend()` straight into that helper, so the capability lives on the value stack rather
+than in `f_locals`.
+
+The new detector walks objects rather than reprs — `__slots__`, `__dict__`, containers, the
+URL-bearing attributes `urllib` uses — with cycle protection, across HTTP 400, HTTP 500, refused
+redirect, connection refusal and timeout. A control case compiles a deliberately leaky function
+into a *synthetic module namespace* and asserts the detector finds it; that indirection is
+necessary because the detector skips this test module's own frames, and an inline control was
+skipped by the same filter on the first attempt.
+
+#### R3-2 (P1) — pagination had a stale-generation race
+
+**Reproduced first**, both halves:
+
+```text
+new search installed, then worker A delivered: ['old-2']   <- stale page after supersession
+new continuation destroyed by stale pop      : True        <- worker A's unconditional pop
+```
+
+Ownership checks never applied: it is the same user, in the same session.
+
+**Fix.** Every continuation now carries an opaque server-minted **generation**, and every operation
+names the generation it believes it is working on. A stale generation reads nothing, advances
+nothing and removes nothing; the last page removes the entry only when it is still that
+generation's.
+
+Generation checks alone are not sufficient, because "read a valid page, a new search installs, then
+send" passes its check when it is made. A **per-lane guard** serialises consume-and-deliver against
+`start` for the same lane, leaving exactly two orderings — old page then new search, or new search
+then a stale click that refuses. The forbidden ordering is unreachable. The guard is per lane, so
+unrelated conversations never wait on each other, and the send happens in the caller's block rather
+than inside the store, which owns continuation state and not Slack transport.
+
+The generation is 32 hex characters, carries no query, conditions or user text, and **authorizes
+nothing on its own**: the clicker's user, channel and session still come from the interaction
+payload and the request token must still resolve for them.
+
+A dedicated generation was chosen over reusing the request token, which was the alternative the
+review raised: the token's TTL and the continuation's TTL are independent, and coupling them would
+let a token refresh silently change pagination identity.
+
+The `app_mention` flow has no button to carry a generation, so it uses
+`consume_current_generation`, which resolves and consumes in one critical section — a narrower
+guarantee than the slash flow's, but still enough that a worker cannot advance or delete a
+continuation installed after it read the lane.
+
+#### R3-3 (P2) — the reservation lock had no regression guard
+
+**Confirmed:** removing `with self._lock:` from `spend()` failed **no test** (`124 passed`). The
+earlier probe only bit because it also injected a `sleep`, which is not the same as the plain
+removal a refactor would make.
+
+Two deterministic white-box tests now swap the reservation's lock for a tracking one and assert the
+transition runs inside it, and that the state on entry is unspent-with-secret and on exit is
+spent-without-secret. The behavioural race test is kept alongside them: one proves the runtime
+outcome, the other proves the guard cannot silently disappear.
+
+#### Mutation-strength evidence (fourth remediation)
+
+Probes on a copy under `/private/tmp/mka-mka-probe`, deleted afterwards.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R20 | keep `_url` on a spent reservation | `9 failed` |
+| R21 | raise the sanitized error inside the handler frame again | `11 failed` |
+| R22 | remove pagination synchronization | `2 failed` |
+| R23 | remove the generation comparison | `3 failed` |
+| R24 | restore an unconditional `pop` | `1 failed` |
+| R25 | make `has_more` key-only again | `1 failed` |
+| R26 | remove the reservation's spend lock only | `2 failed` |
+
+R24 is worth reading twice: it **did not** fail at first. With the store lock held across
+`consume_next_page`, a stale caller is turned away before it could reach the removal, so restoring
+an unconditional `pop` changes no observable behaviour today. That is a reason to pin the helper on
+its own terms — which the added test does — not a reason to drop a guard that keeps the removal
+correct if that critical section is ever narrowed.
+
+Representative earlier probes re-run and still biting: R7 store lock (`2 failed`), R8
+reserve-before-retrieval (`2 failed`), R11 redirect (`3 failed`), R15 copy/pickle (`7 failed`),
+R17 prefix-path (`21 failed`).
+
+#### Verification (fourth remediation)
+
+- Comparable 23-file suite: **818 passed, 1 skipped, 0 failed** (previous round: 807).
+- Plus `tests/test_slack_response_urls.py` (24 files): **953 passed, 1 skipped**
+  (previous round: 931).
+- 25-file superset incl. `test_content_index_lineage.py`: **974 passed, 1 skipped**.
+- `tests/test_slack_structured_governance.py`: **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE** —
+  2 passed, 20 errors, the same pre-existing gitignored `.mka/content_index.sqlite` dependency.
+  Not claimed as passing.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin confirmed as
+  this worktree's `src`.
 - No live Slack call; UAT bot not restarted; nothing pushed.
 
 ### Superseded lock record: closed Slack Faceted Search MVP / no-unfurl milestone
