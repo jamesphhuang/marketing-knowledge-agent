@@ -45,6 +45,7 @@ from marketing_knowledge_agent.slack_interface import (
     handle_slack_event,
     load_slack_config,
     post_slack_reply,
+    post_slack_response_url,
     run_slack_bot,
 )
 
@@ -790,18 +791,144 @@ def test_pagination_continuation_is_posted_with_unfurling_disabled(tmp_path):
     assert sent["unfurl_links"] is False and sent["unfurl_media"] is False
 
 
-def test_no_slack_message_is_posted_outside_the_boundary():
-    """The guarantee is centralization: one ``chat_postMessage`` call, inside ``post_slack_reply``.
+# Every outbound mechanism that puts a message in front of a Slack user. Each must go through a
+# boundary that forces the message's properties, or it reopens the finding for its own class of
+# message.
+POSTING_APIS = {
+    "chat_postMessage": "def post_slack_reply(",
+    # The slash boundary delegates the HTTP itself to the capability module, which owns the secret
+    # and therefore owns how it is transmitted. What must stay single here is the call into it.
+    "send_response_url_message(": "def post_slack_response_url(",
+}
+# Mechanisms this surface does not use at all.
+#
+# ``chat_postEphemeral`` is on this list rather than in POSTING_APIS because Human UAT proved it
+# cannot do the job: Slack answers it with ``channel_not_found`` unless the app is a member of the
+# target conversation, so a ``/mka`` from anywhere else went unanswered. It was removed rather than
+# left unused, because an unused posting helper is exactly what a future handler reaches for.
+FORBIDDEN_POSTING_APIS = (
+    "chat_postEphemeral",
+    "chat_update",
+    "chat_postMessage_scheduled",
+    "files_upload",
+)
+# Raw HTTP would reach a response_url without passing the boundary that forces ephemeral,
+# non-replacing, non-unfurling delivery. Checked across the Slack modules only -- ``llm.py``
+# legitimately makes its own provider calls and is not part of this surface.
+FORBIDDEN_RAW_HTTP = ("requests.post", "urlopen", "http.client", "httpx", "aiohttp")
+# The one module allowed to speak HTTP, because it owns the capability being spent.
+RESPONSE_URL_TRANSPORT_MODULE = "slack_response_urls.py"
 
-    A second call site anywhere would post with Slack's default unfurling and reopen the finding,
-    so this is asserted over the source rather than left to each new handler to remember.
+
+def test_no_slack_message_is_posted_outside_a_boundary():
+    """The guarantee is centralization: one call site per mechanism, inside its own boundary.
+
+    A second call site anywhere would send with Slack's defaults and reopen the finding, so this is
+    asserted over the source rather than left to each new handler to remember. Both mechanisms this
+    surface uses are covered: ``chat.postMessage`` for channel-visible messages, and the
+    ``response_url`` webhook for everything the slash flow says.
     """
     source = Path("src/marketing_knowledge_agent/slack_interface.py").read_text(encoding="utf-8")
-    assert source.count("chat_postMessage") == 1
-    boundary = source.split("def post_slack_reply(", 1)[1].split("\ndef ", 1)[0]
-    assert "chat_postMessage" in boundary
+    for api, boundary_def in POSTING_APIS.items():
+        assert source.count(api) == 1, api
+        boundary = source.split(boundary_def, 1)[1].split("\ndef ", 1)[0]
+        assert api in boundary, api
 
     for module in Path("src/marketing_knowledge_agent").glob("*.py"):
         if module.name == "slack_interface.py":
             continue
-        assert "chat_postMessage" not in module.read_text(encoding="utf-8"), module.name
+        text = module.read_text(encoding="utf-8")
+        for api in POSTING_APIS:
+            # The capability module defines the send function the boundary calls; defining it is
+            # not a second call site.
+            if module.name == RESPONSE_URL_TRANSPORT_MODULE and api.startswith("send_"):
+                continue
+            assert api not in text, f"{module.name}: {api}"
+
+
+def test_no_alternative_posting_api_is_reachable_from_this_surface():
+    """Anything that could answer Slack without passing a boundary, including the removed one."""
+    for module in Path("src/marketing_knowledge_agent").glob("*.py"):
+        text = module.read_text(encoding="utf-8")
+        for api in FORBIDDEN_POSTING_APIS:
+            assert api not in text, f"{module.name}: {api}"
+        for helper in ("say(", "respond("):
+            assert f".{helper}" not in text, f"{module.name}: {helper}"
+
+
+def test_no_raw_http_can_reach_a_response_url():
+    """A hand-rolled POST would bypass the boundary that makes a slash reply ephemeral.
+
+    ``slack_response_urls.py`` is the single exception: it holds the capability, so it is also the
+    only place that may transmit one. Its own transport is asserted separately below.
+    """
+    for module in Path("src/marketing_knowledge_agent").glob("slack_*.py"):
+        if module.name == RESPONSE_URL_TRANSPORT_MODULE:
+            continue
+        text = module.read_text(encoding="utf-8")
+        for api in FORBIDDEN_RAW_HTTP:
+            assert api not in text, f"{module.name}: {api}"
+        # ``urllib.parse`` is URL *parsing* and is used legitimately for rendering; only the
+        # request side is forbidden.
+        assert "urllib.request" not in text, module.name
+        assert "WebhookClient(" not in text, module.name
+
+
+def test_the_capability_module_has_exactly_one_outbound_http_site():
+    """One reservation, one attempt, one place it can happen."""
+    source = (
+        Path("src/marketing_knowledge_agent/slack_response_urls.py")
+        .read_text(encoding="utf-8")
+    )
+    assert source.count("_OPENER.open(") == 1
+    # The one attempt lives in the private helper the boundary delegates to. That helper exists so
+    # the frame holding the bearer URL returns rather than raises, keeping it out of every
+    # traceback -- see the module docstring.
+    helper = source.split("def _perform_single_request(", 1)[1].split("\ndef ", 1)[0]
+    assert "_OPENER.open(" in helper
+    boundary = source.split("def send_response_url_message(", 1)[1]
+    assert "_perform_single_request(" in boundary
+    # The SDK client was dropped precisely because it logs, retries and follows redirects. The name
+    # survives only in the docstring explaining that; what must be absent is any call to it.
+    assert "WebhookClient(" not in source
+    assert "slack_sdk" not in source
+    assert "requests.post" not in source
+    # Nothing in this module may log. Asserted on calls rather than on the word, because the
+    # docstring legitimately explains *why* the logging SDK client was dropped.
+    assert "import logging" not in source
+    assert "logging." not in source
+    for call in (".debug(", ".info(", ".warning(", ".error(", ".exception(", "print("):
+        assert call not in source, call
+
+
+def test_the_response_url_boundary_forces_its_four_properties(monkeypatch):
+    """A caller cannot make a slash reply public, destructive, or link-unfurling."""
+    import marketing_knowledge_agent.slack_interface as slack_interface_module
+    from marketing_knowledge_agent.slack_response_urls import single_use_reservation
+
+    sent = {}
+
+    def _capture(reservation, payload):
+        sent["url"] = reservation.spend()
+        sent["payload"] = payload
+
+    monkeypatch.setattr(slack_interface_module, "send_response_url_message", _capture)
+
+    post_slack_response_url(
+        single_use_reservation("https://hooks.slack.com/commands/TEST/SECRET_CAPABILITY"),
+        {
+            "text": "https://example.invalid/article",
+            # Everything a call site might try to assert for itself:
+            "response_type": "in_channel",
+            "replace_original": True,
+            "unfurl_links": True,
+            "unfurl_media": True,
+        },
+    )
+
+    assert sent["url"] == "https://hooks.slack.com/commands/TEST/SECRET_CAPABILITY"
+    assert sent["payload"]["response_type"] == "ephemeral"
+    assert sent["payload"]["replace_original"] is False
+    assert sent["payload"]["unfurl_links"] is False
+    assert sent["payload"]["unfurl_media"] is False
+    assert sent["payload"]["text"] == "https://example.invalid/article"

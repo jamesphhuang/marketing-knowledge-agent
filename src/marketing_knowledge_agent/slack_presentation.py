@@ -37,6 +37,12 @@ SHOW_MORE_COMMAND = "顯示更多"
 # half, so the matcher and the instruction can never drift apart.
 SHOW_MORE_MENTION = "@Marketing Knowledge Agent"
 SHOW_MORE_REPLY = f"{SHOW_MORE_MENTION} {SHOW_MORE_COMMAND}"
+# How a page invites the reader to continue. Which one applies is a property of the entry point,
+# not of the result, so the caller states it: the ``app_mention`` flow answers in a thread the user
+# can reply to, while the ``/mka`` slash flow answers ephemerally, where there is no thread to
+# reply into and a reply would never reach the bot at all.
+SHOW_MORE_THREAD_REPLY_HINT = f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_REPLY}」。"
+SHOW_MORE_BUTTON_HINT = f"若要繼續查看，請點擊下方的「{SHOW_MORE_COMMAND}」。"
 # How many brand groups the Slack surface materialises for one search before it stops admitting
 # new ones. It is display capacity, not ranking -- slack_interface asks pipeline.agent_ask for
 # exactly this much. The renderer owns the number because a result that reaches the ceiling has to
@@ -170,7 +176,15 @@ def format_structured_slack_reply(answer) -> Optional[str]:
     return pages.pages[0] if pages is not None else None
 
 
-def build_structured_slack_pages(answer) -> Optional[SlackSearchPages]:
+def build_structured_slack_pages(
+    answer, continuation_hint: str = SHOW_MORE_THREAD_REPLY_HINT
+) -> Optional[SlackSearchPages]:
+    """Render one governed structured result into the messages that will carry it.
+
+    ``continuation_hint`` is the sentence a page ends with when more brands are waiting. It is a
+    parameter rather than a constant because the instruction is only correct for the entry point
+    that produced the search, and an instruction the reader cannot follow is worse than none.
+    """
     generated = getattr(answer, "generated", answer)
     structured = getattr(generated, "structured_result", None)
     if structured is None:
@@ -240,6 +254,7 @@ def build_structured_slack_pages(answer) -> Optional[SlackSearchPages]:
                 total_assets=total_assets,
                 remaining=len(entities) - shown,
                 at_ceiling=at_ceiling,
+                continuation_hint=continuation_hint,
             )
         )
     return SlackSearchPages(
@@ -286,6 +301,7 @@ def _render_page(
     total_assets: int,
     remaining: int,
     at_ceiling: bool,
+    continuation_hint: str = SHOW_MORE_THREAD_REPLY_HINT,
 ) -> str:
     # ``at_ceiling`` is decided by the caller from the retrieved record count, never re-derived
     # from ``total_entities`` here: the two differ whenever grouping merges or drops a brand, and
@@ -310,7 +326,7 @@ def _render_page(
             [
                 "",
                 f"尚有 {remaining} 個品牌／夥伴未顯示。",
-                f"若要繼續查看，請在此討論串回覆「{SHOW_MORE_REPLY}」。",
+                continuation_hint,
             ]
         )
     elif at_ceiling:
@@ -328,12 +344,15 @@ def _render_page(
 
 
 def _entity_block(entity: Mapping[str, object], number: int) -> Tuple[List[str], int]:
-    lines = [
-        f"`{_inline(entity['entity_name'])}`",
-        f"_{_label_value('Handle', entity['merchant_handle'])}_",
-        f"_{_label_value('Sales Category LV1', entity['sales_category_lv1'])}_",
-        f"_{_label_value('Sales Category LV2', entity['sales_category_lv2'])}_",
-    ]
+    # Human UAT asked for the brand name and its assets, nothing else: the handle and the two
+    # category lines are data-model detail that pushed the actual content down the card.
+    #
+    # This is a *rendering* change and only that. ``merchant_handle``, ``sales_category_lv1`` and
+    # ``sales_category_lv2`` are still carried on every entity and are still what grouping,
+    # conflicting-handle detection, identity and governance run on -- see ``_presentation_entities``,
+    # which drops a whole group when its handles disagree. Removing them from the model would
+    # remove that protection; removing them from the card does not.
+    lines = [f"`{_inline(entity['entity_name'])}`"]
     assets = entity["assets"]
     for asset in assets:
         asset["number"] = number
@@ -602,9 +621,22 @@ def _render_conditions(question: str, plan: Mapping[str, object]) -> str:
     return "｜".join(f"`{_inline(label + '：' + '、'.join(values) if label else values[0])}`" for label, values in groups.items())
 
 
+# What the Slack surface calls a field when it echoes the conditions back. Scoped to this module on
+# purpose: ``FIELD_REGISTRY``'s own ``output_label`` is what the CLI, ``explain-query`` and every
+# non-Slack caller render, and renaming there would change output this work package has no business
+# touching. Slack asks the question as 「你在找什麼功能？」, so it answers in the same words.
+SLACK_CONDITION_LABELS = {
+    "sales_category_lv2": "品牌產業別",
+    "content_tags": "功能",
+}
+
+
 def _condition_label(field: str, constraint: Mapping[str, object]) -> str:
     if field in {"entity_name", "merchant_name", "partner_name", "merchant_handle"}:
         return "關鍵字" if field != "merchant_handle" else "Handle"
+    slack_label = SLACK_CONDITION_LABELS.get(field)
+    if slack_label:
+        return slack_label
     definition = FIELD_REGISTRY.get(field)
     return str(constraint.get("output_label") or (definition.output_label if definition else field))
 

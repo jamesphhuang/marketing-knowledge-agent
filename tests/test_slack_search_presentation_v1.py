@@ -83,8 +83,14 @@ def test_brand_metadata_and_assets_use_requested_mrkdwn_shape():
     text = format_slack_reply(answer, max_answer_chars=20_000)
 
     assert "`聊心茶室（SLP 用戶）`" in text
-    assert "_Handle：資料未提供_" in text
-    assert "_Sales Category LV1：其他_" in text
+    # The card is the brand name and its assets. Handle and the two category lines were removed at
+    # Human UAT's request -- they pushed the actual content down the card without being read.
+    assert "Handle：" not in text
+    assert "Sales Category LV1：" not in text
+    assert "Sales Category LV2：" not in text
+    # Still carried on the entity, because grouping and identity run on them.
+    entity = _entities_of(answer)[0]
+    assert entity["sales_category_lv1"] == "其他"
     assert "> • *文章 [1]*" in text
     assert "> <https://example.com/a|完整標題>" in text
     assert "> <https://example.com/content|影片標題>" in text.splitlines()
@@ -174,9 +180,12 @@ def test_deduplication_does_not_merge_different_asset_types_and_fills_missing_fi
 
     assert text.count("文章 [1]") == 1
     assert "影片 [2]" in text
-    assert "_Handle：brand-a_" in text
-    assert "_Sales Category LV1：居家生活_" in text
     assert "https://example.com/story" in text
+    # The merge still fills a missing handle from the other record; it is simply no longer drawn.
+    entity = _entities_of(_answer("query", [first, second]))[0]
+    assert entity["merchant_handle"] == "brand-a"
+    assert entity["sales_category_lv1"] == "居家生活"
+    assert "Handle：" not in text
 
 
 def test_key_conflict_silently_removes_content_and_description_conflict_is_visible():
@@ -199,7 +208,11 @@ def test_key_conflict_silently_removes_content_and_description_conflict_is_visib
     description_text = format_slack_reply(description_conflict, max_answer_chars=20_000)
 
     assert "Title A" not in conflict_text and "Title B" not in conflict_text
-    assert "資料不一致" in description_text
+    # A description conflict is still detected and still marked on the entity. It no longer reaches
+    # the card only because the line that carried it is no longer drawn -- the detection itself is
+    # what protects a merged group from asserting one record's category over another's.
+    assert "資料不一致" not in description_text
+    assert _entities_of(description_conflict)[0]["sales_category_lv1"] == "資料不一致"
 
 
 @pytest.mark.parametrize(
@@ -453,7 +466,30 @@ def test_deterministic_output_and_missing_values_are_preserved():
     second = format_slack_reply(answer, max_answer_chars=20_000)
 
     assert first == second
-    assert "資料未提供" in first
+    # Every metadata field on this entity is absent. The card no longer draws them, so the
+    # "資料未提供" placeholder no longer appears -- but the brand and its asset still render, which
+    # is what a result with sparse metadata has to do.
+    assert "`Brand`" in first
+    assert "文章 [1]" in first and "Title" in first
+    assert _entities_of(answer)[0]["merchant_handle"] is None
+
+
+
+def _entities_of(answer):
+    """The grouped entities behind a rendered reply.
+
+    Human UAT asked for the handle and the two category lines to be removed from the *card*. They
+    are still carried here, and grouping, conflicting-handle removal and data-conflict marking
+    still run on them -- so the tests that used to read those properties off the rendered text now
+    read them off the model instead. Asserting through the rendering would have quietly stopped
+    testing the behaviour the moment the lines were hidden.
+    """
+    from marketing_knowledge_agent.slack_presentation import _presentation_entities
+
+    generated = getattr(answer, "generated", answer)
+    return _presentation_entities(
+        generated.structured_result, getattr(generated, "citations", [])
+    )
 
 
 def _answer(

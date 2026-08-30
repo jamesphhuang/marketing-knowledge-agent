@@ -30,6 +30,7 @@ from .query_planning import normalize_query_text
 from .retrieval import matches_filters
 from .search_taxonomy import FIELD_CONTENT_TAGS, FIELD_SALES_CATEGORY_LV2, SearchTaxonomy
 from .structured_search import (
+    STRUCTURED_REQUEST_SCHEMA_VERSION,
     StructuredSearchGovernanceError,
     assert_readable_content_index,
     load_required_governance_index,
@@ -62,10 +63,10 @@ class FacetValueOption:
 class FacetCatalog:
     """Immutable snapshot of what the Slack facet modal may offer.
 
-    ``catalog_version`` is a pure function of the Authority pin, the content index bytes and this
-    builder's own schema version. A Slack submission carries the version it was opened under, and a
-    live catalog that no longer matches refuses the submission rather than execute against options
-    that may no longer be eligible.
+    ``catalog_version`` is a pure function of the Authority pin, the content index bytes, this
+    builder's own schema version, and the Slack submission wire schema. A Slack submission carries
+    the version it was opened under, and a live catalog that no longer matches refuses the
+    submission rather than execute against options that may no longer be eligible.
     """
 
     catalog_version: str
@@ -201,10 +202,22 @@ def build_facet_catalog(
 
 
 def _catalog_version(taxonomy_workbook_sha256: str, content_index_generation_id: str) -> str:
+    """Everything a submission must have been built under, folded into one opaque version.
+
+    ``STRUCTURED_REQUEST_SCHEMA_VERSION`` is included alongside this builder's own version because
+    the two change independently and both invalidate an in-flight modal. A view opened before a
+    wire-schema change and submitted after one would otherwise be decoded under rules it was never
+    rendered for -- which is how a year-restricted search quietly becomes an all-years one.
+    """
     digest = hashlib.sha256(
-        f"{CATALOG_BUILDER_SCHEMA_VERSION}|{taxonomy_workbook_sha256}|{content_index_generation_id}".encode(
-            "utf-8"
-        )
+        "|".join(
+            [
+                CATALOG_BUILDER_SCHEMA_VERSION,
+                STRUCTURED_REQUEST_SCHEMA_VERSION,
+                taxonomy_workbook_sha256,
+                content_index_generation_id,
+            ]
+        ).encode("utf-8")
     )
     return digest.hexdigest()
 

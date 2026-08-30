@@ -11,9 +11,15 @@ So the button carries an opaque token, and the request itself stays here.
 can see the thread can click it. If a token resolved on presentation alone, any channel member could
 reopen somebody else's modal and read their filters and their free-text goal -- which is private
 search intent, typed into what looks like a private dialog. So a token resolves only when the
-*interaction* matches the context the token was minted in: same user, same channel, same thread. A
+*interaction* matches the context the token was minted in: same user, same channel, same session. A
 mismatch is not an error to report back to the clicker (that would confirm the token exists); it
 simply resolves to nothing and the modal opens empty.
+
+``session_key`` is the conversation lane the request belongs to, and each entry point names it in
+its own terms: the ``app_mention`` flow uses the Slack ``thread_ts``, and the ``/mka`` slash flow --
+which has no thread at all, because a slash command is not a message -- uses a per-invocation
+session key that is bound to the invoking user. The store neither knows nor needs to know which; it
+only requires that the value presented at resolve time is exactly the value present at store time.
 
 The store is otherwise the smallest thing that can do this, and mirrors ``slack_pagination``:
 
@@ -61,21 +67,21 @@ class RequestContext:
     request: "StructuredSearchRequest"
     owner_user_id: str
     channel_id: str
-    thread_ts: str
+    session_key: str
     expires_at: float
 
-    def matches(self, *, user_id: str, channel_id: str, thread_ts: str) -> bool:
+    def matches(self, *, user_id: str, channel_id: str, session_key: str) -> bool:
         """Whether this interaction may reopen this request.
 
-        All three must match. Channel and thread are checked as well as the owner because the same
-        person can be in several conversations at once, and a token minted in one thread has no
+        All three must match. Channel and session are checked as well as the owner because the same
+        person can be in several conversations at once, and a token minted in one lane has no
         business reopening in another -- that would move one conversation's search intent into a
         different audience.
         """
         return (
             self.owner_user_id == user_id
             and self.channel_id == channel_id
-            and self.thread_ts == thread_ts
+            and self.session_key == session_key
         )
 
 
@@ -102,7 +108,7 @@ class SlackRequestTokenStore:
         *,
         owner_user_id: str,
         channel_id: str,
-        thread_ts: str,
+        session_key: str,
     ) -> str:
         """Record one request against the context that owns it, and return its token.
 
@@ -115,7 +121,7 @@ class SlackRequestTokenStore:
             for name, value in (
                 ("owner_user_id", owner_user_id),
                 ("channel_id", channel_id),
-                ("thread_ts", thread_ts),
+                ("session_key", session_key),
             )
             if not str(value or "").strip()
         ]
@@ -130,7 +136,7 @@ class SlackRequestTokenStore:
             request=request,
             owner_user_id=str(owner_user_id),
             channel_id=str(channel_id),
-            thread_ts=str(thread_ts),
+            session_key=str(session_key),
             expires_at=self._clock() + self._ttl_seconds,
         )
         while len(self._entries) > self._max_entries:
@@ -143,12 +149,12 @@ class SlackRequestTokenStore:
         *,
         user_id: str,
         channel_id: str,
-        thread_ts: str,
+        session_key: str,
     ) -> Optional["StructuredSearchRequest"]:
         """The request this token stands for, for this interaction only.
 
         Returns ``None`` -- never raises, never partially discloses -- when the token is unknown,
-        expired, or was minted in a different user/channel/thread context. The caller opens an empty
+        expired, or was minted in a different user/channel/session context. The caller opens an empty
         modal in every one of those cases, so a clicker cannot tell "not yours" from "expired".
 
         Resolving does not consume the token: the owner may reopen and readjust the same search
@@ -161,7 +167,7 @@ class SlackRequestTokenStore:
         if not entry.matches(
             user_id=str(user_id or ""),
             channel_id=str(channel_id or ""),
-            thread_ts=str(thread_ts or ""),
+            session_key=str(session_key or ""),
         ):
             return None
         entry.expires_at = self._clock() + self._ttl_seconds

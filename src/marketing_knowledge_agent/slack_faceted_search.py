@@ -24,7 +24,11 @@ import json
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .search_facets import FacetCatalog
-from .structured_search import FREE_TEXT_MAX_LENGTH, StructuredSearchRequest
+from .structured_search import (
+    FREE_TEXT_MAX_LENGTH,
+    StructuredSearchRequest,
+    StructuredSearchValidationError,
+)
 
 
 class SlackFacetModalError(ValueError):
@@ -53,11 +57,55 @@ CONTENT_TAGS_BLOCK_ID = "content_tags_block"
 CONTENT_TAGS_ACTION_ID = "content_tags_select"
 FREE_TEXT_BLOCK_ID = "free_text_block"
 FREE_TEXT_ACTION_ID = "free_text_input"
+SHOW_MORE_ACTION_ID = "show_more_search_results"
 MAX_SELECTED_OPTIONS = 3
 MODAL_TITLE = "案例條件搜尋"
 # Exact, case- and whitespace-insensitive commands that open the modal. Anything else -- including
 # a sentence that merely contains the word -- flows into the ordinary free-text path unchanged.
 TRIGGER_PHRASES = ("搜尋", "條件搜尋")
+
+# The slash command that is the whole search entry point under ``slash_faceted_only``. Declared
+# here, beside the Block Kit surface it opens, so the handler registration and the guidance text
+# that names it to users cannot drift apart.
+SLASH_COMMAND_NAME = "/mka"
+# What an ``app_mention`` gets once direct search has moved to the slash command. It is guidance,
+# not a search: it triggers no retrieval, records no query, and echoes nothing the user typed.
+APP_MENTION_GUIDANCE_MESSAGE = "搜尋功能請使用 `/mka`，即可直接開啟搜尋條件。"
+
+# Which entry point a modal was opened from. Carried in ``private_metadata`` so a submission is
+# answered the way its own entry point requires -- in-channel for a mention, ephemerally for a
+# slash command -- rather than by guessing from whatever routing fields happen to be populated.
+ENTRYPOINT_APP_MENTION = "app_mention"
+ENTRYPOINT_SLASH_COMMAND = "slash_command"
+
+# 「全部年份」 is a UI affordance, not data. Its value is a sentinel that no real year can collide
+# with (every real option's value is a decimal year), and it decodes to *no* ``interview_year``
+# constraint at all -- never to a constraint whose value is the sentinel string, which would be a
+# literal that matches nothing in the index while looking like a filter in the audit trail.
+ALL_YEARS_OPTION_VALUE = "__all_years__"
+ALL_YEARS_OPTION_LABEL = "全部年份"
+
+# What the modal calls each field. These are display strings only: the block ids, action ids,
+# ``StructuredSearchRequest`` fields, taxonomy field names, query-plan fields and audit columns all
+# keep their existing technical names, so renaming here cannot reach the index, the Authority or
+# anything a CLI user sees. Human UAT asked for wording a marketer reads without translating from
+# the data model.
+INTERVIEW_YEARS_LABEL = "採訪年份"
+SALES_CATEGORY_LV2_LABEL = "品牌產業別"
+CONTENT_TAGS_LABEL = "你在找什麼功能？"
+FREE_TEXT_LABEL = "你想找什麼內容或成果，請輸入關鍵字"
+# Shown under the year field, before the user submits. 「全部年份」 deliberately does not narrow a
+# search (see ``NARROWING_CONSTRAINT_REQUIRED_MESSAGE``), and UAT found the rule correct but late:
+# a user who reopened 調整條件, set the year back to 「全部年份」 and cleared the other fields only
+# learned it after submitting. The rule is unchanged; this says so up front.
+ALL_YEARS_HINT = f"選擇「{ALL_YEARS_OPTION_LABEL}」時，請再選擇{SALES_CATEGORY_LV2_LABEL}或功能選項。"
+
+# Fallback text for the follow-up messages, defined once so the notification preview and the block
+# a user actually reads cannot drift apart.
+ADJUST_FILTERS_TEXT = "可調整搜尋條件並重新搜尋。"
+RESTART_SEARCH_TEXT = "可重新輸入搜尋條件。"
+SHOW_MORE_TEXT = "尚有更多搜尋結果可顯示。"
+SHOW_MORE_BUTTON_LABEL = "顯示更多"
 
 
 def is_faceted_search_trigger(question: str) -> bool:
@@ -82,7 +130,9 @@ def build_open_search_reply(channel_id: str, thread_ts: str) -> dict:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "點擊下方按鈕，以年份、Sales Category LV2、內容相關標籤與關鍵字搜尋案例。",
+                    "text": (
+                        f"點擊下方按鈕，以年份、{SALES_CATEGORY_LV2_LABEL}、功能選項與關鍵字搜尋案例。"
+                    ),
                 },
             },
             {
@@ -114,17 +164,85 @@ def build_adjust_filters_message(channel_id: str, thread_ts: str, request_token:
     return {
         "channel": channel_id,
         "thread_ts": thread_ts,
-        "text": "可調整搜尋條件並重新搜尋。",
-        "blocks": [
-            {
-                "type": "actions",
-                "block_id": "adjust_faceted_search_actions",
-                "elements": [
-                    _open_modal_button("調整條件", _button_value({"request_token": request_token}))
-                ],
-            }
-        ],
+        "text": ADJUST_FILTERS_TEXT,
+        "blocks": adjust_filters_blocks(request_token),
     }
+
+
+def adjust_filters_blocks(request_token: str, session_id: str = "") -> List[dict]:
+    """The "調整條件" action block, without any routing envelope.
+
+    Split out from ``build_adjust_filters_message`` because the slash flow answers ephemerally --
+    ``channel`` plus ``user``, never ``thread_ts`` -- so the two entry points share the block and
+    differ only in how the message is addressed. ``session_id`` is an opaque per-invocation lane
+    id, not search content: it says *which* continuation this button belongs to, and resolves to a
+    request only when the clicker is also the owner (see :mod:`slack_request_tokens`).
+    """
+    return [
+        {
+            "type": "actions",
+            "block_id": "adjust_faceted_search_actions",
+            "elements": [
+                _open_modal_button("調整條件", _button_value(_action_payload(request_token, session_id)))
+            ],
+        }
+    ]
+
+
+def show_more_blocks(request_token: str, session_id: str, generation: str = "") -> List[dict]:
+    """The 「顯示更多」 action block, without any routing envelope.
+
+    Replaces the mention-based continuation reply for the slash flow, which has no thread to reply
+    into -- and where a thread reply would never reach this bot anyway, since it subscribes to
+    ``app_mention`` and nothing else. Clicking it replays a page this search already rendered: see
+    the handler in ``slack_interface``, which performs no retrieval, no ranking and no query
+    planning, and writes no new search audit row.
+
+    The button carries the same ``request_token`` the "調整條件" button does, and for the same
+    reason -- the token store is what already proves the clicker owns this search. It is not a
+    second capability: resolving it here decides only whether to serve the next page, and the
+    request it stands for is never read.
+    """
+    return [
+        {
+            "type": "actions",
+            "block_id": "show_more_search_actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": SHOW_MORE_ACTION_ID,
+                    "text": {"type": "plain_text", "text": SHOW_MORE_BUTTON_LABEL},
+                    "value": _button_value(
+                        _action_payload(request_token, session_id, generation)
+                    ),
+                }
+            ],
+        }
+    ]
+
+
+def _action_payload(
+    request_token: Optional[str], session_id: str, generation: str = ""
+) -> Dict[str, Any]:
+    """The button ``value`` for an action that continues or reopens an existing search.
+
+    Only present keys are emitted, so a fresh open and a refused search both produce ``{}`` rather
+    than a payload with empty fields that could compare equal to a real one.
+
+    ``generation`` says *which search* a 「顯示更多」 button belongs to, so a button left over from a
+    superseded search can be recognised as stale. It is an opaque server-minted id and authorizes
+    nothing on its own: the clicker's user, channel and session still come from the interaction
+    payload, and the request token still has to resolve for them. No query, no conditions, no
+    response_url and nothing the user typed goes in here.
+    """
+    payload: Dict[str, Any] = {}
+    if request_token:
+        payload["request_token"] = request_token
+    if session_id:
+        payload["session_id"] = session_id
+    if generation:
+        payload["generation"] = generation
+    return payload
 
 
 def build_restart_search_message(channel_id: str, thread_ts: str) -> dict:
@@ -138,15 +256,25 @@ def build_restart_search_message(channel_id: str, thread_ts: str) -> dict:
     return {
         "channel": channel_id,
         "thread_ts": thread_ts,
-        "text": "可重新輸入搜尋條件。",
-        "blocks": [
-            {
-                "type": "actions",
-                "block_id": "restart_faceted_search_actions",
-                "elements": [_open_modal_button("重新搜尋", _button_value({}))],
-            }
-        ],
+        "text": RESTART_SEARCH_TEXT,
+        "blocks": restart_search_blocks(),
     }
+
+
+def restart_search_blocks(session_id: str = "") -> List[dict]:
+    """The "重新搜尋" action block, without any routing envelope.
+
+    Carries no ``request_token`` in either flow -- that is the whole point of the refusal path. The
+    slash flow additionally carries its opaque session id so the blank search that follows lands in
+    the same continuation lane; a session id is a routing coordinate, never the refused text.
+    """
+    return [
+        {
+            "type": "actions",
+            "block_id": "restart_faceted_search_actions",
+            "elements": [_open_modal_button("重新搜尋", _button_value(_action_payload(None, session_id)))],
+        }
+    ]
 
 
 def _open_modal_button(label: str, value: str) -> dict:
@@ -190,24 +318,61 @@ def request_token_from_button_payload(payload: Mapping[str, Any]) -> Optional[st
     return str(token) if isinstance(token, str) and token else None
 
 
+def generation_from_button_payload(payload: Mapping[str, Any]) -> str:
+    """The pagination generation a 「顯示更多」 button belongs to, or ``""``.
+
+    A lookup coordinate like the session id, not a claim of authority: it selects which search the
+    click refers to, and a forged or stale value simply matches no live continuation.
+    """
+    generation = payload.get("generation")
+    return str(generation) if isinstance(generation, str) and generation else ""
+
+
+def session_id_from_button_payload(payload: Mapping[str, Any]) -> str:
+    """The slash flow's continuation lane id, or ``""`` when this button is not from that flow.
+
+    Read from the button's own ``value``, which is deliberately different from how *identity* is
+    obtained: who is clicking and in which conversation always comes from the interaction payload
+    Slack builds at click time. A session id is only a lookup coordinate -- it selects a lane, it
+    does not grant access to one. A forged or copied value simply fails to match the context the
+    request token was minted under, and resolves to nothing.
+    """
+    session_id = payload.get("session_id")
+    return str(session_id) if isinstance(session_id, str) and session_id else ""
+
+
 def build_facet_modal_view(
     facet_catalog: FacetCatalog,
     channel_id: str,
-    thread_ts: str,
+    thread_ts: str = "",
     prefill: Optional[StructuredSearchRequest] = None,
+    *,
+    entrypoint: str = ENTRYPOINT_APP_MENTION,
+    session_id: str = "",
 ) -> dict:
-    """The full modal view: one ``input`` block per non-empty facet, plus the free-text goal.
+    """The full modal view: one ``input`` block per facet, plus the free-text goal.
 
     A facet with zero eligible options is omitted entirely rather than shown as an empty dropdown --
     the LV1 field is never offered at all, by construction, because ``FacetCatalog`` never carries
-    it. ``private_metadata`` carries only routing coordinates and the catalog version this view was
-    built under; no workbook path, hash, or content passes through it.
+    it. The year field is the exception: it is always rendered, because 「全部年份」 is always a
+    valid choice and is the default one.
+
+    ``private_metadata`` carries only routing coordinates, the entry point this view was opened
+    from, and the catalog version it was built under; no workbook path, hash, or search content
+    passes through it. The submitting user is deliberately *not* carried here -- a submission's own
+    payload states who sent it, and that is the only source worth trusting for identity.
+
+    ``entrypoint`` defaults to the mention flow, which is the behaviour that predates the slash
+    command: a caller that forgets to state one gets exactly today's semantics rather than an
+    ephemeral answer addressed to nobody.
     """
     private_metadata = json.dumps(
         {
             "channel_id": channel_id,
             "thread_ts": thread_ts,
             "catalog_version": facet_catalog.catalog_version,
+            "entrypoint": entrypoint,
+            "session_id": session_id,
         },
         ensure_ascii=False,
     )
@@ -218,17 +383,25 @@ def build_facet_modal_view(
         )
 
     blocks: List[dict] = []
-    year_options = [_option(str(option.year), str(option.year)) for option in facet_catalog.interview_years]
-    if year_options:
-        blocks.append(
-            _multi_select_block(
-                INTERVIEW_YEARS_BLOCK_ID,
-                INTERVIEW_YEARS_ACTION_ID,
-                "採訪年份",
-                year_options,
-                initial_values=[str(year) for year in (prefill.interview_years if prefill else ())],
-            )
+    # 「全部年份」 leads, and is what a modal opens on unless a prior request named one specific
+    # year. The field is single-select on purpose: "全部年份 plus 2025" and "2025 plus 2024" are
+    # both meaningless as a scope, and a multi-select is the only way for a user to express them.
+    year_options = [_option(ALL_YEARS_OPTION_LABEL, ALL_YEARS_OPTION_VALUE)] + [
+        _option(str(option.year), str(option.year)) for option in facet_catalog.interview_years
+    ]
+    prefilled_years = prefill.interview_years if prefill else ()
+    blocks.append(
+        _single_select_block(
+            INTERVIEW_YEARS_BLOCK_ID,
+            INTERVIEW_YEARS_ACTION_ID,
+            INTERVIEW_YEARS_LABEL,
+            year_options,
+            hint=ALL_YEARS_HINT,
+            # An empty prior selection is 「全部年份」, not "nothing chosen": those are the same
+            # state, and reopening on the sentinel is what makes 調整條件 round-trip faithfully.
+            initial_value=str(prefilled_years[0]) if prefilled_years else ALL_YEARS_OPTION_VALUE,
         )
+    )
 
     lv2_options = [
         _option(option.canonical_value, option.canonical_value)
@@ -239,7 +412,7 @@ def build_facet_modal_view(
             _multi_select_block(
                 SALES_CATEGORY_LV2_BLOCK_ID,
                 SALES_CATEGORY_LV2_ACTION_ID,
-                "Sales Category LV2",
+                SALES_CATEGORY_LV2_LABEL,
                 lv2_options,
                 initial_values=list(prefill.sales_category_lv2) if prefill else [],
             )
@@ -254,7 +427,7 @@ def build_facet_modal_view(
             _multi_select_block(
                 CONTENT_TAGS_BLOCK_ID,
                 CONTENT_TAGS_ACTION_ID,
-                "內容相關標籤",
+                CONTENT_TAGS_LABEL,
                 tag_options,
                 initial_values=list(prefill.content_tags) if prefill else [],
             )
@@ -284,17 +457,7 @@ def _multi_select_block(
     options: Sequence[dict],
     initial_values: Sequence[str],
 ) -> dict:
-    if len(options) > MAX_STATIC_SELECT_OPTIONS:
-        # This MVP generates static options at modal-open time precisely because today's counts
-        # (8 years, 22 LV2, 37 tags) sit far below this limit. Crossing it means that premise no
-        # longer holds and the field needs an external_select data source -- a design change, not
-        # something to paper over by dropping the overflow, which would hide eligible values from
-        # every user with no visible symptom.
-        raise SlackFacetModalError(
-            f"facet「{label}」有 {len(options)} 個選項，超過 Slack multi_static_select 上限 "
-            f"{MAX_STATIC_SELECT_OPTIONS}；請改用 external_select 或縮小可選集合，"
-            "不得靜默截斷選項。"
-        )
+    _assert_option_count(label, options, "multi_static_select")
     element: Dict[str, Any] = {
         "type": "multi_static_select",
         "action_id": action_id,
@@ -315,6 +478,61 @@ def _multi_select_block(
     }
 
 
+def _single_select_block(
+    block_id: str,
+    action_id: str,
+    label: str,
+    options: Sequence[dict],
+    initial_value: str,
+    hint: str = "",
+) -> dict:
+    """One ``static_select`` input, guarded by the same option ceiling as the multi-selects.
+
+    ``initial_option`` must be one of ``options``: Slack rejects a view whose initial option is not
+    in the list, and a silently dropped initial option would open the modal on whatever Slack
+    chooses to show first -- which for the year field would mean a default nobody selected.
+    """
+    _assert_option_count(label, options, "static_select")
+    element: Dict[str, Any] = {
+        "type": "static_select",
+        "action_id": action_id,
+        "options": list(options),
+    }
+    initial_option = next((option for option in options if option["value"] == initial_value), None)
+    if initial_option is None:
+        raise SlackFacetModalError(
+            f"facet「{label}」的預設值「{initial_value}」不在選項清單中；"
+            "Slack 會拒絕這個 view，不得靜默改用其他預設值。"
+        )
+    element["initial_option"] = initial_option
+    block: Dict[str, Any] = {
+        "type": "input",
+        "block_id": block_id,
+        "optional": True,
+        "label": {"type": "plain_text", "text": label},
+        "element": element,
+    }
+    if hint:
+        # Block Kit's own hint surface, so the guidance sits under the field it is about rather
+        # than becoming another line of body text the user has to connect back to a control.
+        block["hint"] = {"type": "plain_text", "text": hint}
+    return block
+
+
+def _assert_option_count(label: str, options: Sequence[dict], element_type: str) -> None:
+    if len(options) > MAX_STATIC_SELECT_OPTIONS:
+        # This MVP generates static options at modal-open time precisely because today's counts sit
+        # far below this limit. Crossing it means that premise no longer holds and the field needs
+        # an external_select data source -- a design change, not something to paper over by
+        # dropping the overflow, which would hide eligible values from every user with no visible
+        # symptom.
+        raise SlackFacetModalError(
+            f"facet「{label}」有 {len(options)} 個選項，超過 Slack {element_type} 上限 "
+            f"{MAX_STATIC_SELECT_OPTIONS}；請改用 external_select 或縮小可選集合，"
+            "不得靜默截斷選項。"
+        )
+
+
 def _free_text_block(initial_value: str) -> dict:
     element: Dict[str, Any] = {
         "type": "plain_text_input",
@@ -332,7 +550,7 @@ def _free_text_block(initial_value: str) -> dict:
         "type": "input",
         "block_id": FREE_TEXT_BLOCK_ID,
         "optional": True,
-        "label": {"type": "plain_text", "text": "你想找什麼內容或成果"},
+        "label": {"type": "plain_text", "text": FREE_TEXT_LABEL},
         "element": element,
     }
 
@@ -344,16 +562,13 @@ def parse_structured_search_request(
 
     Only option *values* are read, never their displayed *text*; a caller must still run
     ``structured_search.validate_structured_search_request`` before trusting any of it.
-    """
-    years: List[int] = []
-    for raw in _selected_values(state_values, INTERVIEW_YEARS_BLOCK_ID, INTERVIEW_YEARS_ACTION_ID):
-        try:
-            years.append(int(raw))
-        except (TypeError, ValueError):
-            continue
 
+    Raises ``StructuredSearchValidationError`` for a year value this modal could not have offered.
+    The caller already reports validation errors back into the modal as a field error, so this fails
+    closed at the same place the rest of the submission does.
+    """
     return StructuredSearchRequest(
-        interview_years=tuple(years),
+        interview_years=_parse_year_selection(state_values),
         sales_category_lv2=tuple(
             _selected_values(state_values, SALES_CATEGORY_LV2_BLOCK_ID, SALES_CATEGORY_LV2_ACTION_ID)
         ),
@@ -363,6 +578,36 @@ def parse_structured_search_request(
         free_text=_text_value(state_values, FREE_TEXT_BLOCK_ID, FREE_TEXT_ACTION_ID),
         catalog_version=catalog_version,
     )
+
+
+def _parse_year_selection(state_values: Mapping[str, Any]) -> tuple:
+    """Decode the single year selection into zero or one ``interview_year``.
+
+    Three cases, and the difference between them matters:
+
+    - no selection at all -- an absent block, or a null ``selected_option``. This is 「全部年份」:
+      it is the modal's own default, so an absent value and the sentinel are the same state and
+      must decode identically. Returning ``()`` here is not a silently dropped filter.
+    - the 「全部年份」 sentinel. Returns ``()`` -- *no* year constraint, rather than a constraint
+      whose value is the sentinel. A sentinel-valued constraint would match nothing in the index
+      while appearing in the plan and the audit row as though a year had been chosen.
+    - a decimal year, which is the only other thing this modal ever renders.
+
+    Anything else can only come from a payload this modal did not produce, so it is refused rather
+    than coerced to 「全部年份」 -- coercion would turn a forged year into a whole-corpus search.
+    """
+    block = state_values.get(INTERVIEW_YEARS_BLOCK_ID) or {}
+    element = block.get(INTERVIEW_YEARS_ACTION_ID) or {}
+    option = element.get("selected_option") or {}
+    raw = option.get("value") if hasattr(option, "get") else None
+    if raw is None or str(raw) == ALL_YEARS_OPTION_VALUE:
+        return ()
+    try:
+        return (int(str(raw)),)
+    except (TypeError, ValueError):
+        raise StructuredSearchValidationError(
+            f"採訪年份的選項「{raw}」不是有效年份，請重新開啟搜尋視窗再試一次。"
+        )
 
 
 def _selected_values(state_values: Mapping[str, Any], block_id: str, action_id: str) -> List[str]:

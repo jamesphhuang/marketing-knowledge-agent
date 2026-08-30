@@ -4,10 +4,1220 @@
 
 ## Lock
 
+- State: active — controlled UAT preparation
+- Milestone state: SLACK_MKA_COMMAND_AWAITING_R4_1_EXACT_CLOSURE_VERIFICATION
+- Task: Slack `/mka` Faceted-Only Search Entry
+- Implementer: Claude Code
+- Reviewer: Codex — R1 against `5954e10` CHANGES_REQUESTED (2 blocking, both remediated); R2
+  against `0da023c` PASS_WITH_NONBLOCKING_FINDINGS (0 blocking, 2 nonblocking, both closed by the
+  authorized narrow cleanup); Final Spot Review against `eb128b8` **PASS**, 0 blocking, 0
+  nonblocking. Every review round's evidence is preserved in its own dated section below.
+- Branch: `claude/impl/slack-mka-command`, published to `origin`
+- PR: [#5](https://github.com/jamesphhuang/marketing-knowledge-agent/pull/5) — **OPEN**, base
+  `main`, not a draft
+- Final reviewed code candidate: `eb128b8080a072917c042de80705521fd2c0a734`
+- Clean Integration Verification: PASS
+- Remote Publication: PASS
+- Remote CI: NOT_CONFIGURED_OR_NO_RUNS (no checks are reported on this branch)
+- Worktree: `/private/tmp/mka-slack-mka-command` (isolated; does not touch the main checkout at
+  `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent`)
+- Baseline commit: `0669fbb325e2cf2aebb390a3a90ce7686d12c139` (= `origin/main` at start, verified
+  equal before any file was changed)
+- Product behavior changed: YES (Slack surface only, behind a new explicit entry mode whose default
+  is today's behaviour)
+- Product runtime: NOT ACTIVATED
+- Production activation: NO
+- Slack App Console changed: NO
+- Bot started/restarted: NO
+- Main updated: NO — `origin/main` is still the baseline `0669fbb`; the PR is open, not merged
+- Commit provenance: R1 implementation `5ccf31516084f3e30dd34c3dbfcf862f6f121d08`; R1 reviewed
+  candidate `5954e10bd31b308c67e349b4d76f207c5558eb03`; R1 remediation
+  `12f4c81e070cd04f494d44386a8e95843294f998`; R2 reviewed candidate
+  `0da023c2f2f606b0a0287334537168a8a24d93f2`; R2 nonblocking cleanup
+  `a09b89c06b6a18220e5781e032d37a1d616bfd94`; **final reviewed code candidate**
+  `eb128b8080a072917c042de80705521fd2c0a734`.
+- Started at: 2026-08-28
+- Human UAT Phase 1: **PASS_WITH_BLOCKING_FINDING** — the search flow passed live; slash delivery
+  depended on bot membership and had to be re-routed. See the dated section below.
+- Next exact action: **R4.1 exact-blocker closure verification**. If it passes, integration and a
+  second controlled UAT round follow — neither is authorized by this record.
+
+### Reviewed-code provenance versus PR head
+
+`FINAL_REVIEWED_CODE_SHA` is `eb128b8080a072917c042de80705521fd2c0a734` and stays that way. This
+ledger reconciliation is documentation only and creates a newer commit, so the PR head moves ahead
+of the reviewed candidate — but `src/` and `tests/` remain byte-identical to `eb128b8`, verified by
+`git diff eb128b8..HEAD -- src tests` returning empty output.
+
+The distinction matters because the two SHAs answer different questions. `eb128b8` is the code that
+was actually reviewed and integration-verified; the newer head is only the current tip of the PR
+branch. A later reader must not read the docs-only SHA as independently product-reviewed, because
+it was not: nothing executable changed in it, and no review round examined it.
+
+### Evidence basis for the gate results recorded here
+
+Recorded so a reader knows which claims rest on which evidence, rather than having to assume:
+
+- **Verified directly in this worktree during this reconciliation:** `HEAD` = `eb128b8`; the branch
+  exists on `origin` at that same SHA; PR #5 is OPEN, base `main`, head `eb128b8`, not a draft;
+  `gh pr checks 5` reports no checks on this branch; `origin/main` is still `0669fbb`;
+  `src/`/`tests/` byte-identity against `eb128b8`.
+- **Recorded as authoritative from the reviewing party, not re-performed here:** Final Spot Review
+  PASS (0 blocking, 0 nonblocking) and Clean Integration Verification PASS. This reconciliation is
+  a ledger update, not a review, and does not re-derive those outcomes.
+
+```text
+ACTIVE_IMPLEMENTER=CLAUDE_CODE
+TASK_LOCK=HELD
+IMPLEMENTATION_AUTHORIZED=YES
+PRODUCTION_ACTIVATION_AUTHORIZED=NO
+SLACK_APP_CONSOLE_CHANGE_AUTHORIZED=NO
+BOT_START_AUTHORIZED=NO
+DEPLOYMENT_AUTHORIZED=NO
+MAIN_MERGE_AUTHORIZED=NO
+
+IMPLEMENTATION=PASS
+
+CODEX_DELTA_REVIEW_R1=CHANGES_REQUESTED
+R1_BLOCKING_FINDINGS=2
+R1_BLOCKERS_REMEDIATED=2
+
+CODEX_R2_REVIEW=PASS_WITH_NONBLOCKING_FINDINGS
+R2_BLOCKING_FINDINGS=0
+R2_NONBLOCKING_FINDINGS=2
+R2_NONBLOCKING_CLOSED=2
+
+FINAL_SPOT_REVIEW=PASS
+FINAL_SPOT_BLOCKING_FINDINGS=0
+FINAL_SPOT_NONBLOCKING_FINDINGS=0
+
+FINAL_REVIEWED_CODE_SHA=eb128b8080a072917c042de80705521fd2c0a734
+INTEGRATION_VERIFICATION=PASS
+REMOTE_PUBLICATION=PASS
+
+PR_CREATION=PASS
+PR_NUMBER=5
+PR_STATE=OPEN
+REMOTE_CI_STATUS=NOT_CONFIGURED_OR_NO_RUNS
+
+READY_FOR_CONTROLLED_UAT=YES
+CONTROLLED_UAT_STARTED=YES
+HUMAN_UAT_PHASE_1=PASS_WITH_BLOCKING_FINDING
+UAT_BOT_STOPPED_BY_HUMAN=YES
+UAT_BOT_STOP_METHOD=SIGINT
+UAT_BOT_EXIT_130_EXPECTED=YES
+UAT_BOT_RESTARTED=NO
+UAT_R1_BLOCKING_FINDING=SLASH_DELIVERY_DEPENDS_ON_BOT_MEMBERSHIP
+UAT_R1_REMEDIATED=YES
+UAT_R1_DELTA_REVIEW=CHANGES_REQUESTED
+UAT_R1_REVIEW_BLOCKING_FINDINGS=4
+UAT_R1_SECURITY_BLOCKERS_REMEDIATED=4
+UAT_R1_SECURITY_REVIEW_2=CHANGES_REQUESTED
+UAT_R1_SECURITY_REVIEW_2_BLOCKING_FINDINGS=4
+UAT_R1_SECURITY_REVIEW_2_REMEDIATED=4
+UAT_R1_SECURITY_REVIEW_3=CHANGES_REQUESTED
+UAT_R1_SECURITY_REVIEW_3_BLOCKING_FINDINGS=2
+UAT_R1_SECURITY_REVIEW_3_NONBLOCKING_FINDINGS=1
+UAT_R1_SECURITY_REVIEW_3_REMEDIATED=3
+FINAL_SECURITY_REVIEW_R4=CHANGES_REQUESTED
+FINAL_SECURITY_REVIEW_R4_BLOCKING_FINDINGS=1
+FINAL_SECURITY_REVIEW_R4_REMEDIATED=1
+R4_1_EXACT_CLOSURE_VERIFICATION=PENDING
+READY_FOR_R4_1_EXACT_CLOSURE_REVIEW=YES
+
+SLACK_APP_CONSOLE_CHANGED=NO
+PRODUCTION_CONFIG_CHANGED=NO
+PRODUCTION_ACTIVATED=NO
+BOT_STARTED=NO
+MAIN_UPDATED=NO
+```
+
+### Assumptions and done definition (recorded before any code change)
+
+1. `slack_search_entry_mode` is a new `.mka/slack_config.json` key. Absent → `mention_mixed`,
+   which is today's behaviour bit-for-bit. Only an explicit `slash_faceted_only` selects the new
+   `/mka` product contract, so merging this branch cannot activate anything by itself. An
+   unrecognised value fails closed at config load.
+2. `slash_faceted_only` requires `enable_faceted_search=true` (and therefore the pinned taxonomy
+   workbook/sha pair). An inconsistent pair is refused at load rather than silently degraded.
+3. The modal changes (single-select year, 「全部年份」 sentinel, narrowing requirement) apply to the
+   faceted modal in **both** modes. The faceted modal has never been production-activated
+   (`PRODUCTION_ACTIVATED=NO` throughout this file), so it has no production behaviour to preserve;
+   the "default unchanged" guarantee is about the `app_mention` natural-language path, which
+   `mention_mixed` preserves exactly.
+4. Slash entry authorization is its own typed field, `slash_command_allowed_channel_ids`, because
+   `allowed_channel_ids` governs *channel-visible* disclosure while a `/mka` result is ephemeral and
+   addressed to exactly one user. Absent → no conversation restriction (the stated product goal,
+   safe because the result is invoker-only). An explicit `[]` is refused: "unrestricted" and
+   "nothing allowed" must not be the same value.
+5. `chat_postEphemeral` is a new executable posting API on this surface and is brought inside a
+   posting boundary alongside `chat_postMessage`, with the source-level inventory test widened to
+   both.
+
+Done when every flag in the WP's DONE DEFINITION holds, targeted Slack tests pass, `compileall` and
+`git diff --check` pass, mutation probes demonstrate each new guard actually guards, and a narrow
+feature commit exists on this branch with `main` untouched.
+
+### Slack `/mka` Faceted-Only Search Entry (this WP)
+
+Full design record: `docs/specs/SLACK_MKA_COMMAND_FACETED_ONLY_ENTRY.md`.
+
+**Entry mode.** One new key, `slack_search_entry_mode`, with two canonical values. Absent →
+`mention_mixed`, which is today's behaviour bit-for-bit; only an explicit `slash_faceted_only`
+selects the `/mka` product. An unrecognised value is refused at config load rather than defaulted,
+because a typo would otherwise leave app-mention search alive on a deployment whose operator
+believed they had switched it off. `slash_faceted_only` additionally requires
+`enable_faceted_search=true`, since the modal is that mode's only search entry. A mode was chosen
+over booleans because the alternatives are mutually exclusive readings of one question -- what does
+an app mention mean? -- and independent booleans could contradict each other.
+
+**`/mka`.** Registered only in slash mode. Acks first and unconditionally (Slack allows three
+seconds), then calls `views_open` directly -- no intermediate button, no retrieval, no query
+planning, no audit row. `command["text"]` is never read: `/mka`, `/mka 搜尋`, `/mka SHOPLINE` and
+`/mka <restricted name>` produce an identical blank modal, asserted as view equality rather than as
+a substring check, because the modal's own chrome legitimately contains words like 「搜尋」.
+
+**App-mention migration.** In slash mode every mention returns the same short guidance naming
+`/mka`, and returns it *before* the pagination store, `ask_fn` and every audit call. `agent_ask` is
+untouched; CLI and internal natural-language search are unchanged.
+
+**Year field.** Single `static_select` with 「全部年份」 leading and selected by default.
+「全部年份」 is a UI sentinel that decodes to *no* `interview_year` constraint -- never to a
+constraint carrying the sentinel, which would match nothing in the index while appearing in the
+plan and audit row as though a year had been chosen. An unrecognised year value is refused rather
+than coerced to 「全部年份」: coercion would turn a forged field into a whole-corpus search.
+`interview_years` keeps its tuple type; the structured layer was not rewritten for a single-select
+UI.
+
+**Narrowing.** At least one of specific year / LV2 / content tag. Free text is deliberately absent
+from that test, and 「全部年份」 leaves `interview_years` empty precisely so choosing it cannot
+smuggle a whole-corpus search through. The refusal names the fields that would satisfy it, because
+a user told only 「請至少填寫一個搜尋條件」 would reasonably retype into the free-text box.
+
+**Result visibility.** Slash results are ephemeral to the invoker, routed from the entry point
+recorded in `private_metadata` rather than from which fields happen to be populated, so a message
+cannot become public because a thread timestamp was missing. Verified for public, private and DM
+conversation id shapes.
+
+**Authorization.** `allowed_channel_ids` is unchanged and still governs every channel-visible
+message. `/mka` gets `slash_command_allowed_channel_ids`, absent → unrestricted, explicit `[]` →
+refused. `allowed_exposure_channels` and every other data-governance policy are untouched.
+
+**Session context.** A slash command carries no `thread_ts`, so each `/mka` mints an unguessable
+session id, always combined with the payload-derived user id (`f"{user_id}:{session_id}"`) before
+use. `SlackRequestTokenStore` and `pagination_key` had their third coordinate renamed
+`thread_ts` → `session_key` -- the same check under an honest name, renamed rather than reused so
+no call site could keep the old meaning by accident (the R2 `get()` → `resolve()` precedent).
+Sensitive text stays out of button values and `private_metadata`; only opaque lane ids travel there.
+
+**Pagination.** 「顯示更多」 is a button in slash mode, offered only while a page is actually
+waiting. It replays already-rendered text: no retrieval, no reranking, no query planning, no new
+audit row. Wrong user, unknown token and expired continuation are indistinguishable to the clicker.
+
+**Posting boundary.** `chat.postEphemeral` is brought inside `post_slack_ephemeral`, with the same
+properties as `post_slack_reply`. The source-level inventory test now covers both APIs and rejects
+`chat_update`, `files_upload`, `say(` and `respond(` anywhere in the package. This is the bounded
+NB-1 hardening the WP authorized, and nothing beyond it.
+
+**Schema version.** `STRUCTURED_REQUEST_SCHEMA_VERSION` (v2) is added to `structured_search.py` and
+folded into `catalog_version`, so a modal opened under the v1 multi-select schema is refused as
+stale rather than decoded under v2 -- where its absent `selected_option` would read as 「全部年份」
+and silently widen a year-restricted search.
+
+#### Findings established by this WP, verified rather than assumed
+
+1. **`chat_postEphemeral` does not declare the unfurl flags.** `slack_sdk` 3.43.0's binding has no
+   `unfurl_links`/`unfurl_media` named parameters, unlike `chat_postMessage`. It accepts `**kwargs`
+   and forwards them verbatim into the request body, so they are transmitted. Whether Slack's
+   `chat.postEphemeral` acts on them is **not** established here and is a UAT check. The boundary
+   forces them regardless; that cannot make unfurling more likely.
+2. **`chat.postEphemeral` is not available in every conversation.** Slack requires the app to be
+   able to post into the target conversation, so an invocation from a channel the bot was never
+   added to can fail with `channel_not_found` even though the command was delivered. Not worked
+   around here, deliberately: the alternatives are a `response_url` outbound path (outside this
+   WP's scope and outside the posting boundary) or posting in-channel, which would break
+   invoker-only visibility. The failure discloses nothing -- the result simply does not arrive --
+   and it is the first thing UAT should probe. See the spec's "Known platform constraint on
+   ephemeral posting".
+3. **`slack_bolt` runs a slash-command listener asynchronously.** `dispatch` returns as soon as
+   `ack()` fires and the rest of the handler continues on a worker thread. That is correct
+   production behaviour for Slack's three-second deadline, but it makes a naive
+   assert-immediately-after-dispatch test a race. Reproduced directly: 0 `views.open` calls
+   immediately after dispatch, 1 after a 0.5s sleep. The slash contract fixture therefore uses
+   bolt's synchronous `process_before_response=True`, which runs the same registered listener
+   through the same dispatcher without the timing dependency.
+
+#### Mutation-strength evidence
+
+Every probe copies `src/` and `tests/` to `/private/tmp/mka-mka-probe`, mutates **there** so the
+repository source is never touched, runs, and is deleted afterwards. The unmutated copy passes
+(`178 passed`), so a failure below is the mutation and not the harness.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| 0 | none (harness baseline) | `178 passed` |
+| 1 | delete the guidance early return; app mentions search again | `8 failed` |
+| 2 | restore `or request.free_text.strip()`; free-text-only search allowed | `4 failed` |
+| 3 | stop treating the 「全部年份」 sentinel as "no constraint" | `13 failed` |
+| 4 | use `/mka` trailing text as a modal prefill | `6 failed` |
+| 5 | pagination button re-searches and writes a search audit row | `1 failed` |
+| 6a | drop the token-store ownership gate only | `1 failed` |
+| 6b | drop the user from the continuation lane key only | `1 failed` |
+| 6c | drop both ownership guards | `1 failed` |
+| 7 | post the slash result into the channel instead of ephemerally | `8 failed` |
+| 8 | remove the 「全部年份」 default selection | `20 failed` |
+
+Probes 6a and 6b initially passed, which was itself the finding: the two cross-user guards are each
+independently sufficient, so a single-guard removal was invisible to every test. Two tests were
+added to pin each guard on its own -- a show-more click with the correct lane and clicker but an
+invalid token, and a unit assertion that the lane key is user-scoped -- after which 6a, 6b and 6c
+all fail. Without those, a future refactor could delete one guard and leave the other silently
+carrying the whole guarantee.
+
+#### Files changed
+
+Source: `slack_interface.py` (entry mode, config validation, `/mka` handler, show-more handler,
+app-mention migration, ephemeral boundary, session helpers, entrypoint-aware submission),
+`slack_faceted_search.py` (single-select year, 「全部年份」 sentinel, entrypoint/session in
+`private_metadata`, show-more and restart blocks, v2 submission parsing),
+`structured_search.py` (`STRUCTURED_REQUEST_SCHEMA_VERSION`, narrowing rule),
+`search_facets.py` (schema version folded into `catalog_version`),
+`slack_pagination.py` (`session_key` coordinate, additive `has_more`),
+`slack_request_tokens.py` (`thread_ts` → `session_key`),
+`slack_presentation.py` (entry-point-dependent continuation hint).
+
+Tests: `test_slack_faceted_search.py`, `test_slack_faceted_search_interface.py`,
+`test_slack_bolt_contract.py`, `test_slack_interface.py`, `test_structured_search.py`,
+`test_search_facets.py`.
+
+Docs: `docs/specs/SLACK_MKA_COMMAND_FACETED_ONLY_ENTRY.md`, this file.
+
+#### Pre-existing assertions updated, and why each is not a weakening
+
+- token-store context keyword `thread_ts=` → `session_key=` (mechanical; a wrong keyword raises
+  immediately);
+- year prefill `initial_options` (list) → `initial_option` (single), following the element type;
+- `_modal_prefill` normalises 「全部年份」 to `[]`, so "this clicker sees none of the owner's
+  filters" stays one comparison across all three fields;
+- `private_metadata` equality now includes `entrypoint` and `session_id`, and a new test asserts it
+  never carries the submitting user;
+- `test_free_text_at_the_limit_passes_and_over_the_limit_is_refused` gained a narrowing facet so it
+  still tests the length bound rather than the new narrowing rule;
+- `test_no_slack_message_is_posted_outside_the_boundary` became
+  `test_no_slack_message_is_posted_outside_a_boundary`, covering both posting APIs, plus a new test
+  rejecting alternative posting APIs entirely.
+
+```text
+SLACK_ENTRY_MODE_IMPLEMENTED=YES
+SLASH_COMMAND_REGISTERED_IN_CODE=YES
+SLASH_COMMAND_DIRECT_MODAL=YES
+SLASH_COMMAND_TEXT_IGNORED=YES
+APP_MENTION_DIRECT_SEARCH_DISABLED=YES
+APP_MENTION_GUIDANCE_ONLY=YES
+YEAR_SELECTOR_SINGLE_SELECT=YES
+ALL_YEARS_OPTION_IMPLEMENTED=YES
+ALL_YEARS_DEFAULT_SELECTED=YES
+ALL_YEARS_MEANS_NO_YEAR_CONSTRAINT=YES
+ALL_YEARS_COUNTS_AS_NARROWING_CONSTRAINT=NO
+ALL_YEARS_FREE_TEXT_ONLY_REFUSED=YES
+SPECIFIC_YEAR_ONLY_SEARCH_VALID=YES
+ALL_YEARS_AUDIT_SEMANTICS_CORRECT=YES
+FREE_TEXT_ONLY_SEARCH_DISABLED=YES
+RESULT_VISIBILITY_INVOKER_ONLY=YES
+PAGINATION_BUTTON=YES
+PAGINATION_RESEARCH=NO
+REQUEST_TOKEN_CONTEXT_SAFE=YES
+SENSITIVE_TEXT_RETENTION_REGRESSION=NO
+CLICKABLE_ASSET_TITLE_PRESERVED=YES
+NO_UNFURL_REGRESSION=YES
+GOVERNANCE_REGRESSION=NO
+PRODUCTION_CONFIG_CHANGED=NO
+SLACK_APP_CONSOLE_CHANGED=NO
+PRODUCTION_ACTIVATED=NO
+BOT_STARTED=NO
+MAIN_UPDATED=NO
+```
+
+#### Verification (Claude Code, 2026-08-28)
+
+- Interpreter: the project venv at
+  `/Volumes/T7/Codex AI Agent/Marketing Knowledge Agent/.venv/bin/python` (Python 3.9.6,
+  `slack_bolt` 1.29.0, `slack_sdk` 3.43.0). Import origin confirmed as **this** worktree's `src`
+  before every run via an explicit `PYTHONPATH`, not the venv's editable install pointing at the
+  main checkout.
+- Targeted run (**23 files**: every Slack module plus structured search, facets, query gating,
+  taxonomy, typed retrieval, pipeline, agentic, generation, governance evals, validation, content
+  index, search-quality evaluation): **762 passed, 1 skipped, 0 failed.**
+  *(Corrected 2026-08-28 per Codex R2 finding P3-2: this set was originally labelled "24 files".
+  It is 23. See the R2 nonblocking cleanup section for the counted set and both figures.)*
+- Test counts: `test_slack_faceted_search.py` 41 → 53, `test_slack_faceted_search_interface.py`
+  44 → 95, `test_slack_bolt_contract.py` 7 → 10, `test_slack_interface.py` 50 → 52,
+  `test_structured_search.py` 22 → 32, `test_search_facets.py` 16 → 17.
+- `python -m compileall` on `src/marketing_knowledge_agent` and every changed test file: pass.
+  `git diff --check`: pass.
+- Read-only discipline: no `.mka/` directory and no stray `.sqlite` file exists in this worktree
+  after the full run; `git status --short` lists exactly the files this WP touched and nothing else.
+- Not run: the full application suite (the pre-existing gitignored-fixture blocker recorded
+  throughout this file is unchanged, and this WP touched none of those subsystems);
+  `tests/test_slack_structured_governance.py` (same pre-existing blocker); standalone lint/type
+  tools (not configured in this repo); production sync, re-index, deploy, Slack Bot start/restart,
+  or UAT.
+- **Not verified: Slack itself.** No payload has been sent to Slack and the bot was not started.
+  The live `views_open` / `view_submission` / `chat.postEphemeral` round trip, whether Slack honours
+  the unfurl flags on an ephemeral message, whether an ephemeral message can be posted in every
+  conversation shape the bot may be invoked from, and the real three-second `ack` deadline under
+  production latency are all first exercised in UAT.
+
+### Codex Independent Delta Review R1 and remediation (2026-08-28)
+
+Reviewed candidate: `5954e10bd31b308c67e349b4d76f207c5558eb03`. Verdict **CHANGES_REQUESTED**,
+**2 blocking findings**. Both were accepted, both **reproduced against the reviewed candidate
+before any fix**, and both are now guarded by tests proven to fail without the fix. The R1
+implementation record above is retained unchanged as that round's evidence.
+
+The block below is **this round's state as of 2026-08-28**, not current state. `CODEX_R2_REVIEW`
+was genuinely pending when it was written; R2 has since returned
+PASS_WITH_NONBLOCKING_FINDINGS. Current state is the top-level Lock.
+
+```text
+CODEX_DELTA_REVIEW_R1=CHANGES_REQUESTED
+R1_REVIEWED_CANDIDATE=5954e10bd31b308c67e349b4d76f207c5558eb03
+R1_BLOCKING_FINDINGS=2
+R1_BLOCKERS_REMEDIATED=2
+CODEX_R2_REVIEW=PENDING
+```
+
+#### Finding 1 -- slash-only mention trailing text was persisted
+
+**Reproduced first.** In `slash_faceted_only`, `handle_slack_event` ran the channel-authorization
+check *before* the mode migration, so a mention from a DM or an unlisted channel wrote:
+
+```text
+slack_denied_channel,C_OTHER,U1,0,0,<@BOT> SECRET_CUSTOMER_NAME
+slack_denied_channel,D1,U1,0,0,<@BOT> SECRET_CUSTOMER_NAME
+```
+
+My R1 test asserted only the allowed-channel case, so "never persisted" held exactly where it was
+least at risk and failed where it mattered most: a DM is precisely where somebody types a customer
+name without thinking.
+
+**Fix.** Migration routing now precedes every audit path. The reasoning is that the same text which
+is not a query in an allowed channel is not a query in a denied one either -- the authorization
+path predates the mode and records `raw_question` because it was written for a natural-language
+search surface. The denial itself is still recorded, because reaching this bot from an unauthorized
+conversation is operational signal worth keeping; only the query column is dropped, and it is
+dropped **by construction** rather than by matching anything in the text, so there is no redaction
+pattern that could be wrong. An allowed-channel mention writes no row at all: guidance is neither a
+query nor a denial.
+
+`mention_mixed` is untouched, including its `slack_denied_channel` row and its query column, and a
+test pins that so the slash-only fix cannot drift into a global removal of legacy audit.
+
+#### Finding 2 -- legacy mention artifacts stayed executable after a mode switch
+
+**Reproduced first**, as the full chain rather than its first link:
+
+```text
+legacy_button_opened=True
+entrypoint='app_mention'  session_id=''
+public_messages=2  ephemerals=0
+```
+
+A button posted before the switch carries no slash session, so the handler inferred
+`entrypoint=app_mention`, wrote it into `private_metadata`, and the submission trusted it -- routing
+a real governed search back into a public channel and breaking `RESULT_VISIBILITY=INVOKER_ONLY`.
+
+**Fix.** `entrypoint_allowed_for_mode(mode, entrypoint)` is now the single rule, checked against the
+mode in force **at execution time**, at three executable entry points: the open-modal action, the
+show-more action, and -- independently -- the view submission. `private_metadata["entrypoint"]` is
+not trusted merely because this app wrote it: it states how a view was opened, which is exactly the
+fact that goes stale.
+
+The view-handler gate is not redundant with the action gate, and that is the half a button-only fix
+would miss: a modal opened *before* the switch and submitted *after* it never passes through today's
+action handler at all. The mutation probes below show each layer failing a test the other does not.
+
+The rule is symmetric and that is deliberate: under `mention_mixed` a slash-provenance interaction
+also fails closed, because `/mka` is not registered there so no slash session can legitimately
+exist.
+
+Stale clickers get a fixed ephemeral pointer to `/mka` through the existing ephemeral boundary --
+no public post, no echo of what was clicked, no prior query. A stale submission is refused through
+`ack(response_action="errors")` alone, so no posting API is involved at all; the modal explains
+itself instead of closing silently on a result that will never arrive.
+
+#### Discovered while probing: a pre-existing test race, fixed
+
+`tests/test_slack_bolt_contract.py`'s `bolt_app` fixture did not set `process_before_response=True`,
+so bolt returned from `dispatch` as soon as the listener called `ack()` and finished the work on a
+pool thread, racing every assertion after it. Measured: **3 failures in 15 whole-file runs under
+CPU load** before, **0 in 15** after. Not one of the two blockers, pre-existing since the
+no-unfurl WP, and fixed here rather than reported-and-left because a flaky harness would corrupt
+the evidence this review round rests on. `slash_bolt_app` already used the same setting for the
+same documented reason.
+
+#### Mutation-strength evidence (R1 remediation)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated. Unmutated baseline: `121 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R1-A | move slash-only migration routing back below the raw-question audit | `3 failed` (denied channel, `im`, `mpim`) |
+| R1-B1 | remove the **action** gate only | `6 failed` |
+| R1-B2 | remove the **view-submission** gate only | `3 failed` |
+| R1-B3 | remove both gates | `7 failed` |
+| R1-B4 | make the rule asymmetric (`mention_mixed` accepts anything) | `2 failed` |
+
+R1-B1 and R1-B2 each fail at least one test the other does not --
+`test_a_legacy_mention_button_cannot_open_a_modal_in_slash_mode` for the action layer,
+`test_a_legacy_modal_submitted_after_the_mode_switch_executes_nothing` for the view layer -- which
+is what demonstrates the two layers protect independently rather than one covering for the other.
+
+#### Verification (R1 remediation)
+
+- Same suite as the R1 candidate, for comparable evidence: **778 passed, 1 skipped, 0 failed**
+  (R1 candidate: 762 passed, 1 skipped; +16 from the tests added this round).
+  *(Corrected 2026-08-28 per Codex R2 finding P3-2: that set is **23 files**, not 24. The figure
+  itself — 778 passed, 1 skipped — was and is correct for it.)*
+- Test counts: `test_slack_faceted_search_interface.py` 95 → 110,
+  `test_slack_bolt_contract.py` 10 → 11.
+- `compileall` on `src/marketing_knowledge_agent` and both changed test files: pass.
+  `git diff --check`: pass. Import origin re-confirmed as this worktree's `src`.
+- `git status --short` listed exactly the three files this remediation touched.
+- Not run, unchanged from R1: full application suite;
+  `tests/test_slack_structured_governance.py` (pre-existing gitignored `.mka/content_index.sqlite`
+  fixture blocker -- **not** claimed as passing, and not a regression from this remediation);
+  standalone lint/type tools (not configured); production sync, re-index, deploy, bot
+  start/restart, or UAT. Slack itself is still unexercised.
+
+### Codex Independent Delta Review R2 and nonblocking cleanup (2026-08-28)
+
+Reviewed candidate: `0da023c2f2f606b0a0287334537168a8a24d93f2`. Verdict
+**PASS_WITH_NONBLOCKING_FINDINGS**, **0 blocking**, **2 nonblocking**. Both nonblocking findings
+were authorized for a narrow cleanup and are closed below. The R1 and R1-remediation records above
+are retained unchanged as those rounds' evidence; the two suite-count lines carry an inline
+correction rather than a rewrite, so what was originally claimed remains visible.
+
+The block below is **this round's state as of 2026-08-28**, not current state.
+`FINAL_SPOT_REVIEW` was genuinely pending when it was written; it has since returned PASS with 0
+blocking and 0 nonblocking findings against `eb128b8`. Current state is the top-level Lock.
+
+```text
+CODEX_DELTA_REVIEW_R2=PASS_WITH_NONBLOCKING_FINDINGS
+R2_REVIEWED_CANDIDATE=0da023c2f2f606b0a0287334537168a8a24d93f2
+R2_BLOCKING_FINDINGS=0
+R2_NONBLOCKING_FINDINGS=2
+P3_1_MODE_AWARE_STALE_GUIDANCE=CLOSED
+P3_2_SUITE_COUNT_CORRECTION=CLOSED
+R1_FINDING_1_STILL_CLOSED=YES
+R1_FINDING_2_STILL_CLOSED=YES
+FINAL_SPOT_REVIEW=PENDING
+```
+
+#### P3-1 -- stale-artifact guidance now names the entry the current mode has
+
+**Reproduced first**, on the reviewed candidate, at both refusal paths:
+
+```text
+mention_mixed + stale slash button   -> refused; guidance: 「請輸入 `/mka`…」
+mention_mixed + stale slash modal    -> refused; ack errors: 「請輸入 `/mka`…」
+/mka registered in this mode: False
+```
+
+The refusal was correct in both cases -- nothing opened, nothing executed, nothing posted -- so this
+was never a security defect. It was advice that was itself stale: a user under `mention_mixed` was
+told to type a command that mode never registers, so the remedy failed the same way the button did.
+
+The message is now selected by the mode in force at execution time, by
+`stale_entry_mode_message(mode)`, for the same reason `entrypoint_allowed_for_mode` is: what a user
+should do next is a fact about the current configuration, not about the artifact they clicked.
+
+| current mode | guidance |
+| --- | --- |
+| `slash_faceted_only` | 「搜尋入口已更新，請輸入 `/mka` 重新開啟搜尋。」 |
+| `mention_mixed` | 「此搜尋操作已失效，請重新標記 @Marketing Knowledge Agent 開始搜尋。」 |
+
+Both are fixed literals chosen by mode, never assembled from anything the interaction carried: no
+old query, no button value, no request token, no free text, no `private_metadata` content. The
+mention wording reuses `SHOW_MORE_MENTION`, which is already the single definition of how this bot
+is addressed, so a rename cannot leave the two instructions disagreeing.
+
+Nothing about refusal changed. `entrypoint_allowed_for_mode`, the action-time gate, the
+view-submission gate and the show-more provenance gate are all untouched, and the R1 security
+probes were re-run against this cleanup to confirm they still bite (below).
+
+#### P3-2 -- comparable-suite figures, counted rather than asserted
+
+The reviewer was right and the correction is confirmed independently here by counting the set and
+running both:
+
+| set | files | result |
+| --- | --- | --- |
+| comparable set used across R1, R1-remediation and R2 | **23** | R2 candidate: `778 passed, 1 skipped` |
+| superset, adding `tests/test_content_index_lineage.py` | **24** | R2 candidate: `799 passed, 1 skipped` |
+
+`tests/test_content_index_lineage.py` alone is `21 passed`, which is exactly the difference. The
+records above said "24-file / 778", conflating the two; the file count was wrong, the figure was
+right for the set actually run.
+
+`tests/test_slack_structured_governance.py` remains **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE**
+— its gitignored `.mka/content_index.sqlite` dependency is absent from this isolated worktree. It
+is not claimed as passing, and it is not a regression from any round of this WP.
+
+#### Mutation-strength evidence (R2 cleanup)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated. Unmutated baseline: `123 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| P31-shared | route both modes back to the single `/mka` message | `3 failed` |
+| P31-swapped | return each mode's message for the other mode | `7 failed` |
+| R1-A (re-run) | move slash-only migration routing back below the raw-question audit | `3 failed` |
+| R1-B1 (re-run) | remove the **action** gate only | `6 failed` |
+| R1-B2 (re-run) | remove the **view-submission** gate only | `4 failed` |
+
+The swapped probe matters more than the shared one: it proves the tests assert *which entry point
+each message names* rather than comparing the resolver's output to the same constant it returns,
+which would have passed however the two sentences were exchanged. The three R1 re-runs are included
+because this cleanup edits code inside both gate paths, so "the security remediations still hold"
+is checked rather than assumed — and R1-B1/R1-B2 still each fail a test the other does not.
+
+#### Verification (R2 cleanup)
+
+- Comparable 23-file suite: **780 passed, 1 skipped, 0 failed** (R2 candidate: 778; +2 from the
+  tests added by this cleanup).
+- 24-file superset: **801 passed, 1 skipped, 0 failed** (R2 candidate: 799).
+- `test_slack_faceted_search_interface.py` 110 → 112. No other test file changed.
+- `compileall` and `git diff --check`: pass. Import origin re-confirmed as this worktree's `src`.
+- `git status --short` listed exactly the two files this cleanup touched; no `.mka/`, no stray
+  `.sqlite`.
+- Not run, unchanged: full application suite; `tests/test_slack_structured_governance.py` (see
+  above); standalone lint/type tools (not configured); production sync, re-index, deploy, bot
+  start/restart, or UAT. Slack itself is still unexercised.
+
+### Human UAT Phase 1 and the R1 routing remediation (2026-08-28)
+
+Controlled UAT ran against an isolated runtime built from the reviewed code candidate `eb128b8`,
+with the operational config, content index and checkout untouched throughout (hashes verified
+before and after).
+
+```text
+HUMAN_UAT_PHASE_1=PASS_WITH_BLOCKING_FINDING
+UAT_BOT_STOPPED_BY_HUMAN=YES
+UAT_BOT_STOP_METHOD=SIGINT
+UAT_BOT_EXIT_130_EXPECTED=YES
+UAT_BOT_RESTARTED=NO
+BLOCKING_FINDING=SLASH_DELIVERY_DEPENDS_ON_BOT_MEMBERSHIP
+OBSERVED_SLACK_ERROR=channel_not_found
+```
+
+The bot was stopped deliberately by the operator with `kill -INT`; exit code 130 is that SIGINT,
+not a crash. It has not been restarted, and no code below was written while it was running.
+
+#### What passed, live, against real data
+
+Preserved as recorded. These are live-Slack results, not test outcomes:
+
+| behaviour | result |
+| --- | --- |
+| `/mka` opens the modal directly | PASS |
+| `/mka` trailing text ignored | PASS |
+| 「全部年份」 default, year single-select | PASS |
+| free-text-only refused; 「全部年份」 alone refused | PASS |
+| specific-year-only search; 「全部年份」 + LV2 search | PASS |
+| 調整條件; 重新搜尋 blank | PASS |
+| 顯示更多 pagination | PASS |
+| app mention returns guidance only | PASS |
+| ephemeral delivery in a known member channel | PASS |
+| clickable approved URLs; unfurl suppression | PASS |
+
+Observed examples: a 2024-only search returned 6 brands / 15 assets; 「全部年份」 + LV2 女裝
+returned 5 brands / 7 assets. The audit log recorded 11 searches over ~22 minutes, one channel, one
+user, 10 of 11 with citations, 0 warnings, 0 denylist refusals.
+
+#### The blocking finding
+
+A `/mka` from a conversation outside `slash_command_allowed_channel_ids` entered the denial branch
+correctly, then failed to deliver the denial:
+
+```text
+handle_faceted_search_command → post_slack_ephemeral(... DENIED_CHANNEL_MESSAGE ...)
+  → chat.postEphemeral: {'ok': False, 'error': 'channel_not_found'}
+```
+
+The user saw nothing at all. The spec had predicted the constraint for the *result* path and
+flagged it as the first thing UAT should probe; what it did not anticipate is that the *refusal*
+path shares it, and fires precisely in the conversations the bot is least likely to belong to. The
+restrictive first-round allowlist — recommended here to protect the success path — therefore made
+this more likely to be hit, not less.
+
+#### Remediation: response_url replaces membership-dependent delivery
+
+Every slash-originated message now leaves through the `response_url` Slack attaches to the command
+or interaction that produced it. `chat.postEphemeral` is gone from the package entirely, and its
+helper was removed rather than left unused, because an unused posting helper is what a future
+handler reaches for. `views.open` is unchanged: it uses `trigger_id` and never depended on
+membership.
+
+A `response_url` is a bearer capability, so `slack_response_urls.py` holds it as a credential:
+memory only; excluded from `repr`; never in `private_metadata`, a button value, a request token, a
+pagination key or an audit row; exact-host HTTPS allowlist checked before storing (an arbitrary host
+would make this a request-forgery primitive); TTL below Slack's documented ~30 minutes; hard budget
+of 5 sends; bound to user + channel + session, with unknown/expired/wrong/exhausted all resolving
+to the same `None`.
+
+The reply path is checked **before** retrieval. The failure worth preventing is a search that
+succeeds and then has nowhere to go.
+
+Buttons refresh the capability from their own interaction, so a long session does not spend down
+the ageing command capability; ownership is not refreshed with it — user and channel still come
+from the payload.
+
+#### Presentation changes (nonblocking UX, same round)
+
+Modal: `Sales Category LV2` → 品牌產業別; 內容相關標籤 → 你在找什麼功能？; free-text label extended.
+Applied conditions: 品牌產業別 / 功能, mapped in the Slack renderer rather than in `FIELD_REGISTRY`.
+Result card: Handle / LV1 / LV2 lines removed. A Block Kit hint now warns about 「全部年份」 before
+submission.
+
+**Display only.** Block ids, action ids, request fields, taxonomy and audit names are unchanged, and
+`merchant_handle` / `sales_category_lv1` / `sales_category_lv2` are still carried and still drive
+grouping, conflicting-handle removal and data-conflict marking. The narrowing rule is unchanged:
+「全部年份」 still narrows nothing and is still refused alone.
+
+#### Mutation-strength evidence (UAT R1)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated. Unmutated baseline: `271 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R-1 | slash result routed back to the channel-posting path | `25 failed` |
+| R-2 | persist the capability into `private_metadata` | `2 failed` |
+| R-3 | drop the user binding from the capability store | `35 failed` |
+| R-4 | drop the channel/session binding | `34 failed` |
+| R-5 | allow more than five sends | `5 failed` |
+| R-6 | remove the adjust/restart capability refresh | `4 failed` |
+| P-1 | restore the old modal labels | `2 failed` |
+| P-2 | restore Handle/LV1/LV2 on the result card | `4 failed` |
+| P-3 | remove the conflicting-handle protection | `1 failed` |
+
+P-3 matters most of the nine: it is the one that proves hiding the three lines did not disable the
+rule that reads them.
+
+#### Verification (UAT R1 remediation)
+
+- Comparable 23-file suite: **802 passed, 1 skipped, 0 failed** (previous round: 780).
+- Plus the new `tests/test_slack_response_urls.py` (24 files): **834 passed, 1 skipped**.
+- 25-file superset incl. `test_content_index_lineage.py`: **855 passed, 1 skipped**.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin re-confirmed
+  as this worktree's `src`.
+- No live Slack call was made and the UAT bot was not restarted.
+- `tests/test_slack_structured_governance.py` remains NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE.
+
+#### Observed but deliberately not changed
+
+`slack_output_preview._render_detailed` still prints `Sales Category LV1/LV2` and `Handle`. It is a
+separate offline preview surface, not the modal and not the live result card, and UAT did not
+examine it. Renaming there was out of this round's scope; recorded so the divergence is a decision
+rather than an oversight.
+
+### Independent Delta Review of the UAT R1 remediation, and the security remediation (2026-08-28)
+
+Reviewed candidate: `76b0b3fc2c376546cd5aaf03f880ff3b6578ec8d` (code+tests
+`7055905f1354f184467fb233dd1ab8f5751f942d`). Verdict **CHANGES_REQUESTED**, **4 blocking findings**,
+all HIGH. All four were accepted, all four **reproduced against the reviewed candidate before any
+fix**, and each is now guarded by a test proven to fail without its fix.
+
+The Human UAT R1 record above is retained unchanged as that round's evidence.
+
+```text
+UAT_R1_DELTA_REVIEW=CHANGES_REQUESTED
+UAT_R1_REVIEWED_CANDIDATE=76b0b3fc2c376546cd5aaf03f880ff3b6578ec8d
+UAT_R1_REVIEW_BLOCKING_FINDINGS=4
+UAT_R1_SECURITY_BLOCKERS_REMEDIATED=4
+UAT_R1_SECURITY_REVIEW_2=PENDING
+```
+
+The block above is **this round's state**, not a claim of acceptance. No review has passed this
+candidate, and no live UAT has been run against it.
+
+#### Finding 1 (HIGH) — the use budget could be double-spent concurrently
+
+**Reproduced first.** `take()` checked liveness and decremented as two separate steps, so two
+threads holding a one-use capability could both pass the check before either decremented. A plain
+barrier at the call site did not surface it — the window is between two operations *inside*
+`take()`, so a probabilistic test can run for a long time without landing in it. Holding the window
+open explicitly showed it immediately:
+
+```text
+capability had remaining_uses = 1
+concurrent successful takes  = 2
+```
+
+**Fix.** All mutable store state is now behind one `threading.RLock`, and verification plus
+decrement happen in a single critical section. The GIL is not a substitute: the race is between
+bytecode operations, not inside one.
+
+#### Finding 2 (HIGH) — URL validation was incomplete, and redirects were followed
+
+**Reproduced first:** `https://user:pass@hooks.slack.com/…`, `https://hooks.slack.com:444/…` and
+`https://hooks.slack.com:8443/…` were all accepted.
+
+**Fix.** Validation now requires HTTPS, an exact approved host, no username, no password, port
+absent or exactly 443 (with an unparseable port refused rather than treated as absent), no
+fragment, and a path under a Slack response_url root. The GovSlack host was dropped: commercial
+Slack is the deployment target, and an approved host that is never used is an allowance with no
+benefit.
+
+Redirects are refused outright, because validating the first hop authorizes nothing about the
+second. A probe found the first version of this test was **vacuous** — it pointed the redirect at a
+dead port, where a followed redirect fails too, so it passed with the guard removed. It now uses a
+live capture server and asserts that server received nothing. It is also parametrised over
+301/302/303/307: `urllib` already refuses 307 on a POST, so 307 alone would have proved nothing;
+301/302/303 are the codes the standard library *does* follow, and where the guard actually bears.
+
+#### Finding 3 (HIGH) — the SDK could log the bearer capability
+
+**Reproduced first:** `slack_sdk` 3.43.0's webhook client accepts a `logger`, ships
+`ConnectionErrorRetryHandler` by default, and its request path can emit `req.full_url` — which *is*
+the capability.
+
+**Fix.** The SDK client was dropped for a few lines of standard library inside the same reviewed
+boundary. It logs nothing at all, and every failure is re-raised as `SlackResponseUrlError` whose
+message is fixed text; `from None` suppresses the chained original, because `urllib`'s own
+exceptions carry the full URL in `HTTPError.url` and often in `str(exc)`. Logs are captured at
+DEBUG in tests, so a lower application level is not what is hiding the secret.
+
+#### Finding 4 (HIGH) — the pre-retrieval check was observational, not a reservation
+
+**Reproduced first:** `can_reply()` returned `True`, another handler consumed the final use, and the
+later `take()` returned `None` — a search would have run with nowhere to send its result.
+
+**Fix.** `can_reply()` and `take()` are gone from the store's API. The only way executable code
+obtains a capability is `reserve()`, which verifies and consumes one use atomically and returns a
+send-once reservation. The submission reserves **after** the request is validated and **before** any
+retrieval; the same reservation is what authorizes the outbound message at the end.
+
+Validation errors deliberately reserve nothing — they answer through `ack` alone, and spending a use
+there would let a handful of ordinary mistakes exhaust a session that never ran a search.
+
+#### Send and refresh semantics, recorded because they are judgement calls
+
+- **A failed send is not refunded.** Slack may have received and acted on the request even when the
+  client saw a transport error, so re-spending the use could exceed the server-side budget and
+  deliver the message twice.
+- **One reservation is at most one HTTP attempt.** No retry, by construction.
+- **A refresh does not revoke an outstanding reservation.** Its use was consumed atomically when it
+  was issued, so it is a send already paid for; revoking it would drop a reply the user is owed
+  rather than prevent one they are not.
+
+#### Mutation-strength evidence (security remediation)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated. Unmutated baseline: `259 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R7 | remove the store lock | `2 failed` |
+| R8 | reserve *after* retrieval instead of before | `2 failed` |
+| R9 | accept userinfo in a response_url | `3 failed` |
+| R10 | accept an arbitrary port | `2 failed` |
+| R11 | follow redirects | `3 failed` (301/302/303) |
+| R12 | log the request URL, as the SDK client would | `4 failed` |
+| R13 | retry automatically | `7 failed` |
+
+R11 is worth reading twice: it **did not fail** on the first attempt, and that was the finding — the
+test was asserting the wrong thing. Both the test and this table reflect the version that bites.
+
+Retained probes were re-run against this candidate and still bite: R-2 capability-in-metadata
+(`2 failed`), R-3 drop user binding (`14 failed`), R-5 unbounded uses (`14 failed`), R-6 no refresh
+(`4 failed`), P-2 restore card metadata (`3 failed`), P-3 remove the conflicting-handle guard
+(`1 failed`).
+
+R-5 initially **hung** rather than failing, and that was a defect in the tests rather than in the
+product: two helpers drained a lane with `while remaining_uses > 1`, which never terminates once
+the store stops decrementing. Both are now bounded by the budget. A test that hangs reports
+nothing, and under a mutation harness it reports nothing precisely when something is wrong.
+
+#### Verification (security remediation)
+
+- Comparable 23-file suite: **807 passed, 1 skipped, 0 failed** (previous round: 802).
+- Plus `tests/test_slack_response_urls.py` (24 files): **884 passed, 1 skipped**.
+- 25-file superset incl. `test_content_index_lineage.py`: **905 passed, 1 skipped**.
+- `tests/test_slack_structured_governance.py`: **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE** —
+  2 passed, 20 errors, all the pre-existing gitignored `.mka/content_index.sqlite` dependency this
+  isolated worktree has never had. Not claimed as passing, and not a regression from this round.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin re-confirmed
+  as this worktree's `src`.
+- No live Slack call was made; the UAT bot was not restarted; nothing was pushed.
+
+### Independent Security Review R2 and the third remediation (2026-08-28)
+
+Reviewed candidate: `0470246dee7327546687b7ec23ab62783c0910d9` (code+tests
+`6e742fca494f3ee8e9925699fd6fb292187ea0b6`). Verdict **CHANGES_REQUESTED**, **4 blocking findings**,
+all HIGH/P1. All four accepted, all four **reproduced against the reviewed candidate before any
+fix**, each now guarded by a test proven to fail without its fix.
+
+The previous rounds' records are retained above unchanged. What R2 confirmed as *fixed* by the
+prior round — store-level atomic reserve, reserve-before-retrieval, and the host / userinfo / port
+/ redirect base checks — is unchanged by this round and re-verified below.
+
+```text
+UAT_R1_SECURITY_REVIEW_2=CHANGES_REQUESTED
+UAT_R1_SECURITY_REVIEW_2_REVIEWED_CANDIDATE=0470246dee7327546687b7ec23ab62783c0910d9
+UAT_R1_SECURITY_REVIEW_2_BLOCKING_FINDINGS=4
+UAT_R1_SECURITY_REVIEW_2_REMEDIATED=4
+UAT_R1_SECURITY_REVIEW_3=PENDING
+```
+
+This block is **this round's state**, not acceptance. No review has passed this candidate and no
+live UAT has been run against it.
+
+#### R2-1 (HIGH) — one reservation could be spent twice concurrently
+
+**Reproduced first:** two threads handed the same reservation object both passed
+`if not self._spent` before either set it — 2 successful spends, and 2 outbound requests.
+
+The store's lock did not cover this: it protects the *budget*, and this is the single authorization
+that budget already bought. The reservation now owns a `threading.Lock` and the unspent→spent
+transition happens inside it; the loser gets an exception rather than the URL, so a second send
+cannot be attempted.
+
+#### R2-2 (HIGH) — a reservation could be duplicated and replayed
+
+**Reproduced first:** `copy.copy` and `copy.deepcopy` produced a clone carrying the same bearer URL
+with its own fresh `_spent = False`, so the original could send and the clone could send again.
+`pickle.dumps` was worse — it serialised the capability itself into bytes (`SECRET_CAPABILITY`
+present in the output) that a revived object could spend.
+
+`ResponseReservation` is no longer a dataclass. It uses `__slots__` (no `__dict__` to copy or
+pickle) and refuses `__copy__`, `__deepcopy__`, `__reduce__` and `__getstate__` with a `TypeError`
+carrying no URL.
+
+A test-strength note found while probing: `deepcopy` and `pickle` also fail *incidentally*, because
+the owned `Lock` cannot be copied. A test accepting any `TypeError` would therefore have kept
+passing with the explicit guards deleted. The test now asserts the refusal is ours.
+
+#### R2-3 (HIGH) — the sanitized error still carried the secret
+
+**Reproduced first:** the escaping `SlackResponseUrlError` had `__cause__ = None` but
+`__context__` = the original `HTTPError`, whose `.url` is the full capability.
+
+`raise ... from None` clears `__cause__` and suppresses traceback *rendering*; it does not remove
+the context object, which any structured reporter walking an exception tree will find.
+
+The sanitized error is now raised **outside** every `except` block — nothing is being handled at
+that point, so `__context__` is `None` as well — and the locals holding the URL and the `Request`
+are deleted first, for reporters that serialise frame locals. Only a fixed string and an integer
+status cross the boundary.
+
+Tests walk the whole tree (`str`, `repr`, `args`, `__cause__`, `__context__`, URL-bearing
+attributes, and traceback frame locals, recursively) across HTTP 400, HTTP 500, refused redirect
+and connection refusal. A companion test feeds the walker a deliberately unsanitized error and
+asserts it *does* find the secret, so the other assertions cannot pass vacuously.
+
+#### R2-4 (HIGH) — the path allowlist was a prefix test
+
+**Reproduced first:** every one of these was accepted —
+`/commands/a/../../services/x`, `/commands/%2e%2e/x`, `/commands/%2E%2E/x`,
+`/commands/a%2f..%2fservices/x`, `/commands/a%5c..%5cx`, `/commands/../admin`, `/commands/%zz`,
+and `?a=1` query strings.
+
+Validation is now structural, applied to the **raw** path exactly as it will be sent — nothing is
+decoded and re-checked, because a validator that normalises differently from the HTTP client is one
+that can be walked past. Four gates: well-formed `%` escapes, none decoding to `/`, `\`, `.` or a
+control byte; no raw control characters or backslashes; no empty, `.` or `..` segments; and a first
+segment naming an approved family with at least one segment after it. Query strings are refused.
+
+**Endpoint families, established from the repository rather than guessed:** this surface receives
+`response_url` from exactly two payload kinds — slash commands (`/commands/…`) and interactive
+actions (`/actions/…`). The allowlist is those two. `/services/` (incoming webhooks) was in the
+previous list and is removed: this app never receives one.
+
+#### Proxy behaviour — recorded, not changed
+
+R2 noted stdlib `ProxyHandler` may honour `HTTPS_PROXY`. Verified directly: it is **absent** in a
+process with no proxy variables (the handler registers no methods and is dropped) and **present**
+in one that has them. So whether a response_url request traverses a proxy is a property of the
+deployment, not of this code. Classified non-blocking by the review and **left unchanged**;
+pinning it would change behaviour in a proxied network, which is an operator's decision. It is
+documented in the transport and recorded here so it is not mistaken for solved.
+
+#### Mutation-strength evidence (third remediation)
+
+Probes run against a copy under `/private/tmp/mka-mka-probe`, deleted afterwards; the repository
+source was never mutated.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R14 | remove the reservation's own lock | `2 failed` |
+| R15 | allow copy / deepcopy / pickle | `7 failed` |
+| R16 | raise the sanitized error inside the handler again | `13 failed` |
+| R17 | restore prefix-only path validation | `21 failed` |
+| R18 | permit encoded structural bytes | `11 failed` |
+| R19 | accept any `hooks.slack.com` path family | `4 failed` |
+
+Earlier probes on boundaries this round touched were re-run and still bite: R7 store lock
+(`2 failed`), R8 reserve-before-retrieval (`2 failed`), R9 userinfo (`3 failed`), R10 non-443 port
+(`2 failed`), R11 redirect (`3 failed`), R13 retry (`8 failed`).
+
+#### Verification (third remediation)
+
+- Comparable 23-file suite: **807 passed, 1 skipped, 0 failed** (unchanged from the previous round;
+  this round's additions are all in the capability suite).
+- Plus `tests/test_slack_response_urls.py` (24 files): **931 passed, 1 skipped**
+  (previous round: 884).
+- 25-file superset incl. `test_content_index_lineage.py`: **952 passed, 1 skipped**.
+- `tests/test_slack_structured_governance.py`: **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE** —
+  2 passed, 20 errors, the same pre-existing gitignored `.mka/content_index.sqlite` dependency.
+  Not claimed as passing.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin confirmed as
+  this worktree's `src`, with `pytest`, `pydantic` and `slack_bolt` all importable — the reviewer's
+  inability to run these suites was an environment limitation on their side, not a code fault.
+- No live Slack call; UAT bot not restarted; nothing pushed.
+
+### Independent Security Review R3 and the fourth remediation (2026-08-28)
+
+Reviewed candidate: `adc8f587c5ee755a797cee38a51cad21fc4700e2` (code+tests
+`a009e662b1b6532acc296389619dc32df2c87484`). Verdict **CHANGES_REQUESTED** — **2 blocking (P1)**
+and **1 nonblocking (P2)**. All three accepted, all three **reproduced against the reviewed
+candidate before any fix**.
+
+Earlier rounds' records are retained above unchanged. What R3 confirmed as still closed — the store
+`RLock`, atomic reserve, reserve-before-retrieval, copy/pickle refusal, host/userinfo/port and
+structural path validation, no-redirect, no-retry — is unchanged by this round and re-probed below.
+
+```text
+UAT_R1_SECURITY_REVIEW_3=CHANGES_REQUESTED
+UAT_R1_SECURITY_REVIEW_3_REVIEWED_CANDIDATE=adc8f587c5ee755a797cee38a51cad21fc4700e2
+UAT_R1_SECURITY_REVIEW_3_BLOCKING_FINDINGS=2
+UAT_R1_SECURITY_REVIEW_3_NONBLOCKING_FINDINGS=1
+UAT_R1_SECURITY_REVIEW_3_REMEDIATED=3
+UAT_R1_SECURITY_REVIEW_4=PENDING
+```
+
+This block is **this round's state**, not acceptance. No review has passed this candidate and no
+live UAT has been run against it.
+
+#### R3-1 (P1) — the capability survived in traceback frame locals
+
+**Reproduced first.** `__cause__` and `__context__` were both `None`, and the secret was still
+reachable: a *spent* reservation kept its `_url`, and handler frames hold the reservation, so an
+error reporter walking frame locals reads the capability straight off it.
+
+```text
+reservation in traceback frame: spent=True, _url retained=True
+old repr(f_locals) test finds it : (masked by ResponseReservation.__repr__)
+deep object walk finds it        : True
+```
+
+The previous test compared `repr(f_locals)`, and this class's own `__repr__` hides the URL — so the
+test was structurally incapable of seeing the leak it was meant to prevent.
+
+**Fix, in two parts.** `spend()` now transfers the URL **destructively** inside the same critical
+section that marks the reservation spent, so the only observable states are unspent-with-secret and
+spent-without-secret; there is no spent-with-secret window. And the HTTP attempt moved into a
+private helper that *returns* a non-secret status instead of raising, so the one frame that ever
+holds the URL and the `Request` never appears in a traceback. The boundary passes
+`reservation.spend()` straight into that helper, so the capability lives on the value stack rather
+than in `f_locals`.
+
+The new detector walks objects rather than reprs — `__slots__`, `__dict__`, containers, the
+URL-bearing attributes `urllib` uses — with cycle protection, across HTTP 400, HTTP 500, refused
+redirect, connection refusal and timeout. A control case compiles a deliberately leaky function
+into a *synthetic module namespace* and asserts the detector finds it; that indirection is
+necessary because the detector skips this test module's own frames, and an inline control was
+skipped by the same filter on the first attempt.
+
+#### R3-2 (P1) — pagination had a stale-generation race
+
+**Reproduced first**, both halves:
+
+```text
+new search installed, then worker A delivered: ['old-2']   <- stale page after supersession
+new continuation destroyed by stale pop      : True        <- worker A's unconditional pop
+```
+
+Ownership checks never applied: it is the same user, in the same session.
+
+**Fix.** Every continuation now carries an opaque server-minted **generation**, and every operation
+names the generation it believes it is working on. A stale generation reads nothing, advances
+nothing and removes nothing; the last page removes the entry only when it is still that
+generation's.
+
+Generation checks alone are not sufficient, because "read a valid page, a new search installs, then
+send" passes its check when it is made. A **per-lane guard** serialises consume-and-deliver against
+`start` for the same lane, leaving exactly two orderings — old page then new search, or new search
+then a stale click that refuses. The forbidden ordering is unreachable. The guard is per lane, so
+unrelated conversations never wait on each other, and the send happens in the caller's block rather
+than inside the store, which owns continuation state and not Slack transport.
+
+The generation is 32 hex characters, carries no query, conditions or user text, and **authorizes
+nothing on its own**: the clicker's user, channel and session still come from the interaction
+payload and the request token must still resolve for them.
+
+A dedicated generation was chosen over reusing the request token, which was the alternative the
+review raised: the token's TTL and the continuation's TTL are independent, and coupling them would
+let a token refresh silently change pagination identity.
+
+The `app_mention` flow has no button to carry a generation, so it uses
+`consume_current_generation`, which resolves and consumes in one critical section — a narrower
+guarantee than the slash flow's, but still enough that a worker cannot advance or delete a
+continuation installed after it read the lane.
+
+#### R3-3 (P2) — the reservation lock had no regression guard
+
+**Confirmed:** removing `with self._lock:` from `spend()` failed **no test** (`124 passed`). The
+earlier probe only bit because it also injected a `sleep`, which is not the same as the plain
+removal a refactor would make.
+
+Two deterministic white-box tests now swap the reservation's lock for a tracking one and assert the
+transition runs inside it, and that the state on entry is unspent-with-secret and on exit is
+spent-without-secret. The behavioural race test is kept alongside them: one proves the runtime
+outcome, the other proves the guard cannot silently disappear.
+
+#### Mutation-strength evidence (fourth remediation)
+
+Probes on a copy under `/private/tmp/mka-mka-probe`, deleted afterwards.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| R20 | keep `_url` on a spent reservation | `9 failed` |
+| R21 | raise the sanitized error inside the handler frame again | `11 failed` |
+| R22 | remove pagination synchronization | `2 failed` |
+| R23 | remove the generation comparison | `3 failed` |
+| R24 | restore an unconditional `pop` | `1 failed` |
+| R25 | make `has_more` key-only again | `1 failed` |
+| R26 | remove the reservation's spend lock only | `2 failed` |
+
+R24 is worth reading twice: it **did not** fail at first. With the store lock held across
+`consume_next_page`, a stale caller is turned away before it could reach the removal, so restoring
+an unconditional `pop` changes no observable behaviour today. That is a reason to pin the helper on
+its own terms — which the added test does — not a reason to drop a guard that keeps the removal
+correct if that critical section is ever narrowed.
+
+Representative earlier probes re-run and still biting: R7 store lock (`2 failed`), R8
+reserve-before-retrieval (`2 failed`), R11 redirect (`3 failed`), R15 copy/pickle (`7 failed`),
+R17 prefix-path (`21 failed`).
+
+#### Verification (fourth remediation)
+
+- Comparable 23-file suite: **818 passed, 1 skipped, 0 failed** (previous round: 807).
+- Plus `tests/test_slack_response_urls.py` (24 files): **953 passed, 1 skipped**
+  (previous round: 931).
+- 25-file superset incl. `test_content_index_lineage.py`: **974 passed, 1 skipped**.
+- `tests/test_slack_structured_governance.py`: **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE** —
+  2 passed, 20 errors, the same pre-existing gitignored `.mka/content_index.sqlite` dependency.
+  Not claimed as passing.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin confirmed as
+  this worktree's `src`.
+- No live Slack call; UAT bot not restarted; nothing pushed.
+
+### Final Security Review R4 and the supersession remediation (2026-08-28)
+
+Reviewed candidate: `67ba3a097bb457a8b7c210ccf8e6c6bedb519a7e`. R4 was a complete sweep and
+returned **CHANGES_REQUESTED** with **1 blocking finding** — the last reproducible P1. It was
+accepted, **reproduced against the reviewed candidate before any fix**, and is now guarded by tests
+proven to fail without it.
+
+R4 confirmed the R3 blockers as closed and unchanged by this round: the traceback/frame capability
+leak, and the pagination generation model covering `start` and 「顯示更多」 consume-and-deliver.
+
+```text
+FINAL_SECURITY_REVIEW_R4=CHANGES_REQUESTED
+FINAL_SECURITY_REVIEW_R4_REVIEWED_CANDIDATE=67ba3a097bb457a8b7c210ccf8e6c6bedb519a7e
+FINAL_SECURITY_REVIEW_R4_BLOCKING_FINDINGS=1
+FINAL_SECURITY_REVIEW_R4_REMEDIATED=1
+R3_TRACEBACK_BLOCKER=CLOSED
+R3_GENERATION_BLOCKER=CLOSED
+R4_1_EXACT_CLOSURE_VERIFICATION=PENDING
+```
+
+This block is **this round's state**, not acceptance. No review has passed this candidate and no
+live UAT has been run against it.
+
+#### R4 (P1) — refusal and no-pages supersession sat outside the lane contract
+
+**Reproduced first**, exactly as reported:
+
+```text
+1. NEW refusal delivered
+2. OLD page delivered (old-2)
+```
+
+The generation model covered `start` and 「顯示更多」, but the paths that superseded through a bare
+`pagination_store.discard` — a denylist refusal, an empty result, an unstructured reply, and a
+one-page result — took no lane guard at all. So a 「顯示更多」 that had already consumed its page
+could deliver it *after* the new response was out.
+
+Locking `discard` would not have closed it. The window is between the consume and the **send**, so
+the guard has to span the new search's whole response, exactly as it already spans a 「顯示更多」's
+consume-and-send.
+
+**Fix: one supersession primitive.** `supersede_lane(key)` takes the lane, clears whatever it holds,
+and keeps it until the caller's delivery is finished. Every new-search outcome goes through it —
+multi-page, one-page, empty, unstructured and refusal alike — and `start` is now the convenience
+form of the same contract rather than a second set of semantics. Two orderings remain and there is
+no third:
+
+| ordering | status |
+| --- | --- |
+| 「顯示更多」 owns the lane first → old page, then new response | allowed |
+| supersession owns the lane first → new response, stale click refuses | allowed |
+| new response delivered, then an old page | **unreachable** |
+
+Retrieval and the audit row stay *outside* the guard: the lane orders responses, and holding it
+across a search would serialize work that has nothing to do with ordering. Reserve-before-retrieval
+is unchanged.
+
+The old continuation is dropped on entry, so a failure during delivery leaves the lane invalidated
+rather than restoring a search the user has already moved past.
+
+#### Mutation-strength evidence (supersession remediation)
+
+Probes on a copy under `/private/tmp/mka-mka-probe`, deleted afterwards. Baseline: `238 passed`.
+
+| Probe | Mutation | Result |
+| --- | --- | --- |
+| S1 | refusal supersedes through a bare unguarded discard again | `3 failed` |
+| S2 | release the lane before the caller delivers | `1 failed` |
+| S3 | remove the generation comparison | `5 failed` |
+| S4 | restore an unconditional stale pop | `1 failed` |
+| S5 | one-page/no-pages search skips supersession | `7 failed` |
+
+S2 did not fail at first, and the reason is worth recording rather than papering over: the mutation
+still blocks on lane *entry*, so it cannot produce an old page — the old generation is gone either
+way. What an early release genuinely allows is a 「顯示更多」 on the **new** generation delivering
+page two while the new search is still delivering page one. A test for that overtaking case was
+added, and S2 now fails on it. The probe found a gap in the tests, not a second product defect.
+
+#### Verification (supersession remediation)
+
+- Comparable 23-file suite: **827 passed, 1 skipped, 0 failed** (previous round: 818).
+- Plus `tests/test_slack_response_urls.py` (24 files): **962 passed, 1 skipped**
+  (previous round: 953).
+- 25-file superset incl. `test_content_index_lineage.py`: **983 passed, 1 skipped**.
+- `tests/test_slack_structured_governance.py`: **NOT_RUN / SETUP_BLOCKED_BY_EXISTING_FIXTURE** —
+  2 passed, 20 errors, the same pre-existing gitignored `.mka/content_index.sqlite` dependency.
+  Not claimed as passing.
+- `compileall` over `src/` and `tests/`, and `git diff --check`: pass. Import origin confirmed as
+  this worktree's `src`.
+- Three files changed: `slack_pagination.py`, `slack_interface.py`,
+  `tests/test_slack_search_presentation_v2.py`.
+- No live Slack call; UAT bot not restarted; nothing pushed.
+
+### Superseded lock record: closed Slack Faceted Search MVP / no-unfurl milestone
+
+The lock below is the previous milestone's closure record. It is retained unchanged as that
+milestone's evidence; this WP does not alter its state, and `main` is still not updated.
+
 - State: released — no active implementer
 - Milestone state: CLOSED
 - Task: Slack Faceted Search MVP and Slack no-unfurl Human UAT remediation
-- Implementer: none — lock released; no next task assigned
+- Implementer: none
 - Review provenance:
   - Slack Faceted Search MVP Codex R3: `PASS_WITH_NONBLOCKING_FOLLOWUPS`; reviewed SHA
     `313fbf7ac2745f2397369db3e2129f1978e03bef`
@@ -826,7 +2036,28 @@ gives both options and prefers copying over moving, since PID 42332 is reading t
 
 ## Next exact action
 
-### For this WP (Slack Faceted Search MVP)
+### Current: Slack `/mka` Faceted-Only Search Entry
+
+**Controlled `/mka` UAT Activation.** Implementation, R1 remediation, R2 cleanup, Final Spot Review
+and Clean Integration Verification are all complete, and PR #5 is open against `main`. Nothing
+below is authorized by this record; each is its own gate and needs explicit authorization:
+
+1. create the `/mka` slash command in the Slack App Console;
+2. set `slack_search_entry_mode` to `slash_faceted_only` in `.mka/slack_config.json` (which also
+   requires `enable_faceted_search=true` and the pinned taxonomy workbook/sha pair);
+3. restart the Slack Bot;
+4. run Human UAT.
+
+Until then: the product is **not activated**, the Slack App Console is **unchanged**, the bot is
+**not started**, and `main` is **not updated**. Merging PR #5 by itself would still activate
+nothing, because the default entry mode is `mention_mixed` — today's behaviour bit-for-bit.
+
+The first things UAT should probe are the two live-Slack facts this code cannot establish on its
+own, both recorded in the spec: whether `chat.postEphemeral` succeeds in every conversation shape
+`/mka` can be invoked from (a bot that was never added to a channel can get `channel_not_found`),
+and whether Slack honours the unfurl flags on an ephemeral message.
+
+### Historical: Slack Faceted Search MVP (preceding milestone, closed)
 
 - No further action is outstanding. The MVP is reviewed and integrated, the no-unfurl remediation
   is merged through PR #3, post-merge verification passed, and the remediation is closed.
